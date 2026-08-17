@@ -41,7 +41,7 @@ as a runtime dependency.
 | First-person snap turn and headset-based movement | Optional 30/45/60-degree gamepad snap turn with continuous HMD-directed movement |
 | First-person combat handoff | Optional automatic switch to third person in combat |
 | Faster movement transitions | Optional and enabled by default in both third and first person |
-| 5:4 cinema framing | Enabled |
+| Cinema framing | 5:4, 4:3, or 16:9 from the launcher |
 | HMD-aware render-budget region | Implemented |
 | Native canted-display support | Uses each OpenXR eye pose directly; no parallel-projection workaround required |
 | Headset-aware HUD convergence | Derived automatically from OpenXR eye geometry for parallel and canted displays |
@@ -128,8 +128,9 @@ renaming any files; the change applies on the next game launch.
 If `witcher3vr.ini` does not exist, the launcher creates it automatically. The
 first run inherits the game's current supported AA choice as **Stereo No AA /
 FXAA**, **Stereo TAAU**, or **Stereo DLSS**. An unknown AA mode falls back to
-**Stereo No AA / FXAA**. Resolution defaults to **Ultra 2688 × 2784** and 5:4
-Cinema framing is enabled. Older INIs receive a one-time configuration update
+**Stereo No AA / FXAA**. Resolution defaults to **Ultra 2688 × 2784** and
+Cinema framing defaults to **5:4**. The launcher can also select **4:3** or
+**16:9**. Older INIs receive a one-time configuration update
 that preserves the selected rendering mode, resolution, Full VR cutscene
 choice, and unrelated custom settings. Later manual tuning is not overwritten
 at launcher startup.
