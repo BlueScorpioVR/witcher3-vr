@@ -163,6 +163,7 @@ void TestAllModes(const w3vr::ConfigPaths& paths) {
         state.presentation_scale = 0.85f;
         state.menu_scale = 0.75f;
         state.cinema_scale = 1.1f;
+        state.cinema_aspect = w3vr::CinemaAspectFromComboIndex(index % 3);
         state.cinema_hud_scale = 1.5f;
         state.cinema_hud_convergence_offset = 7;
         state.full_vr_hud_scale = 1.25f;
@@ -254,8 +255,13 @@ void TestAllModes(const w3vr::ConfigPaths& paths) {
             "Full VR HUD scale/automatic convergence mismatch");
         Require(vr.Get("openxr", "manual_cinema_hud_scale") == "1.600",
             "manual F10 HUD scale must remain independently tuned");
-        Require(vr.Get("openxr", "cinema_5x4") == "1",
-            "fixed cinema framing flag missing");
+        Require(vr.Get("openxr", "cinema_aspect") ==
+            std::string(w3vr::CinemaAspectKey(state.cinema_aspect)),
+            "cinema aspect missing");
+        Require(vr.Get("openxr", "cinema_5x4") ==
+            std::string(state.cinema_aspect == w3vr::CinemaAspect::FiveFour
+                ? "1" : "0"),
+            "legacy cinema framing flag mismatch");
         Require(vr.Get("meta", "config_version") == "6",
             "configuration version marker missing");
         Require(vr.Get("openxr", "cinema_full_vr") == "1",
@@ -327,6 +333,8 @@ void TestAllModes(const w3vr::ConfigPaths& paths) {
         Require(loaded.state.first_person_stationary_turn ==
             state.first_person_stationary_turn,
             "round-trip first-person stationary-turn mismatch");
+        Require(loaded.state.cinema_aspect == state.cinema_aspect,
+            "round-trip cinema aspect mismatch");
         Require(loaded.state.cinema_hud_scale == state.cinema_hud_scale &&
             loaded.state.cinema_hud_convergence_offset ==
                 state.cinema_hud_convergence_offset,
@@ -341,6 +349,22 @@ void TestAllModes(const w3vr::ConfigPaths& paths) {
         Require(loaded.state.diagnostic_logging,
             "round-trip diagnostic logging mismatch");
     }
+}
+
+void TestCinemaAspectParsing() {
+    Require(w3vr::ParseCinemaAspect("5:4") == w3vr::CinemaAspect::FiveFour &&
+        w3vr::ParseCinemaAspect("4:3") == w3vr::CinemaAspect::FourThree &&
+        w3vr::ParseCinemaAspect("16:9") == w3vr::CinemaAspect::SixteenNine &&
+        w3vr::ParseCinemaAspect("16x9") == w3vr::CinemaAspect::SixteenNine &&
+        w3vr::ParseCinemaAspect("unknown") == w3vr::CinemaAspect::FiveFour,
+        "cinema aspect parsing mismatch");
+    Require(std::string(w3vr::CinemaAspectKey(w3vr::CinemaAspect::FiveFour)) ==
+            "5:4" &&
+        std::string(w3vr::CinemaAspectKey(w3vr::CinemaAspect::FourThree)) ==
+            "4:3" &&
+        std::string(w3vr::CinemaAspectKey(w3vr::CinemaAspect::SixteenNine)) ==
+            "16:9",
+        "cinema aspect key mismatch");
 }
 
 void TestProportionalCutsceneConvergence() {
@@ -365,6 +389,8 @@ void TestReleaseDefaults() {
             defaults.full_vr_hud_scale,
             defaults.full_vr_hud_convergence_offset) == -36,
         "Full VR cutscene HUD must default to size 1.0 at gameplay depth");
+    Require(defaults.cinema_aspect == w3vr::CinemaAspect::FiveFour,
+        "cinema aspect must default to 5:4");
     Require(defaults.cinema_full_vr,
         "automatic Full VR cutscenes must default to enabled");
     Require(!defaults.steady_icons,
@@ -890,6 +916,7 @@ int main() {
         TempDirectory temporary;
         const auto paths = MakePaths(temporary.path);
         TestDlssNearSquareResolutionCompatibility();
+        TestCinemaAspectParsing();
         TestProportionalCutsceneConvergence();
         TestReleaseDefaults();
         TestHudEditorSetup(temporary.path);

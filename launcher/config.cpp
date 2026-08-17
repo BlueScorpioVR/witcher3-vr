@@ -773,6 +773,49 @@ bool ModeUsesDlss(RenderMode mode) {
         mode == RenderMode::StereoDlssSequential;
 }
 
+const char* CinemaAspectKey(CinemaAspect aspect) {
+    switch (aspect) {
+        case CinemaAspect::FourThree:
+            return "4:3";
+        case CinemaAspect::SixteenNine:
+            return "16:9";
+        default:
+            return "5:4";
+    }
+}
+
+CinemaAspect ParseCinemaAspect(const std::string& value) {
+    const auto normalized = Lower(Trim(value));
+    if (normalized == "4:3" || normalized == "4x3" || normalized == "4/3") {
+        return CinemaAspect::FourThree;
+    }
+    if (normalized == "16:9" || normalized == "16x9" || normalized == "16/9") {
+        return CinemaAspect::SixteenNine;
+    }
+    return CinemaAspect::FiveFour;
+}
+
+int CinemaAspectComboIndex(CinemaAspect aspect) {
+    switch (aspect) {
+        case CinemaAspect::FourThree:
+            return 1;
+        case CinemaAspect::SixteenNine:
+            return 2;
+        default:
+            return 0;
+    }
+}
+
+CinemaAspect CinemaAspectFromComboIndex(int index) {
+    if (index == 1) {
+        return CinemaAspect::FourThree;
+    }
+    if (index == 2) {
+        return CinemaAspect::SixteenNine;
+    }
+    return CinemaAspect::FiveFour;
+}
+
 int CinemaHudConvergenceShift(float hud_scale, int offset) {
     return ProportionalHudConvergenceShift(
         hud_scale, kCinemaHudReferenceScale,
@@ -1067,6 +1110,13 @@ LoadResult LoadConfiguration(const ConfigPaths& paths) {
     result.state.cinema_scale = std::clamp(
         ReadFloat(*vr, "openxr", "cinema_scale", result.state.menu_scale),
         0.3f, 1.5f);
+    if (const auto cinema_aspect = vr->Get("openxr", "cinema_aspect")) {
+        result.state.cinema_aspect = ParseCinemaAspect(*cinema_aspect);
+    } else {
+        result.state.cinema_aspect = ReadBool(*vr, "openxr", "cinema_5x4", true)
+            ? CinemaAspect::FiveFour
+            : CinemaAspect::SixteenNine;
+    }
     result.state.cinema_hud_scale = std::clamp(
         ReadFloat(*vr, "openxr", "cinema_hud_scale", 1.30f), 0.5f, 1.5f);
     result.state.cinema_hud_convergence_offset = std::clamp(
@@ -1163,9 +1213,9 @@ bool BuildUpdatedDocuments(const ConfigPaths& paths, const LauncherState& state,
             state.full_vr_hud_convergence_offset)));
     vr_ini.Set("openxr", "vertical_pitch_enabled",
         state.vertical_pitch_enabled ? "1" : "0");
-    // Cinema framing is intentionally fixed in the launcher. Keep the INI key
-    // because the renderer still consumes it and advanced users can inspect it.
-    vr_ini.Set("openxr", "cinema_5x4", "1");
+    vr_ini.Set("openxr", "cinema_aspect", CinemaAspectKey(state.cinema_aspect));
+    vr_ini.Set("openxr", "cinema_5x4",
+        state.cinema_aspect == CinemaAspect::FiveFour ? "1" : "0");
     vr_ini.Set("openxr", "cinema_full_vr",
         state.cinema_full_vr ? "1" : "0");
     vr_ini.Set("openxr", "steady_icons", state.steady_icons ? "1" : "0");

@@ -92,6 +92,12 @@ enum class TemporalBackend : uint8_t {
     DlssPacked,
 };
 
+enum class CinemaAspect {
+    FiveFour,
+    FourThree,
+    SixteenNine,
+};
+
 struct Config {
     bool openxr_enabled{true};
     int openxr_mode{2};
@@ -110,6 +116,7 @@ struct Config {
     float hud_size{1.0f};
     float menu_scale{0.7f};
     float cinema_scale{0.7f};
+    CinemaAspect cinema_aspect{CinemaAspect::FiveFour};
     bool cinema_5x4{false};
     bool cinema_full_vr{false};
     bool steady_icons{false};
@@ -265,6 +272,45 @@ struct Config {
 };
 
 Config g_config{};
+
+CinemaAspect parse_cinema_aspect(const std::string& value) {
+    if (value == "4:3" || value == "4x3" || value == "4/3") {
+        return CinemaAspect::FourThree;
+    }
+    if (value == "16:9" || value == "16x9" || value == "16/9") {
+        return CinemaAspect::SixteenNine;
+    }
+    return CinemaAspect::FiveFour;
+}
+
+float cinema_projection_aspect() {
+    switch (g_config.cinema_aspect) {
+        case CinemaAspect::FourThree:
+            return 4.0f / 3.0f;
+        case CinemaAspect::SixteenNine:
+            return 16.0f / 9.0f;
+        default:
+            return 5.0f / 4.0f;
+    }
+}
+
+float cinema_panel_height_over_width() {
+    return 1.0f / cinema_projection_aspect();
+}
+
+void cinema_panel_extents(float scale, float& width, float& height) {
+    height = 1.6f * scale * 0.8f;
+    width = height * cinema_projection_aspect();
+}
+
+float cinema_panel_local_y() {
+    if (!g_config.cinema_5x4 ||
+        g_config.cinema_aspect == CinemaAspect::FiveFour) {
+        return 0.0f;
+    }
+    return -0.08f * g_config.cinema_scale;
+}
+
 bool g_clean_mode3_indexed_draw_fast_path{};
 bool g_clean_mode3_resource_barrier_fast_path{};
 bool g_packed_hang_diagnostics_enabled{};
@@ -854,10 +900,11 @@ bool derive_pixel_exact_fov(
     return true;
 }
 
-// [FIX:VISIBILITY-MASK-FIT 1/7] Fit a centered REDengine projection around
-// optical zero which covers the runtime's complete visible mask. Any black
-// target pixels are therefore outside the lens aperture. When the extension is
-// unavailable, conservatively cover the complete rectangular runtime FOV.
+// Fit a centered REDengine projection around optical zero. Cover the
+// lens visibility mask when it is inside the current xrLocateViews FOV,
+// but never render wider than that FOV. Virtual Desktop's H/V sliders
+// shrink locate-views while the physical mask stays full-lens; exceeding
+// it would crop/zoom instead of resizing the view.
 PresentationProjectionScales presentation_projection_scales(
     float left, float right, float down, float up) {
     const float selected_scale = std::clamp(
@@ -873,22 +920,24 @@ PresentationProjectionScales presentation_projection_scales(
         horizontal_span > 0.01f && vertical_span > 0.01f) {
         const bool visibility_valid =
             g_xr_visibility_bounds_valid.load(std::memory_order_acquire);
-        const float half_tan_x = visibility_valid
+        const float runtime_half_x = std::max(-left, right);
+        const float runtime_half_y = std::max(-down, up);
+        const float mask_half_x = visibility_valid
             ? g_xr_visibility_half_tan_x.load(std::memory_order_acquire)
-            : std::max(-left, right);
-        const float half_tan_y = visibility_valid
+            : runtime_half_x;
+        const float mask_half_y = visibility_valid
             ? g_xr_visibility_half_tan_y.load(std::memory_order_acquire)
-            : std::max(-down, up);
-        if (half_tan_x > 0.001f && half_tan_y > 0.001f) {
+            : runtime_half_y;
+        const float cover_half_x = std::min(mask_half_x, runtime_half_x);
+        const float cover_half_y = std::min(mask_half_y, runtime_half_y);
+        if (cover_half_x > 0.001f && cover_half_y > 0.001f) {
+            const float fit_x = std::min(
+                2.0f * cover_half_x / horizontal_span, 1.0f);
+            const float fit_y = std::min(
+                2.0f * cover_half_y / vertical_span, 1.0f);
             return {
-                std::clamp(
-                    2.0f * half_tan_x /
-                        horizontal_span * selected_scale,
-                    0.01f, 2.0f),
-                std::clamp(
-                    2.0f * half_tan_y /
-                        vertical_span * selected_scale,
-                    0.01f, 2.0f)};
+                std::clamp(fit_x * selected_scale, 0.01f, 1.0f),
+                std::clamp(fit_y * selected_scale, 0.01f, 1.0f)};
         }
     }
     const float cover_scale = presentation_render_fov_scale();
@@ -5568,8 +5617,11 @@ void load_config() {
         g_config.cinema_scale = std::clamp(
             read_ini_float("openxr", "cinema_scale", g_config.menu_scale),
             0.3f, 1.5f);
-        g_config.cinema_5x4 = read_ini_bool(
-            "openxr", "cinema_5x4", false);
+        const auto cinema_aspect_text = read_ini_string(
+            "openxr", "cinema_aspect", "");
+        g_config.cinema_aspect = parse_cinema_aspect(cinema_aspect_text);
+        g_config.cinema_5x4 = !cinema_aspect_text.empty() ||
+            read_ini_bool("openxr", "cinema_5x4", false);
         g_config.cinema_full_vr = read_ini_bool(
             "openxr", "cinema_full_vr", false);
         g_config.steady_icons = read_ini_bool(
@@ -6229,10 +6281,10 @@ IDxcBlob* compile_hud_composite_pixel_shader(
 
     char shader_source[4096]{};
     if (presentation_aspect > 0.1f) {
-        // [FIX:CINEMA-HUD-ASPECT 1/2] The normal cinema panel presents the
-        // portrait render texture on a 5:4 surface. Pre-compress only HUD X by
-        // source_aspect / 1.25; the later panel stretch then restores square
-        // HUD proportions while the already-correct 5:4 scene is untouched.
+        // [FIX:CINEMA-HUD-ASPECT 1/2] The cinema panel presents the portrait
+        // render texture on the selected aspect. Pre-compress only HUD X by
+        // source_aspect / panel_aspect; the later panel stretch then restores
+        // square HUD proportions while the scene stays on that aspect.
         sprintf_s(shader_source, R"(
 Texture2D<float4> scene_texture : register(t0);
 Texture2D<float4> hud_texture : register(t1);
@@ -12027,25 +12079,22 @@ HRESULT STDMETHODCALLTYPE hook_create_graphics_pipeline_state(
                 compile_hud_composite_pixel_shader(
                     g_config.cinema_hud_stereo_shift_px,
                     g_config.hud_size * g_config.manual_cinema_hud_scale,
-                    g_config.cinema_5x4 ? 5.0f / 4.0f : 0.0f);
+                    g_config.cinema_5x4 ? cinema_projection_aspect() : 0.0f);
             IDxcBlob* cinema_eye1_shader =
                 compile_hud_composite_pixel_shader(
                     -g_config.cinema_hud_stereo_shift_px,
                     g_config.hud_size * g_config.manual_cinema_hud_scale,
-                    g_config.cinema_5x4 ? 5.0f / 4.0f : 0.0f);
-            // Automatic Cinema keeps the established 5:4 compensation, then
-            // enlarges the complete HUD composite by 30 percent. Manual F10
-            // uses its independent INI scale in the Cinema variants above.
+                    g_config.cinema_5x4 ? cinema_projection_aspect() : 0.0f);
             IDxcBlob* auto_cinema_eye0_shader =
                 compile_hud_composite_pixel_shader(
                     g_config.cinema_hud_stereo_shift_px,
                     g_config.hud_size * 1.30f,
-                    g_config.cinema_5x4 ? 5.0f / 4.0f : 0.0f);
+                    g_config.cinema_5x4 ? cinema_projection_aspect() : 0.0f);
             IDxcBlob* auto_cinema_eye1_shader =
                 compile_hud_composite_pixel_shader(
                     -g_config.cinema_hud_stereo_shift_px,
                     g_config.hud_size * 1.30f,
-                    g_config.cinema_5x4 ? 5.0f / 4.0f : 0.0f);
+                    g_config.cinema_5x4 ? cinema_projection_aspect() : 0.0f);
             IDxcBlob* scene_shader = mode3_stereo_transport_active()
                 ? compile_mode3_scene_only_pixel_shader()
                 : nullptr;
@@ -23330,16 +23379,17 @@ bool prepare_cinema_frame_camera(
         return false;
     }
 
-    constexpr float kCinemaProjectionAspect = 5.0f / 4.0f;
-    // A normally rebuilt cinema camera already carries 5:4 here. The resumed
-    // post-fight scene is distinctive because frame_data keeps the old native
-    // 16:9-ish descriptor and the view factory is not called again.
-    if (fabsf(original_camera[10] - kCinemaProjectionAspect) <= 0.001f) {
+    const float cinema_aspect = cinema_projection_aspect();
+    // A normally rebuilt cinema camera already carries the selected aspect
+    // here. The resumed post-fight scene is distinctive because frame_data
+    // keeps the old native 16:9-ish descriptor and the view factory is not
+    // called again.
+    if (fabsf(original_camera[10] - cinema_aspect) <= 0.001f) {
         return false;
     }
 
     std::array<float, 512> corrected = original_camera;
-    corrected[10] = kCinemaProjectionAspect;
+    corrected[10] = cinema_aspect;
     const std::array<float, 12> base_camera{
         corrected[0], corrected[1], corrected[2],
         corrected[0xA0], corrected[0xA1], corrected[0xA2],
@@ -26164,7 +26214,7 @@ bool prepare_engine_per_eye_native_temporal_history(
 void __fastcall hook_engine_view_rebuild(float* view) {
     constexpr uintptr_t kViewFactoryReturnRva = 0x0162196D;
     constexpr uintptr_t kViewCopyRebuildReturnRva = 0x015FF863;
-    constexpr float kCinemaProjectionAspect = 5.0f / 4.0f;
+    const float kCinemaProjectionAspect = cinema_projection_aspect();
     const auto module = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     const auto caller_rva = reinterpret_cast<uintptr_t>(_ReturnAddress()) - module;
     const auto present = g_present_count.load();
@@ -27219,10 +27269,10 @@ void __fastcall hook_engine_view_rebuild(float* view) {
             view[14], std::memory_order_relaxed);
     }
 
-    // [FIX:CINEMA-5X4 2/3] Apply the same 5:4 aspect used by the OpenXR quad
+    // [FIX:CINEMA-5X4 2/3] Apply the same aspect used by the OpenXR quad
     // at the final camera boundary, after the optional HMD FOV calculation.
-    // This preserves automatic cinema exit detection while preventing either
-    // the old 16:9 value or the gameplay HMD aspect from reaching the rebuild.
+    // This preserves automatic cinema exit detection while preventing the
+    // gameplay HMD aspect from reaching the rebuild.
     if (cinema_projection) {
         view[10] = kCinemaProjectionAspect;
     }
@@ -32640,6 +32690,7 @@ bool initialize_anchored_cinema_projection_pipeline(
     static constexpr char kVertexShader[] = R"(
 cbuffer PanelVertices : register(b0) {
     float4 clip_positions[4];
+    float4 uv_rect;
 };
 struct VertexOutput {
     float4 position : SV_Position;
@@ -32653,7 +32704,7 @@ VertexOutput vs_main(uint vertex_id : SV_VertexID) {
     uint corner = indices[vertex_id];
     VertexOutput output;
     output.position = clip_positions[corner];
-    output.uv = uvs[corner];
+    output.uv = lerp(uv_rect.xy, uv_rect.zw, uvs[corner]);
     return output;
 }
 )";
@@ -32674,9 +32725,17 @@ float3 srgb_to_linear(float3 value) {
         step(value, float3(0.04045, 0.04045, 0.04045)));
 }
 float4 ps_main(PixelInput input) : SV_Target0 {
+    uint source_width, source_height;
+    cinema_texture.GetDimensions(source_width, source_height);
+    float2 source_size = float2(source_width, source_height);
+    float2 texel = 1.0 / max(source_size, 1.0);
+    float2 uv = saturate(input.uv) * (1.0 - 2.0 * texel) + texel;
     float4 cinema = cinema_texture.SampleLevel(
-        linear_sampler, saturate(input.uv), 0.0);
-    cinema.rgb = srgb_to_linear(cinema.rgb);
+        linear_sampler, uv, 0.0);
+    if (!all(isfinite(cinema.rgb))) {
+        return float4(0.0, 0.0, 0.0, 1.0);
+    }
+    cinema.rgb = srgb_to_linear(saturate(cinema.rgb));
     cinema.a = 1.0;
     return cinema;
 }
@@ -32743,7 +32802,7 @@ float4 ps_main(PixelInput input) : SV_Target0 {
     parameters[1].ParameterType =
         D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     parameters[1].Constants.ShaderRegister = 0;
-    parameters[1].Constants.Num32BitValues = 16;
+    parameters[1].Constants.Num32BitValues = 20;
     parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
     D3D12_STATIC_SAMPLER_DESC sampler{};
     sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
@@ -33006,8 +33065,15 @@ bool render_anchored_cinema_projection(
             g_xr_cinema_projection_srv_increment;
         g_set_graphics_root_descriptor_table(
             g_xr_command_list, 0, srv_gpu);
+        float panel_constants[20]{};
+        memcpy(panel_constants, clip_positions[eye].data(),
+            16 * sizeof(float));
+        panel_constants[16] = 0.0f;
+        panel_constants[17] = 0.0f;
+        panel_constants[18] = 1.0f;
+        panel_constants[19] = 1.0f;
         g_xr_command_list->SetGraphicsRoot32BitConstants(
-            1, 16, clip_positions[eye].data(), 0);
+            1, 20, panel_constants, 0);
         g_xr_command_list->OMSetRenderTargets(
             1, &rtv, FALSE, nullptr);
         g_draw_instanced(g_xr_command_list, 6, 1, 0, 0);
@@ -33127,13 +33193,14 @@ bool render_supersampled_fit_projection(
         const float bottom =
             1.0f - 2.0f * rect.bottom /
                 static_cast<float>(target_swapchain.height);
-        const float clip_positions[16]{
+        const float clip_positions[20]{
             left, top, 0.5f, 1.0f,
             right, top, 0.5f, 1.0f,
             left, bottom, 0.5f, 1.0f,
-            right, bottom, 0.5f, 1.0f};
+            right, bottom, 0.5f, 1.0f,
+            0.0f, 0.0f, 1.0f, 1.0f};
         g_xr_command_list->SetGraphicsRoot32BitConstants(
-            1, 16, clip_positions, 0);
+            1, 20, clip_positions, 0);
         const auto rtv = target_swapchain.rtvs[
             image_index * 2 + eye];
         g_xr_command_list->OMSetRenderTargets(
@@ -35432,7 +35499,7 @@ void render_openxr_test_frame(
                 current_panel_views[1].pose.position.z) * 0.5f};
         const auto panel_offset = rotate_vector(
             cinema_projection_anchor.orientation,
-            XrVector3f{0.0f, 0.0f, -g_config.menu_distance});
+            XrVector3f{0.0f, cinema_panel_local_y(), -g_config.menu_distance});
         cinema_projection_anchor.position = {
             head_position.x + panel_offset.x,
             head_position.y + panel_offset.y,
@@ -35461,8 +35528,6 @@ void render_openxr_test_frame(
     ProjectionFloatRect projection_eye_float_fit_rects[2]{};
     bool projection_eye_float_fit_rect_valid{};
     bool symmetric_subimage_copy{};
-    bool scaled_fov_projection{};
-    bool scaled_fov_direct_copy{};
     bool native_asymmetric_projection{};
     bool native_asymmetric_direct_copy{};
     bool native_asymmetric_black_frame{};
@@ -35777,12 +35842,21 @@ void render_openxr_test_frame(
                 const float effective_vertical_scale = std::max(
                     legacy_presentation_scale,
                     static_cast<float>(copy_height) / swapchain.height);
-                const UINT projection_width = std::min(swapchain.width,
+                UINT projection_width = std::min(swapchain.width,
                     std::max(copy_width, static_cast<UINT>(lroundf(
                         static_cast<float>(copy_width) / effective_horizontal_scale))));
-                const UINT projection_height = std::min(swapchain.height,
+                UINT projection_height = std::min(swapchain.height,
                     std::max(copy_height, static_cast<UINT>(lroundf(
                         static_cast<float>(copy_height) / effective_vertical_scale))));
+                // Virtual Desktop and Quest report fovMutable=false, so a
+                // reduced Presentation value must keep xrLocateViews' FOV and
+                // letterbox the smaller REDengine image inside a full-FOV
+                // swapchain. The extra pixels were already allocated as
+                // source/presentation_scale.
+                if (full_surface_projection && requested_scale < 0.9999f) {
+                    projection_width = swapchain.width;
+                    projection_height = swapchain.height;
+                }
                 projection_image_rect.offset = {
                     static_cast<int32_t>((swapchain.width - projection_width) / 2),
                     static_cast<int32_t>((swapchain.height - projection_height) / 2)};
@@ -35972,43 +36046,12 @@ void render_openxr_test_frame(
                         projection_eye_image_rect_valid[1] = true;
                     }
 
-                    // [FIX:PRESENTATION-SCALE-FOV 1/5] Below 1.0 the source
-                    // represents the smaller symmetric FOV built by
-                    // REDengine. Submit that exact FOV to OpenXR instead of
-                    // drawing it into the raw runtime FOV. Direct copy and
-                    // shader fallback share the same target rectangle; only
-                    // their texture transport differs.
-                    scaled_fov_projection = requested_scale < 0.9999f;
-                    if (scaled_fov_projection) {
-                        const XrRect2Di scaled_rect{
-                            {static_cast<int32_t>(centered_x),
-                             static_cast<int32_t>(centered_y)},
-                            {static_cast<int32_t>(copy_width),
-                             static_cast<int32_t>(copy_height)}};
-                        for (uint32_t eye = 0; eye < 2; ++eye) {
-                            projection_eye_image_rects[eye] = scaled_rect;
-                            projection_eye_image_rect_valid[eye] = true;
-                            projection_eye_fit_rects[eye] = scaled_rect;
-                            projection_eye_float_fit_rects[eye] = {
-                                static_cast<float>(scaled_rect.offset.x),
-                                static_cast<float>(scaled_rect.offset.y),
-                                static_cast<float>(scaled_rect.offset.x +
-                                    scaled_rect.extent.width),
-                                static_cast<float>(scaled_rect.offset.y +
-                                    scaled_rect.extent.height)};
-                        }
-                        projection_eye_fit_rect_valid = true;
-                        projection_eye_float_fit_rect_valid = true;
-                        scaled_fov_direct_copy = true;
-                        symmetric_subimage_copy = false;
-                    }
-                    // [FIX:CONTINUOUS-TANGENT-FIT 2/2] At scale 1 prefer the
-                    // continuous shader placement even when a format-compatible
-                    // 1:1 crop exists. XrRect2Di cannot express the fractional
-                    // tangent boundary, whereas the quad can; this also keeps
-                    // the runtime-provided FOV unchanged on every headset.
-                    if (!scaled_fov_projection &&
-                        projection_eye_float_fit_rect_valid) {
+                    // Prefer the continuous shader placement even when a
+                    // format-compatible 1:1 crop exists. XrRect2Di cannot
+                    // express the fractional tangent boundary, whereas the
+                    // quad can; this also keeps the runtime-provided FOV
+                    // unchanged at every Presentation value.
+                    if (projection_eye_float_fit_rect_valid) {
                         symmetric_subimage_copy = false;
                         projection_eye_image_rect_valid[0] = false;
                         projection_eye_image_rect_valid[1] = false;
@@ -36338,7 +36381,7 @@ void render_openxr_test_frame(
                     asymmetric_submit_copy_height[eye] = copy_height;
                 }
                 const bool target_desc_needed =
-                    symmetric_subimage_copy || scaled_fov_direct_copy ||
+                    symmetric_subimage_copy ||
                     native_asymmetric_noaa_route_active();
                 D3D12_RESOURCE_DESC target_desc{};
                 if (target_desc_needed) {
@@ -36456,8 +36499,6 @@ void render_openxr_test_frame(
                 if (native_asymmetric_projection) {
                     full_surface_projection = true;
                     symmetric_subimage_copy = false;
-                    scaled_fov_projection = false;
-                    scaled_fov_direct_copy = false;
                     projection_image_rect = menu_image_rect;
                     for (uint32_t eye = 0; eye < 2; ++eye) {
                         projection_eye_image_rects[eye] =
@@ -36513,14 +36554,12 @@ void render_openxr_test_frame(
                     }
                 }
 
-                if (symmetric_subimage_copy || scaled_fov_direct_copy ||
+                if (symmetric_subimage_copy ||
                     native_asymmetric_direct_copy) {
                     for (uint32_t eye = 0; eye < 2; ++eye) {
                         if (fit_projection_sources[eye] == nullptr) {
                             if (native_asymmetric_direct_copy) {
                                 native_asymmetric_direct_copy = false;
-                            } else if (scaled_fov_projection) {
-                                scaled_fov_direct_copy = false;
                             } else {
                                 symmetric_subimage_copy = false;
                             }
@@ -36541,16 +36580,13 @@ void render_openxr_test_frame(
                                 eye_desc.Format, target_desc.Format)) {
                             if (native_asymmetric_direct_copy) {
                                 native_asymmetric_direct_copy = false;
-                            } else if (scaled_fov_projection) {
-                                scaled_fov_direct_copy = false;
                             } else {
                                 symmetric_subimage_copy = false;
                             }
                             break;
                         }
                     }
-                    if (!symmetric_subimage_copy &&
-                        !scaled_fov_projection) {
+                    if (!symmetric_subimage_copy) {
                         if (!native_asymmetric_projection) {
                             projection_eye_image_rect_valid[0] = false;
                             projection_eye_image_rect_valid[1] = false;
@@ -36563,14 +36599,12 @@ void render_openxr_test_frame(
                     if (!symmetric_subimage_route_logged.exchange(true)) {
                         log_line(
                             "V1046 presentation route scale=%.3f "
-                            "scale1_direct=%d scaled_fov=%d scaled_direct=%d "
-                            "native_asymmetric=%d native_direct=%d "
+                            "scale1_direct=%d native_asymmetric=%d "
+                            "native_direct=%d "
                             "crop0=%d,%d %dx%d crop1=%d,%d %dx%d "
                             "source=%ux%u target=%ux%u",
                             requested_scale,
                             symmetric_subimage_copy ? 1 : 0,
-                            scaled_fov_projection ? 1 : 0,
-                            scaled_fov_direct_copy ? 1 : 0,
                             native_asymmetric_projection ? 1 : 0,
                             native_asymmetric_direct_copy ? 1 : 0,
                             projection_eye_image_rects[0].offset.x,
@@ -36683,7 +36717,6 @@ void render_openxr_test_frame(
                     // crop from this shared 1:1 placement below.
                     if ((!full_surface_projection ||
                             symmetric_subimage_copy ||
-                            scaled_fov_direct_copy ||
                             native_asymmetric_direct_copy) &&
                         shifted_width > 0 && shifted_height > 0) {
                         g_xr_command_list->CopyTextureRegion(
@@ -36696,7 +36729,6 @@ void render_openxr_test_frame(
 
                 if ((!full_surface_projection ||
                         symmetric_subimage_copy ||
-                        scaled_fov_direct_copy ||
                         native_asymmetric_direct_copy ||
                         native_asymmetric_black_frame) &&
                     live_backbuffer_source) {
@@ -36709,11 +36741,10 @@ void render_openxr_test_frame(
 
                 bool fit_projection_ready = native_asymmetric_black_frame ||
                     !full_surface_projection ||
-                    symmetric_subimage_copy || scaled_fov_direct_copy ||
+                    symmetric_subimage_copy ||
                     native_asymmetric_direct_copy;
                 if (full_surface_projection &&
                     !symmetric_subimage_copy &&
-                    !scaled_fov_direct_copy &&
                     !native_asymmetric_direct_copy &&
                     !native_asymmetric_black_frame) {
                     fit_projection_ready = projection_eye_fit_rect_valid &&
@@ -36724,10 +36755,9 @@ void render_openxr_test_frame(
                             projection_eye_float_fit_rects);
                     if (!fit_projection_ready) {
                         log_line(
-                            "V1046 fallback projection render failed image=%u present=%llu scaled_fov=%d native_asymmetric=%d",
+                            "V1046 fallback projection render failed image=%u present=%llu native_asymmetric=%d",
                             image_index,
                             static_cast<unsigned long long>(current_present),
-                            scaled_fov_projection ? 1 : 0,
                             native_asymmetric_projection ? 1 : 0);
                     }
                     if (live_backbuffer_source) {
@@ -36764,17 +36794,17 @@ void render_openxr_test_frame(
                             current_present >= projection_last
                         ? current_present - projection_last
                         : UINT64_MAX;
-                    const bool use_5x4 = g_config.cinema_5x4 &&
+                    const bool use_forced_cinema_aspect = g_config.cinema_5x4 &&
                         projection_age <= kCinemaProjectionAspectMaxAge;
-                    const float panel_width =
-                        1.6f * g_config.cinema_scale;
-                    const float source_height_over_width = copy_width > 0
+                    float panel_width = 1.6f * g_config.cinema_scale;
+                    float panel_height = panel_width * (copy_width > 0
                         ? static_cast<float>(copy_height) /
                             static_cast<float>(copy_width)
-                        : 1.0f;
-                    const float panel_height = panel_width *
-                        (use_5x4 ? 4.0f / 5.0f
-                                 : source_height_over_width);
+                        : 1.0f);
+                    if (use_forced_cinema_aspect) {
+                        cinema_panel_extents(
+                            g_config.cinema_scale, panel_width, panel_height);
+                    }
                     cinema_projection_panel_ready =
                         render_anchored_cinema_projection(
                             swapchain, image_index,
@@ -36923,24 +36953,6 @@ void render_openxr_test_frame(
                 } else if (native_asymmetric_projection) {
                     projection_views[eye].fov =
                         g_packed_present_cache_views[render_source_eye].fov;
-                } else if (scaled_fov_projection) {
-                    // [FIX:PRESENTATION-SCALE-FOV 4/5] Pair both the direct
-                    // and fallback transports with the exact symmetric FOV
-                    // that generated the REDengine texture.
-                    projection_views[eye].fov = {
-                        g_hmd_render_fov_left.load(
-                            std::memory_order_acquire),
-                        g_hmd_render_fov_right.load(
-                            std::memory_order_acquire),
-                        g_hmd_render_fov_up.load(
-                            std::memory_order_acquire),
-                        g_hmd_render_fov_down.load(
-                            std::memory_order_acquire)};
-                } else if (full_surface_projection) {
-                    projection_views[eye].fov =
-                        mode == 2 && eye < g_xr_views.size()
-                        ? g_xr_views[eye].fov
-                        : render_view->fov;
                 } else {
                     projection_views[eye].fov =
                         mode == 2 && eye < g_xr_views.size()
@@ -36956,7 +36968,6 @@ void render_openxr_test_frame(
                 } else if (full_surface_projection) {
                     projection_views[eye].subImage.imageRect =
                         (symmetric_subimage_copy ||
-                            scaled_fov_projection ||
                             native_asymmetric_projection) &&
                             projection_eye_image_rect_valid[eye]
                         ? projection_eye_image_rects[eye]
@@ -36978,11 +36989,10 @@ void render_openxr_test_frame(
                         static_cast<int32_t>(submitted_height)};
                 }
 
-                // [FIX:CONTINUOUS-TANGENT-FIT 1/2] The shader fallback places
-                // the source at exact floating-point tangent coordinates, so
-                // it retains xrLocateViews' original FOV at scale 1 and the
-                // exact symmetric render FOV below scale 1. Only a true 1:1
-                // integer subimage crop needs a FOV derived from its pixel
+                // The shader fallback places the source at exact
+                // floating-point tangent coordinates and always retains
+                // xrLocateViews' original FOV. Only a true 1:1 integer
+                // subimage crop needs a FOV derived from its pixel
                 // boundaries.
                 if (full_surface_projection &&
                     symmetric_subimage_copy &&
@@ -37060,7 +37070,7 @@ void render_openxr_test_frame(
                             "source_resource=%p resource_extent=%llux%u format=%u "
                             "copy_extent=%ux%u swapchain=%ux%u image_rect=%d,%d,%d,%d "
                             "projection_rect=%d,%d,%d,%d float_fit=%.9g,%.9g,%.9g,%.9g "
-                            "copy_shift=%d,%d direct=%u scaled=%u native=%u "
+                            "copy_shift=%d,%d direct=%u native=%u "
                             "native_direct=%u float_fit_valid=%u "
                             "expected_valid=%u expected_fov_aspect=%.9g,%.9g "
                             "expected_ndc=%.9g,%.9g optical_px=%.9g,%.9g "
@@ -37107,7 +37117,6 @@ void render_openxr_test_frame(
                             projection_eye_shifts_x_px[eye],
                             projection_eye_shifts_y_px[eye],
                             symmetric_subimage_copy ? 1u : 0u,
-                            scaled_fov_projection ? 1u : 0u,
                             native_asymmetric_projection ? 1u : 0u,
                             native_asymmetric_direct_copy ? 1u : 0u,
                             projection_eye_float_fit_rect_valid ? 1u : 0u,
@@ -37282,7 +37291,11 @@ void render_openxr_test_frame(
                 anchor_views[1].pose.position.z) * 0.5f};
         const auto panel_offset = rotate_vector(
             anchored_panel_pose.orientation,
-            XrVector3f{0.0f, 0.0f, -g_config.menu_distance});
+            XrVector3f{
+                0.0f,
+                cinema_panel && !fullscreen_menu
+                    ? cinema_panel_local_y() : 0.0f,
+                -g_config.menu_distance});
         anchored_panel_pose.position = {
             head_position.x + panel_offset.x,
             head_position.y + panel_offset.y,
@@ -37311,7 +37324,10 @@ void render_openxr_test_frame(
     menu_layer.pose = anchored_panel_pose_valid
         ? anchored_panel_pose
         : XrPosef{{0.0f, 0.0f, 0.0f, 1.0f},
-            {0.0f, 0.0f, -g_config.menu_distance}};
+            {0.0f,
+                cinema_panel && !fullscreen_menu
+                    ? cinema_panel_local_y() : 0.0f,
+                -g_config.menu_distance}};
     const float spatial_panel_scale = cinema_panel && !fullscreen_menu
         ? g_config.cinema_scale
         : g_config.menu_scale;
@@ -37324,22 +37340,29 @@ void render_openxr_test_frame(
             current_present >= cinema_projection_last
         ? current_present - cinema_projection_last
         : UINT64_MAX;
-    // [FIX:CINEMA-PROJECTION-AWARE-ASPECT 2/2] Use the 5:4 quad only while a
-    // recent REDengine camera has actually received the matching 1.25
+    // [FIX:CINEMA-PROJECTION-AWARE-ASPECT 2/2] Use the selected cinema quad
+    // only while a recent REDengine camera has actually received the matching
     // projection. Loading/movie frames without a 3D camera retain their native
-    // image ratio instead of being widened from 0.955 to 1.25.
+    // image ratio instead of being forced to the launcher aspect.
     const bool cinema_projection_aspect_active =
         cinema_panel && !fullscreen_menu && g_config.cinema_5x4 &&
         cinema_projection_age <= kCinemaProjectionAspectMaxAge;
     const float presented_height_over_width =
         cinema_projection_aspect_active
-        ? 4.0f / 5.0f
+        ? cinema_panel_height_over_width()
         : (menu_image_rect.extent.width > 0
             ? static_cast<float>(menu_image_rect.extent.height) /
                 static_cast<float>(menu_image_rect.extent.width)
             : 1.0f);
-    menu_layer.size.height =
-        menu_layer.size.width * presented_height_over_width;
+    if (cinema_projection_aspect_active) {
+        cinema_panel_extents(
+            spatial_panel_scale,
+            menu_layer.size.width,
+            menu_layer.size.height);
+    } else {
+        menu_layer.size.height =
+            menu_layer.size.width * presented_height_over_width;
+    }
     const float source_rect_aspect =
         menu_image_rect.extent.height > 0
         ? static_cast<float>(menu_image_rect.extent.width) /
@@ -37354,7 +37377,7 @@ void render_openxr_test_frame(
             "Cinema aspect sample present=%llu forced=%d config_5x4=%d "
             "active_5x4=%d projection_last=%llu projection_age=%llu "
             "rect=%d,%d %dx%d rect_aspect=%.6f "
-            "quad=%.4fx%.4f quad_aspect=%.6f target=1.250000 "
+            "quad=%.4fx%.4f quad_aspect=%.6f target=%.6f "
             "render=%ux%u",
             static_cast<unsigned long long>(current_present),
             manual_cinema ? 1 : 0,
@@ -37367,6 +37390,7 @@ void render_openxr_test_frame(
             source_rect_aspect,
             menu_layer.size.width, menu_layer.size.height,
             submitted_quad_aspect,
+            cinema_projection_aspect(),
             g_game_render_width, g_game_render_height);
     }
 

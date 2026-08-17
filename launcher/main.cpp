@@ -40,6 +40,7 @@ enum ControlId {
     IdMenuScaleValue,
     IdCinemaScale,
     IdCinemaScaleValue,
+    IdCinemaAspect,
     IdCinemaHudScale,
     IdCinemaHudScaleValue,
     IdCinemaHudConvergenceOffset,
@@ -327,6 +328,8 @@ bool CaptureState(LauncherState& state, std::wstring& error) {
         Item(IdMenuScale), TBM_GETPOS, 0, 0)) / 100.0f;
     state.cinema_scale = static_cast<float>(SendMessageW(
         Item(IdCinemaScale), TBM_GETPOS, 0, 0)) / 100.0f;
+    state.cinema_aspect = w3vr::CinemaAspectFromComboIndex(
+        static_cast<int>(SendMessageW(Item(IdCinemaAspect), CB_GETCURSEL, 0, 0)));
     state.cinema_hud_scale = static_cast<float>(SendMessageW(
         Item(IdCinemaHudScale), TBM_GETPOS, 0, 0)) / 100.0f;
     state.cinema_hud_convergence_offset = static_cast<int>(SendMessageW(
@@ -632,6 +635,8 @@ void RestoreLauncherDefaults() {
         static_cast<int>(std::lround(defaults.menu_scale * 100.0f)));
     SendMessageW(Item(IdCinemaScale), TBM_SETPOS, TRUE,
         static_cast<int>(std::lround(defaults.cinema_scale * 100.0f)));
+    SendMessageW(Item(IdCinemaAspect), CB_SETCURSEL,
+        w3vr::CinemaAspectComboIndex(defaults.cinema_aspect), 0);
     SendMessageW(Item(IdCinemaHudScale), TBM_SETPOS, TRUE,
         static_cast<int>(std::lround(defaults.cinema_hud_scale * 100.0f)));
     SendMessageW(Item(IdCinemaHudConvergenceOffset), TBM_SETPOS, TRUE,
@@ -745,6 +750,11 @@ void PopulateControls() {
     ComboAdd(snap_turn_degrees, L"45 degrees");
     ComboAdd(snap_turn_degrees, L"60 degrees");
 
+    HWND cinema_aspect = Item(IdCinemaAspect);
+    ComboAdd(cinema_aspect, L"5:4");
+    ComboAdd(cinema_aspect, L"4:3");
+    ComboAdd(cinema_aspect, L"16:9");
+
     const auto loaded = w3vr::LoadConfiguration(g_app.paths);
     g_app.loaded = loaded.state;
     SendMessageW(mode, CB_SETCURSEL, static_cast<int>(loaded.state.mode), 0);
@@ -763,6 +773,8 @@ void PopulateControls() {
         static_cast<int>(std::lround(loaded.state.menu_scale * 100.0f)));
     SendMessageW(Item(IdCinemaScale), TBM_SETPOS, TRUE,
         static_cast<int>(std::lround(loaded.state.cinema_scale * 100.0f)));
+    SendMessageW(Item(IdCinemaAspect), CB_SETCURSEL,
+        w3vr::CinemaAspectComboIndex(loaded.state.cinema_aspect), 0);
     SendMessageW(Item(IdCinemaHudScale), TBM_SETPOS, TRUE,
         static_cast<int>(std::lround(loaded.state.cinema_hud_scale * 100.0f)));
     SendMessageW(Item(IdCinemaHudConvergenceOffset), TBM_SETPOS, TRUE,
@@ -844,8 +856,10 @@ void CreateInterface(HWND window) {
     AddLabel(L"0.85", 625, 264, 54, 22, IdMenuScaleValue, SS_RIGHT);
 
     AddLabel(L"Cinema screen size", 38, 314, 170, 22);
-    AddTrack(205, 308, 405, IdCinemaScale, 30, 150);
-    AddLabel(L"0.90", 625, 314, 54, 22, IdCinemaScaleValue, SS_RIGHT);
+    AddTrack(205, 308, 220, IdCinemaScale, 30, 150);
+    AddLabel(L"0.90", 430, 314, 42, 22, IdCinemaScaleValue, SS_RIGHT);
+    AddLabel(L"Aspect", 482, 314, 52, 22);
+    AddCombo(538, 308, 142, IdCinemaAspect);
 
     AddLabel(L"Near View", 38, 364, 170, 22);
     AddTrack(205, 358, 405, IdNearView, -200, 300);
