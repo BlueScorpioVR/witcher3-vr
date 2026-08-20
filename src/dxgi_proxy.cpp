@@ -408,6 +408,11 @@ struct Config {
 };
 
 Config g_config{};
+
+float cinema_panel_local_y() {
+    return -0.08f * g_config.cinema_scale;
+}
+
 bool g_clean_mode3_indexed_draw_fast_path{};
 bool g_clean_mode3_resource_barrier_fast_path{};
 
@@ -11266,10 +11271,17 @@ void load_config() {
         const auto cinema_aspect = read_ini_string(
             "openxr", "cinema_aspect",
             legacy_cinema_5x4 ? "5x4" : "4x3");
-        g_config.cinema_aspect_ratio =
-            cinema_aspect == "4x3" || cinema_aspect == "4:3"
-            ? 4.0f / 3.0f
-            : 5.0f / 4.0f;
+        if (cinema_aspect == "4x3" || cinema_aspect == "4:3") {
+            g_config.cinema_aspect_ratio = 4.0f / 3.0f;
+        } else if (cinema_aspect == "16x9" || cinema_aspect == "16:9") {
+            g_config.cinema_aspect_ratio = 16.0f / 9.0f;
+        } else if (cinema_aspect == "3x2" || cinema_aspect == "3:2") {
+            g_config.cinema_aspect_ratio = 3.0f / 2.0f;
+        } else if (cinema_aspect == "16x10" || cinema_aspect == "16:10") {
+            g_config.cinema_aspect_ratio = 16.0f / 10.0f;
+        } else {
+            g_config.cinema_aspect_ratio = 5.0f / 4.0f;
+        }
         g_config.cinema_full_vr = read_ini_bool(
             "openxr", "cinema_full_vr", false);
         g_config.steady_icons = read_ini_bool(
@@ -40857,7 +40869,7 @@ void render_openxr_test_frame(
                 current_panel_views[1].pose.position.z) * 0.5f};
         const auto panel_offset = rotate_vector(
             cinema_projection_anchor.orientation,
-            XrVector3f{0.0f, 0.0f, -g_config.menu_distance});
+            XrVector3f{0.0f, cinema_panel_local_y(), -g_config.menu_distance});
         cinema_projection_anchor.position = {
             head_position.x + panel_offset.x,
             head_position.y + panel_offset.y,
@@ -43611,7 +43623,11 @@ void render_openxr_test_frame(
                 anchor_views[1].pose.position.z) * 0.5f};
         const auto panel_offset = rotate_vector(
             anchored_panel_pose.orientation,
-            XrVector3f{0.0f, 0.0f, -g_config.menu_distance});
+            XrVector3f{
+                0.0f,
+                cinema_panel && !fullscreen_menu
+                    ? cinema_panel_local_y() : 0.0f,
+                -g_config.menu_distance});
         anchored_panel_pose.position = {
             head_position.x + panel_offset.x,
             head_position.y + panel_offset.y,
@@ -43640,7 +43656,10 @@ void render_openxr_test_frame(
     menu_layer.pose = anchored_panel_pose_valid
         ? anchored_panel_pose
         : XrPosef{{0.0f, 0.0f, 0.0f, 1.0f},
-            {0.0f, 0.0f, -g_config.menu_distance}};
+            {0.0f,
+                cinema_panel && !fullscreen_menu
+                    ? cinema_panel_local_y() : 0.0f,
+                -g_config.menu_distance}};
     const float spatial_panel_scale = cinema_panel && !fullscreen_menu
         ? g_config.cinema_scale
         : g_config.menu_scale;

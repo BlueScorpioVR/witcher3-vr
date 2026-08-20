@@ -420,7 +420,7 @@ bool CaptureState(LauncherState& state, std::wstring& error) {
         Item(IdCinemaScale), TBM_GETPOS, 0, 0)) / 100.0f;
     state.cinema_aspect = static_cast<CinemaAspect>(std::clamp(
         static_cast<int>(SendMessageW(
-            Item(IdCinemaAspect), CB_GETCURSEL, 0, 0)), 0, 1));
+            Item(IdCinemaAspect), CB_GETCURSEL, 0, 0)), 0, 4));
     state.cinema_hud_scale = static_cast<float>(SendMessageW(
         Item(IdCinemaHudScale), TBM_GETPOS, 0, 0)) / 100.0f;
     state.cinema_hud_convergence_offset = static_cast<int>(SendMessageW(
@@ -892,6 +892,9 @@ void PopulateControls() {
     HWND cinema_aspect = Item(IdCinemaAspect);
     ComboAdd(cinema_aspect, L"5:4");
     ComboAdd(cinema_aspect, L"4:3");
+    ComboAdd(cinema_aspect, L"3:2");
+    ComboAdd(cinema_aspect, L"16:10");
+    ComboAdd(cinema_aspect, L"16:9");
 
     HWND snap_turn_degrees = Item(IdFirstPersonSnapTurnDegrees);
     ComboAdd(snap_turn_degrees, L"30 degrees");
@@ -1058,9 +1061,9 @@ void CreateInterface(HWND window) {
          AddLabel(L"0.90", 445, 332, 50, 22,
              IdCinemaScaleValue, SS_RIGHT)});
     AddTooltips(
-        L"Select the Cinema3D screen aspect ratio. 5:4 is the recommended default; 4:3 is available for personal preference.",
+        L"Select the Cinema3D screen aspect ratio. 5:4 is the recommended default; 4:3, 3:2, 16:10, and 16:9 are available for personal preference.",
         {AddLabel(L"Aspect", 510, 332, 58, 22),
-         AddCombo(575, 324, 104, IdCinemaAspect)});
+         AddCombo(575, 324, 118, IdCinemaAspect)});
 
     AddTooltips(
         L"Adjusts the close third-person camera preset selected with F8. Higher values move the camera farther from Geralt.",

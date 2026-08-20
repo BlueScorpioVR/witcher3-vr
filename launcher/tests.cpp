@@ -181,9 +181,7 @@ void TestAllModes(const w3vr::ConfigPaths& paths) {
         state.presentation_scale = 0.85f;
         state.menu_scale = 0.75f;
         state.cinema_scale = 1.1f;
-        state.cinema_aspect = index % 2 == 0
-            ? w3vr::CinemaAspect::FiveFour
-            : w3vr::CinemaAspect::FourThree;
+        state.cinema_aspect = static_cast<w3vr::CinemaAspect>(index % 5);
         state.cinema_hud_scale = 1.5f;
         state.cinema_hud_convergence_offset = 7;
         state.full_vr_hud_scale = 1.25f;
@@ -310,10 +308,20 @@ void TestAllModes(const w3vr::ConfigPaths& paths) {
             "Full VR HUD scale/automatic convergence mismatch");
         Require(vr.Get("openxr", "manual_cinema_hud_scale") == "1.600",
             "manual F10 HUD scale must remain independently tuned");
+        const char* expected_aspect = "5x4";
+        if (state.cinema_aspect == w3vr::CinemaAspect::FourThree) {
+            expected_aspect = "4x3";
+        } else if (state.cinema_aspect == w3vr::CinemaAspect::SixteenNine) {
+            expected_aspect = "16x9";
+        } else if (state.cinema_aspect == w3vr::CinemaAspect::ThreeTwo) {
+            expected_aspect = "3x2";
+        } else if (state.cinema_aspect == w3vr::CinemaAspect::SixteenTen) {
+            expected_aspect = "16x10";
+        }
         const bool expected_five_four =
             state.cinema_aspect == w3vr::CinemaAspect::FiveFour;
         Require(vr.Get("openxr", "cinema_aspect") ==
-            std::string(expected_five_four ? "5x4" : "4x3") &&
+            std::string(expected_aspect) &&
             vr.Get("openxr", "cinema_5x4") ==
                 std::string(expected_five_four ? "1" : "0"),
             "Cinema aspect and compatibility mirror mismatch");
@@ -1326,6 +1334,36 @@ void TestFirstRunConfiguration(const fs::path& root) {
     Require(loaded_four_three.state.cinema_aspect ==
             w3vr::CinemaAspect::FourThree,
         "migrated 4:3 Cinema aspect was not loaded");
+
+    Write(paths.vr_ini,
+        "[meta]\r\n"
+        "config_version=13\r\n"
+        "[openxr]\r\n"
+        "cinema_aspect=16:9\r\n");
+    const auto loaded_sixteen_nine = w3vr::LoadConfiguration(paths);
+    Require(loaded_sixteen_nine.state.cinema_aspect ==
+            w3vr::CinemaAspect::SixteenNine,
+        "16:9 Cinema aspect was not loaded");
+
+    Write(paths.vr_ini,
+        "[meta]\r\n"
+        "config_version=13\r\n"
+        "[openxr]\r\n"
+        "cinema_aspect=3:2\r\n");
+    const auto loaded_three_two = w3vr::LoadConfiguration(paths);
+    Require(loaded_three_two.state.cinema_aspect ==
+            w3vr::CinemaAspect::ThreeTwo,
+        "3:2 Cinema aspect was not loaded");
+
+    Write(paths.vr_ini,
+        "[meta]\r\n"
+        "config_version=13\r\n"
+        "[openxr]\r\n"
+        "cinema_aspect=16:10\r\n");
+    const auto loaded_sixteen_ten = w3vr::LoadConfiguration(paths);
+    Require(loaded_sixteen_ten.state.cinema_aspect ==
+            w3vr::CinemaAspect::SixteenTen,
+        "16:10 Cinema aspect was not loaded");
 }
 
 void TestVrBaselineAndRestore(const w3vr::ConfigPaths& paths) {

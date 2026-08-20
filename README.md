@@ -45,7 +45,7 @@ as a runtime dependency.
 | First-person head-bobbing reduction | Optional anchor smoothing, enabled by default |
 | First-person combat handoff | Optional automatic switch to third person in combat |
 | Faster movement transitions | Optional and enabled by default in both third and first person |
-| Cinema framing | Launcher-selectable 5:4 or 4:3; 5:4 default |
+| Cinema framing | Launcher-selectable 5:4, 4:3, 3:2, 16:10, or 16:9; 5:4 default |
 | HMD-aware render-budget region | Implemented |
 | Native canted-display support | Uses each OpenXR eye pose directly; no parallel-projection workaround required |
 | Headset-aware HUD convergence | Derived automatically from OpenXR eye geometry for parallel and canted displays |
@@ -164,7 +164,7 @@ Save or Save & Launch, the launcher asks the active OpenXR runtime for its
 current recommended per-eye dimensions and writes that exact resolution to
 both REDengine and `witcher3vr.ini`. The saved dimensions remain visible while
 the manual dropdown is disabled. Cinema defaults to 5:4 framing and can be
-switched to 4:3. Older INIs receive a one-time configuration update
+switched to 4:3, 3:2, 16:10, or 16:9. Older INIs receive a one-time configuration update
 that preserves the selected rendering mode, resolution, Full VR cutscene
 choice, and unrelated custom settings. Later manual tuning is not overwritten
 at launcher startup.

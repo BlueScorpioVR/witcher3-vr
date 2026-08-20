@@ -19,6 +19,9 @@ enum class RenderMode {
 enum class CinemaAspect {
     FiveFour,
     FourThree,
+    ThreeTwo,
+    SixteenTen,
+    SixteenNine,
 };
 
 enum class CameraFollowPolicy {

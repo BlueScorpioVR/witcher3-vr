@@ -272,13 +272,34 @@ CinemaAspect ReadCinemaAspect(const IniDocument& ini) {
     const auto value = ReadString(
         ini, "openxr", "cinema_aspect",
         legacy_five_four ? "5x4" : "4x3");
-    return value == "4x3" || value == "4:3"
-        ? CinemaAspect::FourThree
-        : CinemaAspect::FiveFour;
+    if (value == "4x3" || value == "4:3") {
+        return CinemaAspect::FourThree;
+    }
+    if (value == "16x9" || value == "16:9") {
+        return CinemaAspect::SixteenNine;
+    }
+    if (value == "3x2" || value == "3:2") {
+        return CinemaAspect::ThreeTwo;
+    }
+    if (value == "16x10" || value == "16:10") {
+        return CinemaAspect::SixteenTen;
+    }
+    return CinemaAspect::FiveFour;
 }
 
 const char* CinemaAspectIniValue(CinemaAspect aspect) {
-    return aspect == CinemaAspect::FourThree ? "4x3" : "5x4";
+    switch (aspect) {
+        case CinemaAspect::FourThree:
+            return "4x3";
+        case CinemaAspect::SixteenNine:
+            return "16x9";
+        case CinemaAspect::ThreeTwo:
+            return "3x2";
+        case CinemaAspect::SixteenTen:
+            return "16x10";
+        default:
+            return "5x4";
+    }
 }
 
 void MigrateConfigurationToV9(IniDocument& ini) {
