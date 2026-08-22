@@ -29,7 +29,9 @@
 #include "shadow_cascade_authority_policy.h"
 #include "taau_submission_policy.h"
 
-// V1337 retains V1336's validated strict-Stereo transparent-effect fix and
+// V1338 retains V1337's AER native preflight and V1336's validated
+// strict-Stereo transparent-effect fix, then makes the retained-HUD ring a
+// generation-drained command-list transaction across live F2 switches.
 // V1334's generation-atomic HUD lifecycle. It completes V1335's AER+AFW
 // pixel-projection ownership by preflighting the final source actually selected
 // for OpenXR: strict packed pairs and sequential AFW pairs can both establish
@@ -4168,6 +4170,7 @@ struct Mode3EarlyHudPending {
     uint64_t capture_serial{};
     uint64_t recorded_present{};
     bool submitted_join{};
+    bool destination_was_shader_read{};
 };
 // [FIX:AER-AFW-PREEXECUTE-HUD-SNAPSHOT V1282 1/6] Command lists may be reset
 // by another renderer worker as soon as the real ExecuteCommandLists returns.
@@ -4207,6 +4210,7 @@ uint32_t g_mode3_early_hud_latest_slot[2]{UINT32_MAX, UINT32_MAX};
 uint32_t g_mode3_early_hud_accepted_slot[2]{UINT32_MAX, UINT32_MAX};
 uint32_t g_mode3_early_hud_accepted_generation{};
 uint64_t g_mode3_early_hud_accepted_pair{};
+std::atomic<uint32_t> g_mode3_hud_generation_drain_pending{};
 std::atomic<uint32_t> g_mode3_hud_srv_root{UINT32_MAX};
 std::atomic<uint32_t> g_mode3_hud_srv_offset{UINT32_MAX};
 std::mutex g_hud_composite_pso_creation_mutex{};
@@ -19662,6 +19666,33 @@ HRESULT STDMETHODCALLTYPE hook_reset_command_list(
         g_mode3_aer_afw_pending_hud_tags.erase(command_list);
         g_mode3_aer_afw_pending_hud_presents.erase(command_list);
     }
+    // [FIX:STEREO-HUD-GENERATION-DRAIN V1338 1/6] Reset discards every GPU
+    // command recorded in this epoch. Release its immutable early-HUD ticket
+    // as well, and restore the destination state that was true before those
+    // now-discarded barriers. Otherwise a reset-without-execute permanently
+    // occupies one ring slot and leaves its CPU state ahead of the resource.
+    {
+        std::scoped_lock lock{g_mode3_early_hud_mutex};
+        const auto found =
+            g_mode3_early_hud_pending_by_command_list.find(command_list);
+        if (found != g_mode3_early_hud_pending_by_command_list.end()) {
+            const auto pending = found->second;
+            if (pending.slot < kMode3EarlyHudSlotCount) {
+                auto& slot = g_mode3_early_hud_slots[pending.slot];
+                if (slot.generation == pending.generation &&
+                    slot.capture_serial == pending.capture_serial) {
+                    slot.shader_read_state =
+                        pending.destination_was_shader_read;
+                    slot.initialized = false;
+                    slot.eye = UINT32_MAX;
+                    slot.pair_id = 0;
+                    slot.completed_pair_at_capture = 0;
+                    slot.capture_serial = 0;
+                }
+            }
+            g_mode3_early_hud_pending_by_command_list.erase(found);
+        }
+    }
     // [FIX:AER-CINEMA-EXACT-EYE-CONTRACT V1214 6/12] A recycled command
     // list cannot inherit the render identity of its preceding recording.
     {
@@ -21113,6 +21144,8 @@ void reset_mode3_early_hud_generation_locked(uint32_t generation) {
 }
 
 void reset_mode3_hud_publication_state(uint32_t generation) {
+    g_mode3_hud_generation_drain_pending.store(
+        0, std::memory_order_release);
     g_mode3_strict_hud_target_pair.store(0, std::memory_order_relaxed);
     g_mode3_strict_hud_target_generation.store(
         generation, std::memory_order_release);
@@ -21142,6 +21175,52 @@ void reset_mode3_hud_publication_state(uint32_t generation) {
         std::scoped_lock lock{g_mode3_early_hud_mutex};
         reset_mode3_early_hud_generation_locked(generation);
     }
+}
+
+// [FIX:STEREO-HUD-GENERATION-DRAIN V1338 2/6] An F2 switch is already a safe
+// logical HUD boundary, but it is not a GPU fence: worker command lists from
+// the old projection can still own CopyResource writes into the early-HUD
+// ring. Revoke freshness immediately, then keep those physical slots retired
+// until the new generation has produced and accepted its first scene pair.
+void arm_mode3_hud_generation_drain(uint32_t generation) {
+    g_mode3_strict_hud_target_pair.store(0, std::memory_order_relaxed);
+    g_mode3_strict_hud_target_generation.store(
+        generation, std::memory_order_release);
+    g_mode3_hud_generation_drain_pending.store(
+        generation, std::memory_order_release);
+    log_line(
+        "V1338 strict Stereo HUD generation drain armed generation=%u "
+        "present=%llu",
+        generation,
+        static_cast<unsigned long long>(
+            g_present_count.load(std::memory_order_relaxed)));
+}
+
+void service_mode3_hud_generation_drain() {
+    const uint32_t pending_generation =
+        g_mode3_hud_generation_drain_pending.load(
+            std::memory_order_acquire);
+    if (pending_generation == 0) {
+        return;
+    }
+    const uint32_t generation =
+        g_streamline_capture_generation.load(std::memory_order_acquire);
+    if (pending_generation != generation ||
+        !g_packed_runtime_ready.load(std::memory_order_acquire) ||
+        g_packed_accepted_pair_signal.load(std::memory_order_acquire) == 0) {
+        return;
+    }
+
+    // The accepted current-generation scene proves that the old recording
+    // wave has crossed the renderer/queue boundary. Start a clean HUD epoch
+    // after this OpenXR submit; the following producer pair will repopulate it.
+    reset_mode3_hud_publication_state(generation);
+    log_line(
+        "V1338 strict Stereo HUD generation drain completed generation=%u "
+        "present=%llu",
+        generation,
+        static_cast<unsigned long long>(
+            g_present_count.load(std::memory_order_relaxed)));
 }
 
 void reset_loading_video_presentation_state(uint64_t present) {
@@ -21328,9 +21407,21 @@ bool capture_mode3_early_hud(
         g_streamline_capture_generation.load(std::memory_order_acquire);
     std::scoped_lock lock{g_mode3_early_hud_mutex};
     if (g_mode3_early_hud_generation != generation) {
+        if (g_mode3_hud_generation_drain_pending.load(
+                std::memory_order_acquire) == generation) {
+            return false;
+        }
         reset_mode3_early_hud_generation_locked(generation);
     }
     if (!ensure_mode3_early_hud_resources_locked(source_desc)) {
+        return false;
+    }
+    // [FIX:STEREO-HUD-GENERATION-DRAIN V1338 3/6] The command-list pointer is
+    // the immutable recording-epoch owner. Never overwrite its first capture:
+    // doing so made the previous slot look reusable even though its copy was
+    // still recorded in the same not-yet-executed command list.
+    if (g_mode3_early_hud_pending_by_command_list.find(command_list) !=
+        g_mode3_early_hud_pending_by_command_list.end()) {
         return false;
     }
     const uint32_t slot_index =
@@ -21342,6 +21433,7 @@ bool capture_mode3_early_hud(
     if (slot.resource == nullptr) {
         return false;
     }
+    const bool destination_was_shader_read = slot.shader_read_state;
     for (uint32_t eye = 0; eye < 2; ++eye) {
         if (g_mode3_early_hud_latest_slot[eye] == slot_index) {
             g_mode3_early_hud_latest_slot[eye] = UINT32_MAX;
@@ -21419,7 +21511,8 @@ bool capture_mode3_early_hud(
         slot_index, generation, slot.capture_serial,
         g_present_count.load(std::memory_order_relaxed),
         mode3_aer_afw_post_hud_gameplay_active() ||
-            mode3_strict_stereo_submitted_hud_join_active()};
+            mode3_strict_stereo_submitted_hud_join_active(),
+        destination_was_shader_read};
     // [DIAG:MODE3-HUD-CONTENT-ORDER 1/2] A resource can receive the correct
     // eye/pair label at PRESENT while still containing pixels frozen before
     // that pair's marker projection ran. Record the immutable copy point and
@@ -36034,7 +36127,7 @@ void apply_engine_dual_render_transition(
         reset_puredark_afw_publication_state();
     }
     if (strict_stereo_projection_reset) {
-        reset_mode3_hud_publication_state(generation);
+        arm_mode3_hud_generation_drain(generation);
     }
     record_route_flight(
         w3vr::route_flight::EventCode::RouteReset,
@@ -39179,7 +39272,7 @@ void ensure_initialized() {
                 "focus_fire_b1=stereo_structural_aer_upstream_owner "
                 "aer_taau_hud=scene_and_retained_pair_fail_open");
             log_line(
-                "witcher3vr dxgi proxy initialized build=V1337 base=V1336_strict_asym_effect_prewarm "
+                "witcher3vr dxgi proxy initialized build=V1338 base=V1337_aer_afw_native_preflight "
                 "anchor_smoothing_ini=%d anchor_smoothing_seconds=%.4f "
                 "first_person_strafe_ini=%d mode3_aer_presentation=%d raytracing_enabled=%d raytracing_history_buffers=%d "
                 "aer_afw_enabled=%d persistent_registry=%d dlss_public_streamline=%d "
@@ -39238,7 +39331,7 @@ void ensure_initialized() {
             log_line(
                 "V1310 route flight recorder=ini_opt_in default_off f3_dump=15s renderdoc_f3_preserved=1 qpc=present_only gpu_readback=0 descriptor_scan=0 text_hotpath=0");
             log_line(
-                "V1337 mode3_projection=V1331_runtime_SYM_ASYM stereo_hud_generation_reset=atomic asymmetric_hud_pso=deferred_openxr_geometry aer_afw_projection=producer_owned_sequential_preflight native_asym_submit=full_frame strict_asym_effects=prewarm_then_active_only flight_recorders=F3");
+                "V1338 mode3_projection=V1331_runtime_SYM_ASYM stereo_hud_generation_reset=drain_then_rebuild asymmetric_hud_pso=deferred_openxr_geometry aer_afw_projection=producer_owned_sequential_preflight native_asym_submit=full_frame strict_asym_effects=prewarm_then_active_only flight_recorders=F3");
             log_line(
                 "V1279 DLSS compatibility=public_streamline_aer_private_history_ngx_stereo legacy_module_agnostic_discovery=disabled_by_V1288");
             log_line(
@@ -45809,7 +45902,7 @@ void render_openxr_test_frame(
                                 1, std::memory_order_relaxed);
                         if (log_index < 16) {
                             log_line(
-                                "V1337 final Mode3 OpenXR submit sample=%u "
+                                "V1338 final Mode3 OpenXR submit sample=%u "
                                 "route=%s backend=%s dlaa=%u projection=%s "
                                 "source=%ux%u swapchain=%ux%u "
                                 "rect0=%d,%d %dx%d rect1=%d,%d %dx%d "
@@ -47094,7 +47187,7 @@ void handle_runtime_mode3_projection_hotkey() {
     }
     if (!mode3_stereo_transport_active()) {
         log_line(
-            "V1337 runtime projection hotkey=F2 ignored route=non_mode3 "
+            "V1338 runtime projection hotkey=F2 ignored route=non_mode3 "
             "present=%llu",
             static_cast<unsigned long long>(
                 g_present_count.load(std::memory_order_relaxed)));
@@ -47104,7 +47197,7 @@ void handle_runtime_mode3_projection_hotkey() {
     g_runtime_mode3_projection_toggle_requests.fetch_add(
         1, std::memory_order_release);
     log_line(
-        "V1337 Mode3 runtime projection toggle queued hotkey=F2 "
+        "V1338 Mode3 runtime projection toggle queued hotkey=F2 "
         "route=%s present=%llu",
         mode3_aer_presentation_active() ? "aer" : "stereo",
         static_cast<unsigned long long>(
@@ -47126,6 +47219,14 @@ void apply_present_boundary_requests() {
     const bool projection_toggle = projection_transition.apply;
     const bool native_asymmetric =
         projection_transition.native_asymmetric;
+
+    // [FIX:STEREO-HUD-GENERATION-DRAIN V1338 4/6] Completion is serviced only
+    // on a boundary with no newer F2 request. A rapid second switch therefore
+    // extends the fail-open baked-HUD interval instead of recycling the ring
+    // between two overlapping generations.
+    if (!projection_toggle && requested_mode < 0) {
+        service_mode3_hud_generation_drain();
+    }
 
     if (requested_mode >= 0 || projection_toggle) {
         const bool dual_render_enabled = requested_mode >= 0
@@ -47152,7 +47253,7 @@ void apply_present_boundary_requests() {
             native_asymmetric, std::memory_order_release);
         g_mode3_final_submit_logs.store(0, std::memory_order_release);
         log_line(
-            "V1337 Mode3 runtime projection=%s hotkey=F2 route=%s "
+            "V1338 Mode3 runtime projection=%s hotkey=F2 route=%s "
             "boundary=post_submit present=%llu requests=%u",
             native_asymmetric ? "asymmetric" : "symmetric",
             mode3_aer_presentation_active() ? "aer" : "stereo",
@@ -47175,7 +47276,7 @@ void handle_f3_capture_hotkey(IDXGISwapChain* swapchain) {
     if (w3vr::pipeline_flight::enabled()) {
         w3vr::pipeline_flight::dump_last_ten_seconds();
     }
-    w3vr::route_flight::dump_last_seconds("V1337", 15);
+    w3vr::route_flight::dump_last_seconds("V1338", 15);
     trigger_renderdoc_capture(
         g_game_swapchain != nullptr ? g_game_swapchain : swapchain);
 }

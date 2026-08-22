@@ -11,6 +11,12 @@ set(required_fragments
     "g_mode3_aer_afw_submitted_hud_tags.clear();"
     "reset_mode3_early_hud_generation_locked(generation);"
     "reset_mode3_hud_publication_state(generation);"
+    "void arm_mode3_hud_generation_drain(uint32_t generation)"
+    "void service_mode3_hud_generation_drain()"
+    "g_mode3_hud_generation_drain_pending.store("
+    "pending.destination_was_shader_read;"
+    "g_mode3_early_hud_pending_by_command_list.erase(found);"
+    "destination_was_shader_read};"
     "bool capture_hud_composite_pso_recipe("
     "bool ensure_asymmetric_bootstrap_hud_psos()"
     "ensure_asymmetric_bootstrap_hud_psos();"
@@ -60,7 +66,7 @@ math(EXPR transition_length "${transition_end} - ${transition_begin}")
 string(SUBSTRING "${dxgi_proxy}" ${transition_begin}
     ${transition_length} transition_body)
 string(FIND "${transition_body}"
-    "if (strict_stereo_projection_reset) {\n        reset_mode3_hud_publication_state(generation);"
+    "if (strict_stereo_projection_reset) {\n        arm_mode3_hud_generation_drain(generation);"
     hud_reset_position)
 string(FIND "${transition_body}"
     "if (!strict_stereo_projection_reset) {\n        g_engine_hmd_camera_last_present.store("
@@ -68,6 +74,21 @@ string(FIND "${transition_body}"
 if(hud_reset_position EQUAL -1 OR camera_preservation_position EQUAL -1)
     message(FATAL_ERROR
         "F2 must revoke HUD publications without invalidating Cinema authority")
+endif()
+
+string(FIND "${dxgi_proxy}"
+    "if (g_mode3_hud_generation_drain_pending.load(\n                std::memory_order_acquire) == generation) {\n            return false;"
+    capture_drain_guard)
+string(FIND "${dxgi_proxy}"
+    "if (g_mode3_early_hud_pending_by_command_list.find(command_list) !=\n        g_mode3_early_hud_pending_by_command_list.end()) {\n        return false;"
+    immutable_capture_guard)
+string(FIND "${dxgi_proxy}"
+    "if (!projection_toggle && requested_mode < 0) {\n        service_mode3_hud_generation_drain();"
+    boundary_drain_service)
+if(capture_drain_guard EQUAL -1 OR immutable_capture_guard EQUAL -1 OR
+        boundary_drain_service EQUAL -1)
+    message(FATAL_ERROR
+        "F2 HUD generations must drain before one immutable capture epoch is rebuilt")
 endif()
 
 string(FIND "${dxgi_proxy}"
