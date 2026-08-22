@@ -6,7 +6,11 @@ file(READ "${DXGI_PROXY_SOURCE}" source)
 
 foreach(required_marker IN ITEMS
         "native_asymmetric_effect_preparation_configured("
-        "native_asymmetric_effect_center_application_active("
+        "transparent_effect_draw_route_active()"
+        "decide_effect_draw_projection("
+        "store_effect_draw_producer_authority("
+        "effect_producer_projection"
+        "effect_producer_transaction"
         "real_smoke_center_fix_route_configured()"
         "resolve_focus_fire_horizontal_draw_pso("
         "select_real_smoke_offaxis_pipeline(")
@@ -17,19 +21,25 @@ foreach(required_marker IN ITEMS
     endif()
 endforeach()
 
-string(REGEX MATCHALL
-    "native_asymmetric_effect_center_application_active\\("
-    application_sites "${source}")
-list(LENGTH application_sites application_site_count)
-if(application_site_count LESS 2)
+string(FIND "${source}"
+    "void __fastcall hook_engine_dlss_command(" command_hook_index)
+string(FIND "${source}"
+    "Publish the producer-owned" producer_store_index)
+string(FIND "${source}"
+    "g_engine_dlss_command(context, stream);" command_dispatch_index)
+if(command_hook_index EQUAL -1 OR producer_store_index EQUAL -1 OR
+        command_dispatch_index EQUAL -1 OR
+        producer_store_index LESS command_hook_index OR
+        producer_store_index GREATER command_dispatch_index)
     message(FATAL_ERROR
-        "Automatic effects and specialized smoke must share the ASYM gate")
+        "DLSS producer authority must be stamped before command recording")
 endif()
 
 foreach(obsolete_marker IN ITEMS
         "strict_stereo_asymmetric_effect_preparation_configured"
         "strict_stereo_asymmetric_effect_application_active"
         "automatic_focus_projection_route_active"
+        "native_asymmetric_transparent_center_route_active"
         "final_native_temporal_aer")
     string(FIND "${source}" "${obsolete_marker}" obsolete_index)
     if(NOT obsolete_index EQUAL -1)

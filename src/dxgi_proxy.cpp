@@ -29,10 +29,18 @@
 #include "shadow_cascade_authority_policy.h"
 #include "taau_submission_policy.h"
 
-// V1341 retains V1340's DLSS scene-boundary reset, V1339's validated native
-// AER AFW projection and V1338's strict-Stereo HUD generation drain. The
-// existing transparent-effect variants now follow the same actual-ASym draw
-// contract in Stereo and AER. SYM, Cinema panels and Full VR remain untouched.
+// V1343 retains V1342 and makes AER's retained HUD convergence use one
+// coherent xrLocateViews eye pair.  AER scene views intentionally come from
+// sequential render instants; they remain the exact FOV/pose authority for
+// scene submission, but they must not redefine the headset's anatomical eye
+// geometry used to convert hud_stereo_shift_px into a physical HUD plane.
+// Stereo keeps its exact submitted-pair behavior and no scene/AFW transport,
+// projection FOV, image rectangle or presentation density is changed.
+// V1342 retains validated V1341 and closes the remaining deferred-smoke
+// transition ambiguity.  Eye-specific variants now require an immutable
+// NativeAsymmetric producer tag, current generation and the source eye's
+// post-rebuild factory proof.  Shared warm-up/stale draws keep the stable
+// zero-centre world-up owner instead of borrowing ASYM from the live F2 mode.
 // No symmetric full-height trial is present.
 // V1299 applies the same gameplay/cinema/loading admission policy at both ends
 // of V1298's strict AER TAAU AFW camera FIFO. The producer had accidentally
@@ -2550,13 +2558,13 @@ bool native_asymmetric_cinema_panel_active() {
 
 bool native_asymmetric_full_vr_scene_active();
 
-bool native_asymmetric_transparent_center_route_active() {
-    return w3vr::mode3_transport::
-        native_asymmetric_effect_center_application_active(
-            automatic_focus_projection_route_configured(),
-            native_stereo_runtime_enabled(),
-            native_asymmetric_cinema_panel_active(),
-            native_asymmetric_full_vr_scene_active());
+bool transparent_effect_draw_route_active() {
+    // Selection follows the immutable producer transaction at the draw. The
+    // live SYM/ASYM request is deliberately absent: during bootstrap it may
+    // already request ASYM while this command still owns shared pixels.
+    return automatic_focus_projection_route_configured() &&
+        !native_asymmetric_cinema_panel_active() &&
+        !native_asymmetric_full_vr_scene_active();
 }
 
 NativeAsymmetricPairSlot* native_asymmetric_pair_slot(uint64_t pair_id) {
@@ -2643,6 +2651,21 @@ bool native_asymmetric_source_eye_tagged(uint64_t pair_id, uint32_t eye) {
         std::memory_order_acquire) & eye_bit) != 0;
     return tagged && slot->pair_id.load(
         std::memory_order_acquire) == pair_id;
+}
+
+bool native_asymmetric_source_eye_tagged_for_generation(
+    uint64_t pair_id, uint32_t eye, uint32_t generation) {
+    if (eye > 1) {
+        return false;
+    }
+    auto* slot = native_asymmetric_pair_slot(pair_id);
+    if (slot == nullptr) {
+        return false;
+    }
+    const uint8_t eye_bit = static_cast<uint8_t>(1u << eye);
+    return slot->generation.load(std::memory_order_acquire) == generation &&
+        (slot->factory_mask.load(std::memory_order_acquire) & eye_bit) != 0 &&
+        slot->pair_id.load(std::memory_order_acquire) == pair_id;
 }
 
 bool snapshot_shared_mode3_projection_fov(XrFovf& fov) {
@@ -3493,13 +3516,18 @@ struct DlssGraphicsStateSnapshot {
     D3D12_GPU_DESCRIPTOR_HANDLE cbv_gpu_start{};
     UINT cbv_descriptor_count{};
     UINT cbv_descriptor_increment{};
-    // [FIX:NATIVE-FOCUS-DRAW-EYE-AUTHORITY V1134] Keep the resolved eye in
-    // the command-list recording epoch. Reset clears this together with every
-    // root binding, so automatic fire and the specialized smoke draw can share
-    // one authoritative result without carrying it into a reused list.
-    uint64_t native_focus_eye_present{UINT64_MAX};
-    uint64_t native_focus_eye_pair_id{};
-    uint32_t native_focus_eye{UINT32_MAX};
+    // [FIX:DLSS-EFFECT-PRODUCER-AUTHORITY V1342] The sequential DLSS command
+    // owns the projection used by every transparent draw it records. Preserve
+    // the complete immutable producer identity, including a positive shared
+    // result, for exactly this command-list epoch. Reset clears it together
+    // with every root binding.
+    uint64_t effect_producer_present{UINT64_MAX};
+    uint64_t effect_producer_pair_id{};
+    uint32_t effect_producer_generation{UINT32_MAX};
+    uint32_t effect_producer_eye{UINT32_MAX};
+    w3vr::mode3_transport::AfwPixelProjection effect_producer_projection{
+        w3vr::mode3_transport::AfwPixelProjection::Invalid};
+    bool effect_producer_transaction{};
     bool valid{};
 };
 
@@ -15631,8 +15659,12 @@ void create_focus_fire_horizontal_psos(
 struct NativeFocusDrawEyeAuthority {
     uint32_t eye{UINT32_MAX};
     uint64_t pair_id{};
+    uint32_t generation{UINT32_MAX};
+    w3vr::mode3_transport::AfwPixelProjection pixel_projection{
+        w3vr::mode3_transport::AfwPixelProjection::Invalid};
+    bool producer_transaction{};
     XrFovf fov{};
-    uint32_t route{}; // 1=recording cache, 2=exact camera, 3=recent pair.
+    uint32_t route{}; // 1=producer transaction, 2=exact camera, 3=recent pair.
     float selected_distance{std::numeric_limits<float>::infinity()};
     float separation_margin{};
 };
@@ -15659,11 +15691,14 @@ bool resolve_focus_fire_b1_authority(
     float& estimated_x,
     float& estimated_y,
     uint32_t& authority_route);
-void store_native_focus_draw_eye(
+void store_effect_draw_producer_authority(
     ID3D12GraphicsCommandList* command_list,
     uint64_t present,
     uint32_t eye,
-    uint64_t pair_id);
+    uint64_t pair_id,
+    uint32_t generation,
+    w3vr::mode3_transport::AfwPixelProjection pixel_projection,
+    bool producer_transaction);
 
 // Deferred command-list recording leaves the engine eye unset at these draws.
 // No-AA still resolves the immutable b12 optical center directly. TAAU's b12
@@ -15965,8 +16000,11 @@ ID3D12PipelineState* resolve_focus_fire_horizontal_draw_pso(
     }
 
     if (focus_eye >= 0 && focus_eye <= 1) {
-        store_native_focus_draw_eye(
-            command_list, present, static_cast<uint32_t>(focus_eye), 0);
+        store_effect_draw_producer_authority(
+            command_list, present, static_cast<uint32_t>(focus_eye), 0,
+            g_streamline_capture_generation.load(std::memory_order_acquire),
+            w3vr::mode3_transport::AfwPixelProjection::NativeAsymmetric,
+            false);
     }
 
     ID3D12PipelineState* selected{};
@@ -16155,43 +16193,65 @@ bool resolve_real_smoke_cbv(
     return load_cbv_descriptor_smoke_nonblocking(cpu_handle, cbv);
 }
 
-bool load_native_focus_draw_eye(
+bool load_effect_draw_producer_authority(
     ID3D12GraphicsCommandList* command_list,
     uint64_t present,
     NativeFocusDrawEyeAuthority& authority) {
     const auto* state = access_dlss_graphics_state(command_list, false);
-    if (state == nullptr || state->native_focus_eye_present != present ||
-        state->native_focus_eye > 1) {
+    if (state == nullptr || state->effect_producer_present != present) {
         return false;
     }
-    authority.eye = state->native_focus_eye;
-    authority.pair_id = state->native_focus_eye_pair_id;
+    authority.eye = state->effect_producer_eye;
+    authority.pair_id = state->effect_producer_pair_id;
+    authority.generation = state->effect_producer_generation;
+    authority.pixel_projection = state->effect_producer_projection;
+    authority.producer_transaction = state->effect_producer_transaction;
     authority.route = 1;
     g_native_focus_eye_authority_routes[1].fetch_add(
         1, std::memory_order_relaxed);
-    return true;
+    // A producer transaction deliberately remains observable when its result
+    // is SharedSymmetric or Invalid. Both states must stop older camera-ledger
+    // inference from being substituted into this command.
+    return authority.producer_transaction ||
+        (authority.eye <= 1 &&
+            authority.pixel_projection == w3vr::mode3_transport::
+                AfwPixelProjection::NativeAsymmetric);
 }
 
-void store_native_focus_draw_eye(
+void store_effect_draw_producer_authority(
     ID3D12GraphicsCommandList* command_list,
     uint64_t present,
     uint32_t eye,
-    uint64_t pair_id) {
-    if (eye > 1) {
+    uint64_t pair_id,
+    uint32_t generation,
+    w3vr::mode3_transport::AfwPixelProjection pixel_projection,
+    bool producer_transaction) {
+    if (!producer_transaction && eye > 1) {
         return;
     }
-    auto* state = access_dlss_graphics_state(command_list, false);
+    auto* state = access_dlss_graphics_state(command_list, true);
     if (state == nullptr) {
         return;
     }
-    if (pair_id == 0 && state->native_focus_eye_present == present &&
-        state->native_focus_eye == eye &&
-        state->native_focus_eye_pair_id != 0) {
+    // The exact DLSS producer is the command-list owner. A later heuristic
+    // inside one of its draws may not overwrite either a shared or native
+    // transaction with a guessed eye.
+    if (!producer_transaction && state->effect_producer_transaction &&
+        state->effect_producer_present == present) {
         return;
     }
-    state->native_focus_eye_present = present;
-    state->native_focus_eye_pair_id = pair_id;
-    state->native_focus_eye = eye;
+    if (!producer_transaction && pair_id == 0 &&
+        state->effect_producer_present == present &&
+        state->effect_producer_eye == eye &&
+        state->effect_producer_pair_id != 0) {
+        return;
+    }
+    state->effect_producer_present = present;
+    state->effect_producer_pair_id = pair_id;
+    state->effect_producer_generation = generation;
+    state->effect_producer_eye = eye;
+    state->effect_producer_projection = pixel_projection;
+    state->effect_producer_transaction = producer_transaction;
 }
 
 bool match_native_focus_draw_eye(
@@ -16209,12 +16269,23 @@ bool match_native_focus_draw_eye(
         std::numeric_limits<float>::infinity()};
     std::array<XrFovf, 2> paired_fov{};
     uint64_t paired_pair{};
+    const uint32_t current_generation =
+        g_streamline_capture_generation.load(std::memory_order_acquire);
     {
         std::scoped_lock lock{g_engine_temporal_matrix_mutex};
         for (const auto& candidate : g_engine_temporal_matrix_ring) {
             if (!candidate.corrected_valid || !candidate.render_views_valid ||
                 candidate.eye < 0 || candidate.eye > 1 ||
                 candidate.pair_id == 0 || candidate.pair_id == UINT64_MAX ||
+                w3vr::mode3_transport::decide_effect_draw_projection(
+                        candidate.afw_pixel_projection, true,
+                        candidate.generation, current_generation,
+                        native_asymmetric_source_eye_tagged_for_generation(
+                            candidate.pair_id,
+                            static_cast<uint32_t>(candidate.eye),
+                            candidate.generation)) !=
+                    w3vr::mode3_transport::AfwPixelProjection::
+                        NativeAsymmetric ||
                 candidate.present > present + 2 ||
                 (present > candidate.present &&
                     present - candidate.present > 16)) {
@@ -16243,13 +16314,29 @@ bool match_native_focus_draw_eye(
         for (const auto& eye0 : g_engine_temporal_matrix_ring) {
             if (!eye0.corrected_valid || !eye0.render_views_valid ||
                 eye0.eye != 0 || eye0.pair_id == 0 ||
-                eye0.pair_id == UINT64_MAX || eye0.present > present + 2 ||
+                eye0.pair_id == UINT64_MAX ||
+                w3vr::mode3_transport::decide_effect_draw_projection(
+                        eye0.afw_pixel_projection, true,
+                        eye0.generation, current_generation,
+                        native_asymmetric_source_eye_tagged_for_generation(
+                            eye0.pair_id, 0, eye0.generation)) !=
+                    w3vr::mode3_transport::AfwPixelProjection::
+                        NativeAsymmetric ||
+                eye0.present > present + 2 ||
                 (present > eye0.present && present - eye0.present > 64)) {
                 continue;
             }
             for (const auto& eye1 : g_engine_temporal_matrix_ring) {
                 if (!eye1.corrected_valid || !eye1.render_views_valid ||
                     eye1.eye != 1 || eye1.pair_id != eye0.pair_id ||
+                    eye1.generation != eye0.generation ||
+                    w3vr::mode3_transport::decide_effect_draw_projection(
+                            eye1.afw_pixel_projection, true,
+                            eye1.generation, current_generation,
+                            native_asymmetric_source_eye_tagged_for_generation(
+                                eye1.pair_id, 1, eye1.generation)) !=
+                        w3vr::mode3_transport::AfwPixelProjection::
+                            NativeAsymmetric ||
                     eye1.present > present + 2 ||
                     (present > eye1.present && present - eye1.present > 64)) {
                     continue;
@@ -16305,6 +16392,10 @@ bool match_native_focus_draw_eye(
     }
     authority.eye = eye;
     authority.pair_id = best_pair[eye];
+    authority.generation = current_generation;
+    authority.pixel_projection =
+        w3vr::mode3_transport::AfwPixelProjection::NativeAsymmetric;
+    authority.producer_transaction = false;
     authority.fov = best_fov[eye];
     authority.route = route;
     authority.selected_distance = best_distance[eye];
@@ -16371,38 +16462,31 @@ bool resolve_focus_fire_b1_authority(
         fabsf(estimated_y - kFocusFireCenterY) <= 0.06f) {
         detected_contract = 2;
         eye = estimated_x > 0.0f ? 0 : 1;
-        store_native_focus_draw_eye(
-            command_list, present, static_cast<uint32_t>(eye), 0);
         return true;
     } else {
         return true;
     }
 
-    // [FIX:STRICT-DLSS-FOCUS-FIRE-EXACT-EYE V1304] This draw has proved that
-    // b1 is still centered and therefore needs exactly one optical-center
-    // correction. In strict Stereo DLSS, use the immutable command-scoped tag
-    // transported from REDengine's exact sequential emitter, just as the
-    // specialized real-smoke route already does. This removes the normal-run
-    // dependency on whether an earlier smoke draw populated the command-list
-    // cache or the temporal camera ledger is already matchable. Contract 2
-    // returned above, so an already-asymmetric b1 can never be corrected twice.
-    if (g_streamline_dlss_route_tag_valid) {
-        const EngineFrameTag tag = g_streamline_dlss_route_tag;
-        const uint32_t generation =
-            g_streamline_capture_generation.load(std::memory_order_acquire);
-        if (tag.task_provenance_valid && tag.eye <= 1 &&
-            tag.pair_id != 0 && tag.pair_id != UINT64_MAX &&
-            tag.generation == generation) {
-            eye = static_cast<int>(tag.eye);
-            authority_route = 4;
-            store_native_focus_draw_eye(
-                command_list, present, tag.eye, tag.pair_id);
-            return true;
-        }
-    }
-
+    // [FIX:DLSS-EFFECT-PRODUCER-AUTHORITY V1342] The DLSS command stamped its
+    // actual producer on this command-list before recording any draw. Shared
+    // is a positive decision: keep b1 centered and never consult an older
+    // native temporal sample. Invalid likewise exposes a broken transaction
+    // instead of silently guessing another frame's eye.
     NativeFocusDrawEyeAuthority authority{};
-    if (load_native_focus_draw_eye(command_list, present, authority)) {
+    if (load_effect_draw_producer_authority(
+            command_list, present, authority) &&
+        authority.producer_transaction) {
+        authority_route = authority.route;
+        if (authority.pixel_projection == w3vr::mode3_transport::
+                AfwPixelProjection::NativeAsymmetric &&
+            authority.eye <= 1) {
+            eye = static_cast<int>(authority.eye);
+        }
+        return true;
+    }
+    if (authority.eye <= 1 &&
+        authority.pixel_projection == w3vr::mode3_transport::
+            AfwPixelProjection::NativeAsymmetric) {
         eye = static_cast<int>(authority.eye);
         authority_route = authority.route;
     } else if (cbv.size_in_bytes >= 0x24Cu &&
@@ -16421,8 +16505,9 @@ bool resolve_focus_fire_b1_authority(
                 camera_position, present, authority)) {
             eye = static_cast<int>(authority.eye);
             authority_route = authority.route;
-            store_native_focus_draw_eye(
-                command_list, present, authority.eye, authority.pair_id);
+            store_effect_draw_producer_authority(
+                command_list, present, authority.eye, authority.pair_id,
+                authority.generation, authority.pixel_projection, false);
         }
     }
 
@@ -16451,33 +16536,31 @@ bool select_real_smoke_offaxis_pipeline(
     }
     const uint64_t present =
         g_present_count.load(std::memory_order_relaxed);
-    // [FIX:STRICT-DLSS-SMOKE-EXACT-EYE V1231 1/2] Sequential DLSS already
-    // transports the immutable frame tag from REDengine's exact emitter to
-    // the deferred command execution scope. Consume that tag directly while
-    // the transparent draw is recorded. This removes the timing-dependent
-    // camera-ledger match from the normal DLSS path; the older CBV matcher is
-    // retained only for backends/scopes which genuinely have no command tag.
-    if (g_streamline_dlss_route_tag_valid) {
-        const EngineFrameTag tag = g_streamline_dlss_route_tag;
-        const uint32_t generation =
-            g_streamline_capture_generation.load(std::memory_order_acquire);
-        if (tag.task_provenance_valid && tag.eye <= 1 &&
-            tag.pair_id != 0 && tag.pair_id != UINT64_MAX &&
-            tag.generation == generation) {
-            store_native_focus_draw_eye(
-                command_list, present, tag.eye, tag.pair_id);
-            variant_pipeline =
-                g_real_smoke_center_pipelines[tag.eye].load(
-                    std::memory_order_acquire);
-            return variant_pipeline != nullptr;
-        }
-    }
     NativeFocusDrawEyeAuthority authority{};
-    if (load_native_focus_draw_eye(command_list, present, authority)) {
+    if (load_effect_draw_producer_authority(
+            command_list, present, authority)) {
+        if (authority.producer_transaction) {
+            // Shared and Invalid are authoritative zero-centre outcomes for
+            // this exact command. Do not fall through to a native ring entry.
+            if (authority.pixel_projection != w3vr::mode3_transport::
+                    AfwPixelProjection::NativeAsymmetric ||
+                authority.eye > 1) {
+                return false;
+            }
+        } else if (authority.pixel_projection != w3vr::mode3_transport::
+                AfwPixelProjection::NativeAsymmetric ||
+            authority.eye > 1) {
+            return false;
+        }
         variant_pipeline =
             g_real_smoke_center_pipelines[authority.eye].load(
                 std::memory_order_acquire);
         return variant_pipeline != nullptr;
+    }
+    // Sequential DLSS owns a producer transaction. If it is absent there is
+    // no legitimate older camera sample to substitute for this command.
+    if (dlss_sequential_mode_active()) {
+        return false;
     }
     CbvDescriptorInfo cbv{};
     if (!resolve_real_smoke_cbv(*state, 1, cbv) ||
@@ -16517,8 +16600,9 @@ bool select_real_smoke_offaxis_pipeline(
             camera_position, present, authority)) {
         return false;
     }
-    store_native_focus_draw_eye(
-        command_list, present, authority.eye, authority.pair_id);
+    store_effect_draw_producer_authority(
+        command_list, present, authority.eye, authority.pair_id,
+        authority.generation, authority.pixel_projection, false);
     variant_pipeline =
         g_real_smoke_center_pipelines[authority.eye].load(
             std::memory_order_acquire);
@@ -20836,18 +20920,13 @@ void STDMETHODCALLTYPE hook_draw_indexed_instanced(
         g_set_pipeline_state != nullptr &&
         g_set_graphics_root_descriptor_table != nullptr) {
         ID3D12PipelineState* variant_pipeline{};
-        // V1341 replaces V1217's route-wide AER exclusion. That exclusion was
-        // tied to the old centered/cropped AFW contract; V1339 now presents a
-        // proven full-frame absolute native pair. Use the same actual-producer
-        // gate as the automatic transparent family and retain the exact
-        // command-list eye selector below. Missing eye authority still falls
-        // closed to V1157's immutable zero-centre world-up variant.
-        const bool asymmetric_center = w3vr::mode3_transport::
-            native_asymmetric_effect_center_application_active(
-                real_smoke_center_fix_route_configured(),
-                native_stereo_runtime_enabled(),
-                native_asymmetric_cinema_panel_active(),
-                native_asymmetric_full_vr_scene_active());
+        // The draw's producer transaction decides SYM versus ASYM. Route
+        // configuration only ensures the immutable variants exist; it never
+        // substitutes the current F2 request for the pixels being drawn.
+        const bool asymmetric_center =
+            real_smoke_center_fix_route_configured() &&
+            !native_asymmetric_cinema_panel_active() &&
+            !native_asymmetric_full_vr_scene_active();
         bool variant_selected{};
         if (asymmetric_center) {
             variant_selected = select_real_smoke_offaxis_pipeline(
@@ -20897,7 +20976,7 @@ void STDMETHODCALLTYPE hook_draw_indexed_instanced(
     // restore the original PSO immediately afterward.
     ID3D12PipelineState* focus_fire_original{};
     ID3D12PipelineState* focus_fire_selected{};
-    if (native_asymmetric_transparent_center_route_active()) {
+    if (transparent_effect_draw_route_active()) {
         focus_fire_original = load_command_list_pipeline(command_list);
         focus_fire_selected = resolve_focus_fire_horizontal_draw_pso(
             command_list, focus_fire_original);
@@ -27943,6 +28022,12 @@ void __fastcall hook_engine_dlss_command(void* context, uint8_t** stream) {
     EngineFrameTag route_tag{};
     bool route_tag_valid{};
     uint32_t command_token{};
+    uint32_t command_word{};
+    void* raw_command_list{};
+    const bool command_probe_valid = stream != nullptr && *stream != nullptr &&
+        read_engine_dlss_command_probe(
+            *stream, command_word, raw_command_list) &&
+        raw_command_list != nullptr;
     if (dlss_sequential_mode_active() &&
         stream != nullptr && *stream != nullptr &&
         read_engine_dlss_command_token(*stream, command_token)) {
@@ -27973,13 +28058,10 @@ void __fastcall hook_engine_dlss_command(void* context, uint8_t** stream) {
         g_packed_accepted_pair_id >= 30) {
         static std::atomic<uint32_t> command_logs{};
         if (take_bounded_log_slot(command_logs, 64)) {
-            void* command_list{};
-            uint32_t command_word{};
-            read_engine_dlss_command_probe(*stream, command_word, command_list);
             log_line(
                 "Engine DLSS command context=%p stream=%p word0=0x%X command_list_28=%p "
                 "tid=%lu present=%llu token=%u route_eye=%u route_pair=%llu route_depth=%zu",
-                context, *stream, command_word, command_list,
+                context, *stream, command_word, raw_command_list,
                 static_cast<unsigned long>(GetCurrentThreadId()),
                 static_cast<unsigned long long>(g_present_count.load()),
                 command_token, route_eye,
@@ -28003,6 +28085,35 @@ void __fastcall hook_engine_dlss_command(void* context, uint8_t** stream) {
         route_tag.pair_id != UINT64_MAX;
     if (g_streamline_dlss_route_tag_valid) {
         g_streamline_dlss_route_tag = route_tag;
+    }
+    // [FIX:DLSS-EFFECT-PRODUCER-AUTHORITY V1342] Publish the producer-owned
+    // tri-state on the exact command list before REDengine records any draw.
+    // A valid SharedSymmetric bootstrap transaction is intentionally retained
+    // and prevents the draw hooks from substituting an older ASYM eye.
+    if (command_probe_valid) {
+        const uint32_t current_generation =
+            g_streamline_capture_generation.load(std::memory_order_acquire);
+        const bool exact_identity_valid =
+            g_streamline_dlss_route_tag_valid;
+        const auto projection = w3vr::mode3_transport::
+            decide_effect_draw_projection(
+                exact_identity_valid
+                    ? route_tag.pixel_projection
+                    : w3vr::mode3_transport::AfwPixelProjection::Invalid,
+                exact_identity_valid,
+                exact_identity_valid ? route_tag.generation : UINT32_MAX,
+                current_generation,
+                exact_identity_valid &&
+                    native_asymmetric_source_eye_tagged_for_generation(
+                        route_tag.pair_id, route_tag.eye,
+                        route_tag.generation));
+        store_effect_draw_producer_authority(
+            reinterpret_cast<ID3D12GraphicsCommandList*>(raw_command_list),
+            g_present_count.load(std::memory_order_relaxed),
+            exact_identity_valid ? route_tag.eye : UINT32_MAX,
+            exact_identity_valid ? route_tag.pair_id : 0,
+            exact_identity_valid ? route_tag.generation : current_generation,
+            projection, true);
     }
     const uint32_t route_flags =
         (route_tag_valid ? 0x01u : 0u) |
@@ -39452,7 +39563,7 @@ void ensure_initialized() {
                 "focus_fire_b1=stereo_and_aer_centered_draw_proven "
                 "aer_taau_hud=scene_and_retained_pair_fail_open");
             log_line(
-                "witcher3vr dxgi proxy initialized build=V1341 base=V1340_dlss_scene_history_boundary "
+                "witcher3vr dxgi proxy initialized build=V1343 base=V1342_actual_producer_smoke_authority "
                 "anchor_smoothing_ini=%d anchor_smoothing_seconds=%.4f "
                 "first_person_strafe_ini=%d mode3_aer_presentation=%d raytracing_enabled=%d raytracing_history_buffers=%d "
                 "aer_afw_enabled=%d persistent_registry=%d dlss_public_streamline=%d "
@@ -39511,7 +39622,7 @@ void ensure_initialized() {
             log_line(
                 "V1310 route flight recorder=ini_opt_in default_off f3_dump=15s renderdoc_f3_preserved=1 qpc=present_only gpu_readback=0 descriptor_scan=0 text_hotpath=0");
             log_line(
-                "V1341 mode3_projection=V1331_runtime_SYM_ASYM stereo_hud_generation_reset=drain_then_rebuild dlss_scene_history=exact_post_boundary_reset aer_afw_projection=full_frame_absolute_native_pair native_asym_submit=full_frame asym_effects=stereo_and_aer_centered_draw_only flight_recorders=F3");
+                "V1343 mode3_projection=V1331_runtime_SYM_ASYM stereo_hud_generation_reset=drain_then_rebuild dlss_scene_history=exact_post_boundary_reset aer_afw_projection=full_frame_absolute_native_pair native_asym_submit=full_frame asym_effects=actual_producer_factory_proven smoke_authority=current_generation_native_only aer_hud_geometry=runtime_coherent_eye_pair flight_recorders=F3");
             log_line(
                 "V1279 DLSS compatibility=public_streamline_aer_private_history_ngx_stereo legacy_module_agnostic_discovery=disabled_by_V1288");
             log_line(
@@ -40031,6 +40142,22 @@ bool composite_mode3_hud_into_projection_image(
             exact_eye_views[eye].fov = submitted_views[eye].fov;
         }
     }
+    // [FIX:AER-HUD-COHERENT-EYE-GEOMETRY V1343] AER's two submitted scene
+    // views can belong to different render instants by design.  Their FOV and
+    // imageRect still own the final scene and the HUD raster mapping below,
+    // but deriving an anatomical baseline from that temporal pair changes the
+    // physical meaning of hud_stereo_shift_px.  Freeze the current coherent
+    // xrLocateViews pair solely for the cyclopean HUD plane.  Strict Stereo
+    // keeps the submitted pair, where both eyes already share one render tick.
+    std::array<XrView, 2> hud_geometry_views = exact_eye_views;
+    const bool coherent_aer_hud_geometry =
+        !cinema_projection && mode3_aer_presentation_active() &&
+        g_xr_views.size() >= 2;
+    if (coherent_aer_hud_geometry) {
+        for (uint32_t eye = 0; eye < 2; ++eye) {
+            hud_geometry_views[eye].pose = g_xr_views[eye].pose;
+        }
+    }
     w3vr::openxr_eye_geometry::EyeGeometry hud_eye_geometry{};
     constexpr XrViewStateFlags kRequiredPoseFlags =
         XR_VIEW_STATE_ORIENTATION_VALID_BIT |
@@ -40043,7 +40170,7 @@ bool composite_mode3_hud_into_projection_image(
         (current_view_flags & kRequiredPoseFlags) == kRequiredPoseFlags &&
         std::isfinite(inverse_hud_distance) &&
         w3vr::openxr_eye_geometry::compute(
-            exact_eye_views, hud_eye_geometry) &&
+            hud_geometry_views, hud_eye_geometry) &&
         hud_eye_geometry.baseline_m >= 0.04f &&
         hud_eye_geometry.baseline_m <= 0.10f &&
         hud_eye_geometry.cant_degrees <= 45.0f;
@@ -40104,13 +40231,16 @@ bool composite_mode3_hud_into_projection_image(
             log_line(
                 "HUD Quest-reference plane active pair=%llu route=%s "
                 "reference_shift=%d size=%.3f distance_m=%.4f "
-                "baseline_m=%.6f cant_degrees=%.4f "
+                "baseline_m=%.6f cant_degrees=%.4f geometry=%s "
                 "rect0=%d,%d %dx%d rect1=%d,%d %dx%d",
                 static_cast<unsigned long long>(scene_pair_id),
                 automatic_full_vr_cutscene ? "full_vr" : "gameplay",
                 reference_left_eye_shift, hud_size, hud_distance,
                 hud_eye_geometry.baseline_m,
                 hud_eye_geometry.cant_degrees,
+                coherent_aer_hud_geometry
+                    ? "runtime_coherent_aer"
+                    : "submitted_pair",
                 submitted_views[0].subImage.imageRect.offset.x,
                 submitted_views[0].subImage.imageRect.offset.y,
                 submitted_views[0].subImage.imageRect.extent.width,
@@ -46086,7 +46216,7 @@ void render_openxr_test_frame(
                                 1, std::memory_order_relaxed);
                         if (log_index < 16) {
                             log_line(
-                                "V1341 final Mode3 OpenXR submit sample=%u "
+                                "V1343 final Mode3 OpenXR submit sample=%u "
                                 "route=%s backend=%s dlaa=%u projection=%s "
                                 "source=%ux%u swapchain=%ux%u "
                                 "rect0=%d,%d %dx%d rect1=%d,%d %dx%d "
@@ -47371,7 +47501,7 @@ void handle_runtime_mode3_projection_hotkey() {
     }
     if (!mode3_stereo_transport_active()) {
         log_line(
-            "V1341 runtime projection hotkey=F2 ignored route=non_mode3 "
+            "V1343 runtime projection hotkey=F2 ignored route=non_mode3 "
             "present=%llu",
             static_cast<unsigned long long>(
                 g_present_count.load(std::memory_order_relaxed)));
@@ -47381,7 +47511,7 @@ void handle_runtime_mode3_projection_hotkey() {
     g_runtime_mode3_projection_toggle_requests.fetch_add(
         1, std::memory_order_release);
     log_line(
-        "V1341 Mode3 runtime projection toggle queued hotkey=F2 "
+        "V1343 Mode3 runtime projection toggle queued hotkey=F2 "
         "route=%s present=%llu",
         mode3_aer_presentation_active() ? "aer" : "stereo",
         static_cast<unsigned long long>(
@@ -47437,7 +47567,7 @@ void apply_present_boundary_requests() {
             native_asymmetric, std::memory_order_release);
         g_mode3_final_submit_logs.store(0, std::memory_order_release);
         log_line(
-            "V1341 Mode3 runtime projection=%s hotkey=F2 route=%s "
+            "V1343 Mode3 runtime projection=%s hotkey=F2 route=%s "
             "boundary=post_submit present=%llu requests=%u",
             native_asymmetric ? "asymmetric" : "symmetric",
             mode3_aer_presentation_active() ? "aer" : "stereo",
@@ -47460,7 +47590,7 @@ void handle_f3_capture_hotkey(IDXGISwapChain* swapchain) {
     if (w3vr::pipeline_flight::enabled()) {
         w3vr::pipeline_flight::dump_last_ten_seconds();
     }
-    w3vr::route_flight::dump_last_seconds("V1341", 15);
+    w3vr::route_flight::dump_last_seconds("V1343", 15);
     trigger_renderdoc_capture(
         g_game_swapchain != nullptr ? g_game_swapchain : swapchain);
 }

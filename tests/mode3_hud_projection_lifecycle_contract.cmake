@@ -21,6 +21,9 @@ set(required_fragments
     "bool ensure_asymmetric_bootstrap_hud_psos()"
     "ensure_asymmetric_bootstrap_hud_psos();"
     "V1335 deferred asymmetric HUD ready"
+    "const bool coherent_aer_hud_geometry ="
+    "hud_geometry_views[eye].pose = g_xr_views[eye].pose;"
+    "hud_geometry_views, hud_eye_geometry)"
 )
 
 foreach(fragment IN LISTS required_fragments)

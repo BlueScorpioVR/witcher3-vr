@@ -37,6 +37,7 @@ int main() {
     using w3vr::mode3_transport::submitted_hud_join_route_active;
     using w3vr::mode3_transport::submitted_hud_join_window_matches;
     using w3vr::mode3_transport::native_asymmetric_effect_center_application_active;
+    using w3vr::mode3_transport::decide_effect_draw_projection;
     using w3vr::mode3_transport::native_asymmetric_effect_preparation_configured;
     using w3vr::mode3_transport::strict_stereo_retained_hud_pair_fresh;
     using w3vr::mode3_transport::symmetric_producer_fov_scale;
@@ -64,6 +65,28 @@ int main() {
         true, true, false, true));
     assert(!native_asymmetric_effect_preparation_configured(
         true, true, true, false));
+
+    // Deferred smoke/fire correction follows the pixels that were actually
+    // produced, not the live F2 request. Shared warm-up is a positive producer
+    // result and must stop lookup; only native pixels select a per-eye centre.
+    assert(decide_effect_draw_projection(
+        AfwPixelProjection::NativeAsymmetric, true, 7, 7, true) ==
+        AfwPixelProjection::NativeAsymmetric);
+    assert(decide_effect_draw_projection(
+        AfwPixelProjection::SharedSymmetric, true, 7, 7, false) ==
+        AfwPixelProjection::SharedSymmetric);
+    assert(decide_effect_draw_projection(
+        AfwPixelProjection::NativeAsymmetric, false, 7, 7, true) ==
+        AfwPixelProjection::Invalid);
+    assert(decide_effect_draw_projection(
+        AfwPixelProjection::NativeAsymmetric, true, 6, 7, true) ==
+        AfwPixelProjection::Invalid);
+    assert(decide_effect_draw_projection(
+        AfwPixelProjection::NativeAsymmetric, true, 7, 7, false) ==
+        AfwPixelProjection::Invalid);
+    assert(decide_effect_draw_projection(
+        AfwPixelProjection::Invalid, true, 7, 7, true) ==
+        AfwPixelProjection::Invalid);
 
     // The public owner is intentionally narrow. Only Mode-3 OpenXR DLSS can
     // enter it. Projection is not an input, so AER and strict Stereo receive
