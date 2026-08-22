@@ -10151,6 +10151,29 @@ bool lookup_dlss_recording_producer(
             g_streamline_capture_generation.load(std::memory_order_acquire);
 }
 
+// [FIX:AER-TAAU-FULL-VR-HUD-COMMAND-TAG V1302 1/5] TAAU already freezes
+// the exact matrix-resolved eye/pair on its recording command list before
+// ExecuteCommandLists detaches the pending submission. Expose that immutable
+// identity to the Cinema HUD selector just as DLSS exposes its recording
+// producer tag; never substitute the previously completed render task.
+bool lookup_taau_recording_producer(
+    ID3D12GraphicsCommandList* command_list,
+    EngineFrameTag& tag) {
+    if (command_list == nullptr) {
+        return false;
+    }
+    std::scoped_lock lock{g_taau_submission_mutex};
+    const auto found = g_taau_pending_submissions.find(command_list);
+    if (found == g_taau_pending_submissions.end() ||
+        found->second.empty()) {
+        return false;
+    }
+    tag = found->second.back();
+    return tag.task_provenance_valid && tag.eye <= 1 && tag.pair_id != 0 &&
+        tag.pair_id != UINT64_MAX && tag.generation ==
+            g_streamline_capture_generation.load(std::memory_order_acquire);
+}
+
 bool valid_aer_cinema_exact_tag(const EngineFrameTag& tag) {
     return tag.task_provenance_valid && tag.eye <= 1 &&
         tag.pair_id != 0 && tag.pair_id != UINT64_MAX &&
@@ -10228,24 +10251,10 @@ bool resolve_aer_cinema_command_list_tag(
             }
         }
         if ((lookup_dlss_recording_producer(command_list, tag) ||
+                lookup_taau_recording_producer(command_list, tag) ||
                 lookup_streamline_command_list_route(command_list, tag)) &&
             valid_aer_cinema_exact_tag(tag)) {
             record_aer_cinema_command_list_render_tag(command_list, tag);
-            return true;
-        }
-    }
-    return false;
-}
-
-bool latest_aer_cinema_completed_frame_for_present(
-    uint64_t producer_present,
-    EngineFrameTag& tag) {
-    std::scoped_lock lock{g_aer_cinema_exact_eye_mutex};
-    for (auto it = g_aer_cinema_completed_frames.rbegin();
-         it != g_aer_cinema_completed_frames.rend(); ++it) {
-        if (it->producer_present == producer_present &&
-            valid_aer_cinema_exact_tag(it->tag)) {
-            tag = it->tag;
             return true;
         }
     }
@@ -10262,16 +10271,11 @@ void record_aer_cinema_hud_draw_proof(
         resolve_aer_cinema_command_list_tag(command_list, tag);
     const uint64_t producer_present =
         g_present_count.load(std::memory_order_relaxed);
-    const bool same_present_completed_tag =
-        !exact_tag && temporal_backend_is_taau() &&
-        latest_aer_cinema_completed_frame_for_present(
-            producer_present, tag);
     std::scoped_lock lock{g_aer_cinema_exact_eye_mutex};
     auto& proof = g_aer_cinema_hud_proofs[producer_present];
     proof.draw_seen = true;
     const bool resolved_exact_tag =
-        (exact_tag || same_present_completed_tag) &&
-        valid_aer_cinema_exact_tag(tag);
+        exact_tag && valid_aer_cinema_exact_tag(tag);
     if (resolved_exact_tag) {
         // The final HUD draw in this producer interval owns the final
         // backbuffer. Deferred auxiliary draws may precede it, so retain the
@@ -10304,14 +10308,15 @@ void publish_aer_cinema_completed_frame(
     std::scoped_lock lock{g_aer_cinema_exact_eye_mutex};
     // [FIX:AER-CINEMA-DEFERRED-HUD-JOIN V1215 1/2] The final Cinema HUD draw
     // can occur after REDengine's task TLS has unwound on every AER route.
-    // The draw is still inside this exact producer-Present interval. Join it
-    // draw to the exact completed task now; if more than one task completes
-    // in the interval, the newest task overwrites both the scene candidate
-    // and HUD proof, preserving final-backbuffer order without parity.
+    // [FIX:AER-TAAU-FULL-VR-HUD-COMMAND-TAG V1302 2/5] Preserve a proof
+    // already resolved from the exact recording command list. Only a draw
+    // that genuinely lacked command-list identity may be joined to the
+    // completed task here. Overwriting an exact TAAU proof used to conceal
+    // the eye-0 PSO baked into an eye-1 HUD capture.
     const auto hud_proof =
         g_aer_cinema_hud_proofs.find(producer_present);
     if (hud_proof != g_aer_cinema_hud_proofs.end() &&
-        hud_proof->second.draw_seen) {
+        hud_proof->second.draw_seen && !hud_proof->second.tag_valid) {
         hud_proof->second.tag = source_tag;
         hud_proof->second.tag_valid = true;
     }
@@ -10415,6 +10420,10 @@ void record_mode3_aer_afw_final_hud_tag(
     bool exact_tag = (strict_stereo_route &&
             current_exact_engine_render_tag(tag)) ||
         lookup_dlss_recording_producer(command_list, tag) ||
+        // [FIX:AER-TAAU-FULL-VR-HUD-COMMAND-TAG V1302 3/5] Keep the retained
+        // t1 label on the same exact TAAU command-list identity used to choose
+        // its HUD PSO. The natural AER ordinal remains fallback-only.
+        lookup_taau_recording_producer(command_list, tag) ||
         lookup_streamline_command_list_route(command_list, tag);
     exact_tag = exact_tag && tag.eye <= 1 && tag.pair_id != 0 &&
         tag.pair_id != UINT64_MAX && tag.generation == generation &&
@@ -19209,26 +19218,28 @@ void STDMETHODCALLTYPE hook_set_pipeline_state(
                     hud_eye_authority = "exact_tag_missing";
                 }
             }
-            // [FIX:AER-TAAU-FULL-VR-HUD-PSO V1258 1/1] In automatic Full VR,
-            // the deferred TAAU HUD bind can occur after task TLS has unwound
-            // and its command list has no Streamline tag. V1257 recovered the
-            // exact scene identity only after this bind, so publication opened
-            // around pixels rendered with a stale or original HUD PSO. Select
-            // the actual per-eye PSO from the newest completed task in this
-            // exact producer-Present interval. Missing authority remains
-            // fail-open and is never inferred from parity or another Present.
+            // [FIX:AER-TAAU-FULL-VR-HUD-COMMAND-TAG V1302 4/5] TAAU's old
+            // same-Present completed task is the render immediately preceding
+            // this HUD command list. It therefore selected eye 0 while the
+            // immutable t1 capture on that list belonged to eye 1 (and vice
+            // versa). Resolve TAAU from the exact pending command-list tag,
+            // matching DLSS. Missing identity fails open on the original PSO;
+            // it is never replaced by the preceding eye.
             if (automatic_full_vr_hud &&
                 mode3_aer_presentation_active() &&
                 temporal_backend_is_taau()) {
-                EngineFrameTag completed_cinema_hud_tag{};
-                if (latest_aer_cinema_completed_frame_for_present(
-                        g_present_count.load(std::memory_order_relaxed),
-                        completed_cinema_hud_tag)) {
+                EngineFrameTag exact_taau_hud_tag{};
+                if (resolve_aer_cinema_command_list_tag(
+                        command_list, exact_taau_hud_tag)) {
                     hud_eye = static_cast<int>(
-                        completed_cinema_hud_tag.eye);
-                    hud_pair_id = completed_cinema_hud_tag.pair_id;
+                        exact_taau_hud_tag.eye);
+                    hud_pair_id = exact_taau_hud_tag.pair_id;
                     hud_eye_authority =
-                        "taau_same_present_completed";
+                        "taau_exact_command_list";
+                } else {
+                    hud_eye = -1;
+                    hud_pair_id = 0;
+                    hud_eye_authority = "taau_exact_tag_missing";
                 }
             }
             record_mode3_aer_afw_final_hud_tag(
@@ -37955,11 +37966,11 @@ void ensure_initialized() {
                 "native_presentation_size=pair_fov_tangent_scaled "
                 "aer_final_source_cinema=strict_sequential_pair "
                 "aer_cinema_eye_phase=final_backbuffer_opposite_command_list "
-                "aer_cinema_hud_phase=dlss_native_taau_opposite "
+                "aer_cinema_hud_phase=dlss_taau_exact_command_list "
                 "focus_fire_b1=stereo_structural_aer_upstream_owner "
                 "aer_taau_hud=scene_and_retained_pair_fail_open");
             log_line(
-                "witcher3vr dxgi proxy initialized build=V1315 base=V1314_plus_V1298_V1299 "
+                "witcher3vr dxgi proxy initialized build=V1316 base=V1315_plus_V1302 "
                 "anchor_smoothing_ini=%d anchor_smoothing_seconds=%.4f "
                 "first_person_strafe_ini=%d mode3_aer_presentation=%d raytracing_enabled=%d raytracing_history_buffers=%d "
                 "aer_afw_enabled=%d persistent_registry=%d dlss_public_streamline=%d "
@@ -38013,6 +38024,8 @@ void ensure_initialized() {
                 "V1298 AER TAAU AFW camera_transport=strict_ordered_alternating_fifo matrix=validation_only searchable_history=removed capacity=4 mismatch=fail_closed");
             log_line(
                 "V1299 AER TAAU AFW camera producer_gate=shared_gameplay_policy consumer_gate=shared_gameplay_policy normal_gameplay_capture=restored");
+            log_line(
+                "V1302 AER TAAU Full-VR HUD authority=exact_pending_command_list matches_dlss=1 preceding_completed_eye=removed retained_t1_same_tag=1");
             log_line(
                 "V1279 DLSS compatibility=public_streamline_aer_private_history_ngx_stereo legacy_module_agnostic_discovery=disabled_by_V1288");
             log_line(
