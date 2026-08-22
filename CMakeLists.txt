@@ -245,6 +245,13 @@ if(BUILD_TESTING)
             "-DHUD_EDITOR_SCRIPT=${CMAKE_CURRENT_SOURCE_DIR}/support/modWitcher3VRHUDEditor/content/scripts/local/witcher3vr_hud_editor/hud_editor.ws"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/hud_editor_subtitle_preview_nudge_contract.cmake"
     )
+
+    add_test(
+        NAME renderer_mode3_projection_transition_contract
+        COMMAND "${CMAKE_COMMAND}"
+            "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/mode3_projection_transition_contract.cmake"
+    )
 endif()
 
 option(W3VR_BUILD_LAUNCHER "Build the Witcher 3 VR launcher" ON)

@@ -1,5 +1,8 @@
 #include "mode3_transport_policy.h"
 
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
 #include <cassert>
 #include <initializer_list>
 
@@ -12,6 +15,7 @@ int main() {
     using w3vr::mode3_transport::afw_queued_producer_expired;
     using w3vr::mode3_transport::dlss_submission_route_active;
     using w3vr::mode3_transport::decide_final_submit;
+    using w3vr::mode3_transport::decide_projection_pair;
     using w3vr::mode3_transport::decide_runtime_projection_transition;
     using w3vr::mode3_transport::dlss_completion_apply_public_jitter;
     using w3vr::mode3_transport::dlss_completion_capture_public_bundle;
@@ -27,7 +31,7 @@ int main() {
     using w3vr::mode3_transport::select_swapchain_dimension;
     using w3vr::mode3_transport::submission_queue_eligible;
     using w3vr::mode3_transport::streamline_dlss_evaluate_callback_active;
-    using w3vr::mode3_transport::strict_stereo_symmetric_subimage_active;
+    using w3vr::mode3_transport::mode3_symmetric_subimage_active;
     using w3vr::mode3_transport::submitted_hud_join_route_active;
     using w3vr::mode3_transport::submitted_hud_join_window_matches;
     using w3vr::mode3_transport::strict_stereo_retained_hud_pair_fresh;
@@ -109,8 +113,8 @@ int main() {
         .transport == FinalTransport::Unavailable);
 
     // Mode 3 transports the complete selected-resolution texture into a
-    // matching OpenXR destination. Strict Stereo may select a subImage from
-    // that texture, but the GPU handoff itself never resizes or pads it.
+    // matching OpenXR destination. A genuine Mode-3 SYM source may select a
+    // subImage from that texture, but the GPU handoff never resizes or pads it.
     assert(select_swapchain_dimension(
         true, 2496, 3072, 2496, 16384) == 2496);
     assert(select_swapchain_dimension(
@@ -137,19 +141,12 @@ int main() {
     assert(symmetric_producer_fov_scale(0.0f, 1.0f) == 2.0f);
     assert(symmetric_producer_fov_scale(2.0f, 1.0f) == 1.0f);
 
-    // Strict Stereo always maps a genuinely symmetric source to the per-eye
+    // Every Mode-3 route maps a genuinely symmetric source to the per-eye
     // tangent interval. Runtime F2 changes the producer itself; it is not a
-    // second optical gate. Native ASYM stays full and AER is still excluded.
-    assert(strict_stereo_symmetric_subimage_active(
-        true, false, false));
-    assert(!strict_stereo_symmetric_subimage_active(
-        false, false, false));
-    assert(!strict_stereo_symmetric_subimage_active(
-        true, false, true));
-    assert(!strict_stereo_symmetric_subimage_active(
-        true, true, false));
-    assert(!strict_stereo_symmetric_subimage_active(
-        true, true, true));
+    // second optical gate. A native ASYM source always stays full-frame.
+    assert(mode3_symmetric_subimage_active(true, false));
+    assert(!mode3_symmetric_subimage_active(false, false));
+    assert(!mode3_symmetric_subimage_active(true, true));
 
     // F2 requests are consumed only at an eligible safe boundary. Multiple
     // Present/Present1 observations collapse by parity, so two edges cannot
@@ -169,6 +166,22 @@ int main() {
     const auto ineligible = decide_runtime_projection_transition(
         false, 1, false);
     assert(!ineligible.apply && !ineligible.native_asymmetric);
+
+    // AER may publish through the final-eye cache, the packed cache or the
+    // AFW sequencer. Whichever owner is selected, both eyes must prove the
+    // same current generation and the same projection encoding.
+    const auto symmetric_pair = decide_projection_pair(
+        true, true, 7, 7, 7, false, false);
+    assert(symmetric_pair.ready && !symmetric_pair.native_asymmetric);
+    const auto asymmetric_pair = decide_projection_pair(
+        true, true, 7, 7, 7, true, true);
+    assert(asymmetric_pair.ready && asymmetric_pair.native_asymmetric);
+    assert(!decide_projection_pair(
+        false, true, 7, 7, 7, false, false).ready);
+    assert(!decide_projection_pair(
+        true, true, 6, 7, 7, false, false).ready);
+    assert(!decide_projection_pair(
+        true, true, 7, 7, 7, false, true).ready);
 
     // An exact command-list publication must be observable on either queue.
     assert(submission_queue_eligible(true, true));

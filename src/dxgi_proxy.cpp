@@ -953,12 +953,12 @@ const char* temporal_backend_name() {
 
 std::atomic<float> g_hmd_fov_scale{1.0f};
 // Present and Present1 can both service the same physical key. One atomic
-// latch provides one edge for the runtime Stereo projection switch and one for
+// latch provides one edge for the runtime Mode-3 projection switch and one for
 // the shared capture action. Resettable submit sampling proves the first frames
 // produced after every projection transition.
 std::atomic<bool> g_f2_hotkey_down{};
 std::atomic<bool> g_f3_hotkey_down{};
-std::atomic<uint32_t> g_runtime_stereo_projection_toggle_requests{};
+std::atomic<uint32_t> g_runtime_mode3_projection_toggle_requests{};
 std::atomic<uint32_t> g_mode3_final_submit_logs{};
 std::once_flag g_config_once{};
 
@@ -1121,6 +1121,9 @@ ID3D12Resource* g_stereo_eye_cache[2]{};
 bool g_stereo_eye_cache_initialized[2]{};
 XrView g_stereo_eye_cache_views[2]{{XR_TYPE_VIEW}, {XR_TYPE_VIEW}};
 bool g_stereo_eye_cache_view_valid[2]{};
+uint32_t g_stereo_eye_cache_projection_generation[2]{};
+bool g_stereo_eye_cache_projection_valid[2]{};
+bool g_stereo_eye_cache_native_asymmetric[2]{};
 
 // PureDark keeps one shared ABI/resource implementation. Legacy AER DLSS
 // freezes inputs at NGX submission; V12053 freezes Mode-3 AER No-AA inputs on
@@ -2763,6 +2766,14 @@ EngineFrameTag make_aer_frame_tag(uint64_t render_ordinal) {
         tag.render_view = g_config.hmd_compositor_only
             ? g_hmd_center_views[identity.eye]
             : g_xr_views[identity.eye];
+        XrFovf frozen_fov{};
+        if (snapshot_native_asymmetric_pair_fov(
+                identity.pair_id, identity.eye, frozen_fov)) {
+            // ASYM pixels were rendered with the producer's p-scaled tangent
+            // interval. Carry that exact FOV through AER just as strict Stereo
+            // does; raw runtime FOV would overstate the frame below scale 1.
+            tag.render_view.fov = frozen_fov;
+        }
         tag.render_view_valid = true;
     }
     tag.hmd_pose = snapshot_current_hmd_camera_pose();
@@ -4656,6 +4667,12 @@ std::atomic<uint64_t> g_taau_history_invalidations{};
 std::atomic<bool> g_automatic_full_vr_camera_active{};
 std::atomic<uintptr_t> g_automatic_full_vr_native_camera{};
 std::atomic<uint8_t> g_stereo_taau_history_reset_mask{};
+// A live SYM/ASYM producer switch starts a new temporal lineage. Old command
+// lists may finish after the Present boundary, so each backend consumes its
+// per-eye reset only from an exact tag in this generation.
+std::atomic<uint32_t> g_mode3_projection_reset_generation{};
+std::atomic<uint8_t> g_mode3_taau_projection_reset_mask{};
+std::atomic<uint8_t> g_mode3_dlss_projection_reset_mask{};
 // Loading can leave a delayed pre-boundary TAAU command list in flight. Keep a
 // separate reset request pending until each eye sees a strictly newer pair.
 std::atomic<uint8_t> g_loading_taau_history_reset_mask{};
@@ -8924,25 +8941,35 @@ void capture_puredark_afw_camera(
     // [FIX:PUREDARK-AFW-AER-DIRECT-PEER-FOV V12080 1/1]
     // `capture_puredark_afw_dlss_inputs` consumes this exact route-tagged
     // camera producer. Mode-3 AER has no same-tick Stereo pair ledger, so use
-    // the exact routed source FOV and the immutable recentered peer-eye rig.
-    // Depth, MVec, scale and command ordering remain the exact NGX inputs.
+    // the immutable recentered peer-eye poses and both FOVs frozen with the
+    // exact native-asymmetric producer pair. Depth, MVec, scale and command
+    // ordering remain the exact NGX inputs.
     if (puredark_afw_mode3_aer_dlss_route_configured() &&
         native_asymmetric_noaa_route_active()) {
         const bool final_source_already_compensated =
             puredark_afw_mode3_aer_dlss_final_source_active();
         const uint32_t destination_eye = 1u - routed_eye;
-        const XrFovf source_fov = route_tag.render_view.fov;
+        XrFovf source_fov{};
         XrFovf destination_fov{};
+        bool aer_reference_poses_valid{};
         {
             std::scoped_lock pose_lock{g_hmd_pose_snapshot_mutex};
             if (g_hmd_center_valid.load(std::memory_order_acquire) &&
                 g_hmd_pose_valid.load(std::memory_order_acquire)) {
-                aer_reference_views = {
-                    g_hmd_center_views[0], g_hmd_center_views[1]};
-                destination_fov =
-                    aer_reference_views[destination_eye].fov;
-                aer_reference_views_valid = true;
+                aer_reference_views[0].pose = g_hmd_center_views[0].pose;
+                aer_reference_views[1].pose = g_hmd_center_views[1].pose;
+                aer_reference_poses_valid = true;
             }
+        }
+        const bool frozen_pair_fovs_valid =
+            snapshot_native_asymmetric_pair_fov(
+                route_tag.pair_id, routed_eye, source_fov) &&
+            snapshot_native_asymmetric_pair_fov(
+                route_tag.pair_id, destination_eye, destination_fov);
+        if (aer_reference_poses_valid && frozen_pair_fovs_valid) {
+            aer_reference_views[routed_eye].fov = source_fov;
+            aer_reference_views[destination_eye].fov = destination_fov;
+            aer_reference_views_valid = true;
         }
         w3vr::openxr_eye_geometry::AsymmetricProjectionDescriptor
             source_projection{};
@@ -11321,9 +11348,15 @@ bool publish_puredark_afw_mode3_common(
     const bool destination_valid = synthesized_eye_valid &&
         g_packed_present_cache[result.synthesized_eye] != nullptr;
     const bool output_valid = result.synthesized_color.texture != nullptr;
+    const bool eye0_native_asymmetric = result.render_views_valid &&
+        fov_has_off_axis_center(result.render_views[0].fov);
+    const bool eye1_native_asymmetric = result.render_views_valid &&
+        fov_has_off_axis_center(result.render_views[1].fov);
+    const bool projection_pair_valid = result.render_views_valid &&
+        eye0_native_asymmetric == eye1_native_asymmetric;
     if (!route_configured || command_list == nullptr || !result.valid ||
         !identity_valid || !generation_valid || !real_color_valid ||
-        !destination_valid || !output_valid) {
+        !destination_valid || !output_valid || !projection_pair_valid) {
         return false;
     }
     route_flight.advance(
@@ -11393,13 +11426,10 @@ bool publish_puredark_afw_mode3_common(
         result.render_views_valid;
     g_mode3_aer_packed_eye_valid[synthesized_eye] = true;
     g_mode3_aer_packed_eye_generated[synthesized_eye] = true;
-    for (uint32_t eye = 0; eye < 2; ++eye) {
-        g_mode3_aer_packed_native_eye[eye] =
-            fov_has_off_axis_center(result.render_views[eye].fov);
-    }
+    g_mode3_aer_packed_native_eye[0] = eye0_native_asymmetric;
+    g_mode3_aer_packed_native_eye[1] = eye1_native_asymmetric;
     g_packed_present_cache_native_asymmetric =
-        g_mode3_aer_packed_native_eye[0] &&
-        g_mode3_aer_packed_native_eye[1];
+        eye0_native_asymmetric;
     g_packed_present_cache_valid = true;
     g_packed_last_accepted_present =
         g_present_count.load(std::memory_order_relaxed);
@@ -20738,6 +20768,12 @@ void reset_loading_video_presentation_state(uint64_t present) {
     g_packed_present_cache_view_valid[0] = false;
     g_packed_present_cache_view_valid[1] = false;
     g_packed_present_cache_native_asymmetric = false;
+    g_stereo_eye_cache_projection_generation[0] = 0;
+    g_stereo_eye_cache_projection_generation[1] = 0;
+    g_stereo_eye_cache_projection_valid[0] = false;
+    g_stereo_eye_cache_projection_valid[1] = false;
+    g_stereo_eye_cache_native_asymmetric[0] = false;
+    g_stereo_eye_cache_native_asymmetric[1] = false;
     reset_mode3_aer_presentation_state(generation, false);
     reset_sequential_cinema_pair_authority(0, false);
     g_packed_runtime_ready.store(false, std::memory_order_release);
@@ -22131,8 +22167,10 @@ struct TaauHmdMotionParameters {
     float far_plane{};
     uint64_t matched_present{};
     uint64_t matched_pair_id{};
+    uint32_t matched_generation{};
     uint64_t previous_matched_present{};
     uint64_t previous_matched_pair_id{};
+    uint32_t previous_matched_generation{};
     int matched_eye{-1};
     float matrix_error{};
     bool exact_pair_match{};
@@ -22156,7 +22194,8 @@ bool find_taau_hmd_motion_parameters(
     int expected_eye,
     uint64_t expected_pair_id,
     TaauHmdMotionParameters& out,
-    uint64_t expected_previous_pair_id = 0) {
+    uint64_t expected_previous_pair_id = 0,
+    uint32_t expected_generation = 0) {
     if (taau_matrix == nullptr) {
         return false;
     }
@@ -22170,6 +22209,10 @@ bool find_taau_hmd_motion_parameters(
         const auto find_current = [&](bool require_pair_id) {
             for (const auto& pair : g_engine_temporal_matrix_ring) {
                 if (!pair.corrected_valid || !pair.hmd_pose_valid) {
+                    continue;
+                }
+                if (expected_generation != 0 &&
+                    pair.generation != expected_generation) {
                     continue;
                 }
                 if (expected_eye >= 0 && pair.eye != expected_eye) {
@@ -22203,6 +22246,10 @@ bool find_taau_hmd_motion_parameters(
             if (!pair.hmd_pose_valid || pair.eye != current.eye) {
                 continue;
             }
+            if (expected_generation != 0 &&
+                pair.generation != expected_generation) {
+                continue;
+            }
             if (expected_previous_pair_id != 0) {
                 if (pair.pair_id == expected_previous_pair_id) {
                     previous = pair;
@@ -22226,8 +22273,10 @@ bool find_taau_hmd_motion_parameters(
     // when the complete current/previous pair cannot be returned.
     out.matched_present = current.present;
     out.matched_pair_id = current.pair_id;
+    out.matched_generation = current.generation;
     out.previous_matched_present = previous.present;
     out.previous_matched_pair_id = previous.pair_id;
+    out.previous_matched_generation = previous.generation;
     out.matched_eye = current.eye;
     out.matrix_error = best_error;
     out.exact_pair_match = exact_pair_match;
@@ -22329,8 +22378,10 @@ bool find_taau_hmd_motion_parameters(
     out.far_plane = current.far_plane;
     out.matched_present = current.present;
     out.matched_pair_id = current.pair_id;
+    out.matched_generation = current.generation;
     out.previous_matched_present = previous.present;
     out.previous_matched_pair_id = previous.pair_id;
+    out.previous_matched_generation = previous.generation;
     out.matched_eye = current.eye;
     out.matrix_error = best_error;
     out.exact_pair_match = exact_pair_match;
@@ -22878,8 +22929,11 @@ bool dispatch_taau_inplace_marker(
     const uint64_t tls_render_pair_id = g_engine_render_pair_id;
     const uint64_t tls_producer_pair_id = g_engine_producer_pair_id;
     const uint32_t tls_render_generation = g_engine_render_generation;
+    const uint32_t current_capture_generation =
+        g_streamline_capture_generation.load(std::memory_order_acquire);
     int expected_eye = tls_render_eye;
     uint64_t expected_pair_id = tls_render_pair_id;
+    uint32_t expected_generation = tls_render_generation;
     bool identity_recovered = false;
     bool completed_tag_authority = false;
     if (g_config.openxr_mode == 2) {
@@ -22900,7 +22954,8 @@ bool dispatch_taau_inplace_marker(
         TaauHmdMotionParameters matrix_identity{};
         const bool matrix_identity_valid = find_taau_hmd_motion_parameters(
                 reinterpret_cast<const float*>(cb_data.data() + 6 * 16),
-                -1, 0, matrix_identity, 0) &&
+                -1, 0, matrix_identity, 0,
+                current_capture_generation) &&
             matrix_identity.matched_eye >= 0 &&
             matrix_identity.matched_eye <= 1;
         uint64_t history_floors[2]{};
@@ -22924,11 +22979,13 @@ bool dispatch_taau_inplace_marker(
             // that actually owns the resolve and is therefore authoritative.
             expected_eye = -1;
             expected_pair_id = 0;
+            expected_generation = 0;
             if (matrix_identity_valid &&
                 matrix_identity.matched_pair_id != 0 &&
                 matrix_identity.matched_pair_id != UINT64_MAX) {
                 expected_eye = matrix_identity.matched_eye;
                 expected_pair_id = matrix_identity.matched_pair_id;
+                expected_generation = matrix_identity.matched_generation;
                 history_floor = history_floors[
                     static_cast<size_t>(expected_eye)];
                 static std::atomic<uint32_t>
@@ -22975,6 +23032,7 @@ bool dispatch_taau_inplace_marker(
             // this resolve to the other eye and leave a visible history gap.
             expected_eye = static_cast<int>(forward_queue_tag.eye);
             expected_pair_id = forward_queue_tag.pair_id;
+            expected_generation = forward_queue_tag.generation;
             history_floor = history_floors[forward_queue_tag.eye];
             forward_candidate = forward_queue_tag.pair_id;
             completed_tag_authority = true;
@@ -23000,6 +23058,8 @@ bool dispatch_taau_inplace_marker(
             } else {
                 if (matrix_identity_valid) {
                     expected_eye = matrix_identity.matched_eye;
+                    expected_generation =
+                        matrix_identity.matched_generation;
                     history_floor = history_floors[
                         static_cast<size_t>(expected_eye)];
                 }
@@ -23028,18 +23088,22 @@ bool dispatch_taau_inplace_marker(
             // intentionally replayed. Otherwise choose the earliest forward tag.
                 if (equal_candidate != 0) {
                     expected_pair_id = equal_candidate;
+                    expected_generation = current_capture_generation;
                     completed_tag_authority = true;
                 } else if (forward_candidate != 0) {
                     expected_pair_id = forward_candidate;
+                    expected_generation = current_capture_generation;
                     completed_tag_authority = true;
                 } else if (history_floor != 0 && expected_eye >= 0) {
                     // No newer tag is published yet. Replaying the current eye is safer
                     // than assigning an older matrix pair and rolling temporal state.
                     expected_pair_id = history_floor;
+                    expected_generation = 0;
                     completed_tag_authority = true;
                 } else if (matrix_identity_valid &&
                     matrix_identity.matched_pair_id != 0) {
                     expected_pair_id = matrix_identity.matched_pair_id;
+                    expected_generation = matrix_identity.matched_generation;
                 }
             }
         }
@@ -23158,7 +23222,7 @@ bool dispatch_taau_inplace_marker(
 
     route_flight.set_identity(
         expected_eye, expected_pair_id,
-        g_streamline_capture_generation.load(std::memory_order_relaxed),
+        expected_generation,
         identity_recovered || completed_tag_authority);
 
     std::unique_lock<std::mutex> history_transaction_lock{};
@@ -23174,6 +23238,31 @@ bool dispatch_taau_inplace_marker(
         expected_eye >= 0 && expected_eye <= 1) {
         const uint8_t eye_mask = static_cast<uint8_t>(
             1u << static_cast<uint32_t>(expected_eye));
+        uint8_t pending_projection_reset =
+            g_mode3_taau_projection_reset_mask.load(
+                std::memory_order_acquire);
+        const uint32_t projection_reset_generation =
+            g_mode3_projection_reset_generation.load(
+                std::memory_order_acquire);
+        bool claimed_projection_reset{};
+        while (expected_generation != 0 &&
+            expected_generation == projection_reset_generation &&
+            (pending_projection_reset & eye_mask) != 0) {
+            const uint8_t remaining = static_cast<uint8_t>(
+                pending_projection_reset &
+                static_cast<uint8_t>(~eye_mask));
+            if (g_mode3_taau_projection_reset_mask.compare_exchange_weak(
+                    pending_projection_reset, remaining,
+                    std::memory_order_acq_rel,
+                    std::memory_order_acquire)) {
+                claimed_projection_reset = true;
+                break;
+            }
+        }
+
+        // Existing Full-VR/camera-boundary resets retain their independent,
+        // generation-agnostic contract. Projection switching uses the separate
+        // mask above so an old command list cannot consume its new epoch.
         uint8_t pending_reset = g_stereo_taau_history_reset_mask.load(
             std::memory_order_acquire);
         bool claimed_reset{};
@@ -23188,7 +23277,7 @@ bool dispatch_taau_inplace_marker(
                 break;
             }
         }
-        if (claimed_reset) {
+        if (claimed_reset || claimed_projection_reset) {
             uint64_t invalidated_pair{};
             {
                 std::scoped_lock lock{g_taau_eye_history_mutex};
@@ -23207,12 +23296,14 @@ bool dispatch_taau_inplace_marker(
             g_taau_history_invalidations.fetch_add(
                 1, std::memory_order_relaxed);
             log_taau_trace_line(
-                "TAAU Full VR history reset applied present=%llu eye=%d previous_pair=%llu incoming_pair=%llu",
+                "V1331 TAAU history reset applied reason=%s present=%llu eye=%d previous_pair=%llu incoming_pair=%llu generation=%u",
+                claimed_projection_reset ? "projection" : "camera",
                 static_cast<unsigned long long>(
                     g_present_count.load(std::memory_order_relaxed)),
                 expected_eye,
                 static_cast<unsigned long long>(invalidated_pair),
-                static_cast<unsigned long long>(expected_pair_id));
+                static_cast<unsigned long long>(expected_pair_id),
+                expected_generation);
         }
 
         // [FIX:POST-LOADING-TAAU-HISTORY V1258 2/3] A native list recorded
@@ -23416,7 +23507,8 @@ bool dispatch_taau_inplace_marker(
     if (!find_taau_hmd_motion_parameters(
             reinterpret_cast<const float*>(cb_data.data() + 6 * 16),
             expected_eye, expected_pair_id, hmd_motion,
-            expected_history_pair_id)) {
+            expected_history_pair_id,
+            current_capture_generation)) {
         const auto health_failure = g_taau_health_matrix_fail.fetch_add(
             1, std::memory_order_relaxed) + 1;
         log_taau_early_failure("matrix", health_failure);
@@ -29244,16 +29336,14 @@ bool prepare_full_vr_frame_camera(
         const float down = tanf(xr_fov->angleDown);
         const float up = tanf(xr_fov->angleUp);
         // Render the centered symmetric angular envelope selected from the
-        // runtime geometry. In strict Stereo Mode 3 this producer owns
-        // Presentation Size; the final OpenXR subImage only selects each
-        // per-eye interval. AER and legacy modes retain their established
-        // extent floor in this isolated build.
+        // runtime geometry. In Mode 3 this producer owns Presentation Size;
+        // the final OpenXR subImage only selects each per-eye interval.
+        // Legacy modes retain their established extent floor below.
         const auto projection_scales = presentation_projection_scales(
             left, right, down, up);
         float horizontal_scale = projection_scales.horizontal;
         float vertical_scale = projection_scales.vertical;
-        if ((!mode3_stereo_transport_active() ||
-                mode3_aer_presentation_active()) &&
+        if (!mode3_stereo_transport_active() &&
             (!g_config.fullscreen_projection ||
                 g_xr_cinema_projection_pipeline == nullptr) &&
             g_xr_eye_swapchains[0].width > 0 &&
@@ -32707,16 +32797,15 @@ void __fastcall hook_engine_view_rebuild(float* view) {
         const float up = tanf(xr_fov.angleUp);
         // Build the centered envelope required to contain both displaced
         // runtime eyes, then apply Presentation Size once in tangent space.
-        // Strict Stereo must not floor that scale to the source/swapchain
-        // ratio: at p=0.8 the intended p/q can legitimately be slightly below
-        // 1. AER remains unchanged in V1330. Keep this regular factory path
-        // identical to the fallback above.
+        // Mode 3 must not floor that scale to the source/swapchain ratio: at
+        // p=0.8 the intended p/q can legitimately be slightly below 1 in both
+        // strict Stereo and AER. Keep this regular factory path identical to
+        // the fallback above.
         const auto projection_scales = presentation_projection_scales(
             left, right, down, up);
         float horizontal_scale = projection_scales.horizontal;
         float vertical_scale = projection_scales.vertical;
-        if ((!mode3_stereo_transport_active() ||
-                mode3_aer_presentation_active()) &&
+        if (!mode3_stereo_transport_active() &&
             (!g_config.fullscreen_projection ||
                 g_xr_cinema_projection_pipeline == nullptr) &&
             g_xr_eye_swapchains[0].width > 0 && g_xr_eye_swapchains[0].height > 0 &&
@@ -35497,6 +35586,12 @@ void apply_engine_dual_render_transition(
 
     const auto present = g_present_count.load();
     const auto generation = g_streamline_capture_generation.fetch_add(1) + 1;
+    if (force_generation_reset &&
+        puredark_afw_mode3_aer_common_transport_configured()) {
+        // Read the new generation while revoking every old ready publication;
+        // submitted/in-flight allocations keep their normal fence lifetime.
+        reset_puredark_afw_publication_state();
+    }
     record_route_flight(
         w3vr::route_flight::EventCode::RouteReset,
         -1, 0,
@@ -35508,6 +35603,12 @@ void apply_engine_dual_render_transition(
     g_streamline_capture_latest_slot[1].store(UINT32_MAX);
     g_stereo_eye_cache_view_valid[0] = false;
     g_stereo_eye_cache_view_valid[1] = false;
+    g_stereo_eye_cache_projection_generation[0] = 0;
+    g_stereo_eye_cache_projection_generation[1] = 0;
+    g_stereo_eye_cache_projection_valid[0] = false;
+    g_stereo_eye_cache_projection_valid[1] = false;
+    g_stereo_eye_cache_native_asymmetric[0] = false;
+    g_stereo_eye_cache_native_asymmetric[1] = false;
     g_packed_present_cache_valid = false;
     g_packed_present_cache_view_valid[0] = false;
     g_packed_present_cache_view_valid[1] = false;
@@ -35577,7 +35678,17 @@ void apply_engine_dual_render_transition(
     g_cinema_mode_active.store(false, std::memory_order_relaxed);
     g_automatic_full_vr_camera_active.store(false, std::memory_order_release);
     g_automatic_full_vr_native_camera.store(0, std::memory_order_release);
-    g_stereo_taau_history_reset_mask.store(0, std::memory_order_release);
+    g_mode3_projection_reset_generation.store(
+        force_generation_reset ? generation : 0,
+        std::memory_order_release);
+    g_stereo_taau_history_reset_mask.store(
+        0, std::memory_order_release);
+    g_mode3_taau_projection_reset_mask.store(
+        force_generation_reset && temporal_backend_is_taau() ? 0x3u : 0u,
+        std::memory_order_release);
+    g_mode3_dlss_projection_reset_mask.store(
+        force_generation_reset && temporal_backend_is_dlss() ? 0x3u : 0u,
+        std::memory_order_release);
     g_loading_taau_history_reset_mask.store(0, std::memory_order_release);
     g_full_vr_frame_camera_last_pair[0].store(0, std::memory_order_release);
     g_full_vr_frame_camera_last_pair[1].store(0, std::memory_order_release);
@@ -36322,13 +36433,58 @@ uint32_t streamline_eye() {
 void __fastcall hook_sl_set_constants(void* constants, uint32_t frame_token, uint32_t viewport) {
     const uint32_t eye = streamline_eye();
     const uint32_t source_viewport = viewport;
+    if (constants != nullptr && eye <= 1 &&
+        mode3_stereo_transport_active()) {
+        const uint32_t reset_generation =
+            g_mode3_projection_reset_generation.load(
+                std::memory_order_acquire);
+        EngineFrameTag reset_tag{};
+        if (reset_generation != 0 &&
+            current_puredark_afw_direct_route_tag(eye, reset_tag) &&
+            reset_tag.generation == reset_generation) {
+            const uint8_t eye_mask = static_cast<uint8_t>(1u << eye);
+            uint8_t pending_reset =
+                g_mode3_dlss_projection_reset_mask.load(
+                    std::memory_order_acquire);
+            bool claimed_reset{};
+            while ((pending_reset & eye_mask) != 0) {
+                const uint8_t remaining = static_cast<uint8_t>(
+                    pending_reset & static_cast<uint8_t>(~eye_mask));
+                if (g_mode3_dlss_projection_reset_mask.compare_exchange_weak(
+                        pending_reset, remaining,
+                        std::memory_order_acq_rel,
+                        std::memory_order_acquire)) {
+                    claimed_reset = true;
+                    break;
+                }
+            }
+            if (claimed_reset) {
+                // Streamline 1.5 sl::Constants::reset. This mutation occurs
+                // before both the callback cache and the original API call,
+                // so the exact new-generation evaluation sees one pulse.
+                static_cast<uint8_t*>(constants)[0x19F] = 1;
+                log_line(
+                    "V1331 DLSS projection history reset applied eye=%u "
+                    "pair=%llu generation=%u present=%llu",
+                    eye,
+                    static_cast<unsigned long long>(reset_tag.pair_id),
+                    reset_tag.generation,
+                    static_cast<unsigned long long>(
+                        g_present_count.load(std::memory_order_relaxed)));
+            }
+        }
+    }
     if (constants != nullptr &&
         g_config.streamline_taau_bridge) {
         const auto* values = static_cast<const float*>(constants);
         TaauHmdMotionParameters motion{};
         const int expected_eye = g_config.openxr_mode == 2 ? 0 : -1;
         if (find_taau_hmd_motion_parameters(
-                values + 48, expected_eye, 0, motion)) {
+                values + 48, expected_eye, 0, motion, 0,
+                g_config.openxr_mode == 3
+                    ? g_streamline_capture_generation.load(
+                        std::memory_order_acquire)
+                    : 0)) {
             if (g_config.runtime_diagnostics) {
                 g_streamline_taau_bridge_matches.fetch_add(
                     1, std::memory_order_relaxed);
@@ -38575,7 +38731,7 @@ void ensure_initialized() {
                 "focus_fire_b1=stereo_structural_aer_upstream_owner "
                 "aer_taau_hud=scene_and_retained_pair_fail_open");
             log_line(
-                "witcher3vr dxgi proxy initialized build=V1330 base=V1329_stereo_angular_equivalence "
+                "witcher3vr dxgi proxy initialized build=V1331 base=V1330_runtime_stereo_projection "
                 "anchor_smoothing_ini=%d anchor_smoothing_seconds=%.4f "
                 "first_person_strafe_ini=%d mode3_aer_presentation=%d raytracing_enabled=%d raytracing_history_buffers=%d "
                 "aer_afw_enabled=%d persistent_registry=%d dlss_public_streamline=%d "
@@ -38634,7 +38790,7 @@ void ensure_initialized() {
             log_line(
                 "V1310 route flight recorder=ini_opt_in default_off f3_dump=15s renderdoc_f3_preserved=1 qpc=present_only gpu_readback=0 descriptor_scan=0 text_hotpath=0");
             log_line(
-                "V1330 strict_stereo_projection=F2_runtime_SYM_ASYM startup_from_ini symmetric_submit=per_eye_tangent_subimage asymmetric_submit=full_frame presentation_size=producer_owned aer=unchanged flight_recorders=F3");
+                "V1331 mode3_projection=F2_runtime_SYM_ASYM startup_from_ini symmetric_submit=per_eye_tangent_subimage asymmetric_submit=full_frame presentation_size=producer_owned aer=enabled homogeneous_generation_pair=required flight_recorders=F3");
             log_line(
                 "V1279 DLSS compatibility=public_streamline_aer_private_history_ngx_stereo legacy_module_agnostic_discovery=disabled_by_V1288");
             log_line(
@@ -40947,6 +41103,12 @@ bool ensure_stereo_eye_cache(const D3D12_RESOURCE_DESC& source_desc) {
     g_stereo_eye_cache_initialized[1] = false;
     g_stereo_eye_cache_view_valid[0] = false;
     g_stereo_eye_cache_view_valid[1] = false;
+    g_stereo_eye_cache_projection_generation[0] = 0;
+    g_stereo_eye_cache_projection_generation[1] = 0;
+    g_stereo_eye_cache_projection_valid[0] = false;
+    g_stereo_eye_cache_projection_valid[1] = false;
+    g_stereo_eye_cache_native_asymmetric[0] = false;
+    g_stereo_eye_cache_native_asymmetric[1] = false;
     g_packed_present_cache_valid = false;
     g_packed_present_cache_view_valid[0] = false;
     g_packed_present_cache_view_valid[1] = false;
@@ -43114,7 +43276,7 @@ void render_openxr_test_frame(
     const bool mode3_unified_openxr_submit =
         mode3_stereo_transport_active() && !spatial_panel_active;
     bool mode3_source_native_asymmetric{};
-    bool strict_stereo_angular_crop{};
+    bool mode3_symmetric_subimage{};
     bool mode3_unified_direct_copy{};
     bool mode3_unified_identity_shader{};
     bool mode3_unified_black_frame{};
@@ -44179,6 +44341,9 @@ void render_openxr_test_frame(
                     uint64_t temporal_submission_serial{};
                     XrView tagged_render_view{XR_TYPE_VIEW};
                     bool tagged_render_view_valid{};
+                    bool tagged_update_native_asymmetric{};
+                    bool puredark_pair_native_asymmetric{};
+                    bool puredark_pair_projection_homogeneous{};
                     if (puredark_afw.valid) {
                         // [FEATURE:PUREDARK-AFW-DLSS V12004 4/6] One real
                         // DLSS frame now publishes both eyes: the rendered eye
@@ -44202,6 +44367,21 @@ void render_openxr_test_frame(
                             puredark_afw.generation ==
                                 g_streamline_capture_generation.load(
                                     std::memory_order_acquire);
+                        const bool puredark_eye0_native_asymmetric =
+                            puredark_afw.render_views_valid &&
+                            fov_has_off_axis_center(
+                                puredark_afw.render_views[0].fov);
+                        const bool puredark_eye1_native_asymmetric =
+                            puredark_afw.render_views_valid &&
+                            fov_has_off_axis_center(
+                                puredark_afw.render_views[1].fov);
+                        puredark_pair_projection_homogeneous =
+                            puredark_afw.render_views_valid &&
+                            puredark_eye0_native_asymmetric ==
+                                puredark_eye1_native_asymmetric;
+                        puredark_pair_native_asymmetric =
+                            puredark_pair_projection_homogeneous &&
+                            puredark_eye0_native_asymmetric;
                     } else if (puredark_afw_hold_last) {
                         // Both cache slices and their render-time XrViews stay
                         // immutable until another submitted producer bundle is
@@ -44241,6 +44421,10 @@ void render_openxr_test_frame(
                                 tagged_render_view = submitted_tag.render_view;
                                 tagged_render_view_valid =
                                     submitted_tag.render_view_valid;
+                                tagged_update_native_asymmetric =
+                                    native_asymmetric_source_eye_tagged(
+                                        submitted_tag.pair_id,
+                                        submitted_tag.eye);
                             }
                             if (g_config.runtime_diagnostics &&
                                 take_bounded_log_slot(
@@ -44296,6 +44480,10 @@ void render_openxr_test_frame(
                             tagged_render_view =
                                 exact_completed.tag.render_view;
                             tagged_render_view_valid = true;
+                            tagged_update_native_asymmetric =
+                                native_asymmetric_source_eye_tagged(
+                                    exact_completed.tag.pair_id,
+                                    exact_completed.tag.eye);
                             cinema_completed_serial_to_consume =
                                 exact_completed.serial;
                         }
@@ -44394,6 +44582,9 @@ void render_openxr_test_frame(
                         if (completed_view_matches) {
                             tagged_render_view = completed_view;
                             tagged_render_view_valid = true;
+                            tagged_update_native_asymmetric =
+                                native_asymmetric_source_eye_tagged(
+                                    completed_pair_id, identity.eye);
                         } else if (g_stereo_eye_cache_initialized[0] &&
                             g_stereo_eye_cache_initialized[1]) {
                             tagged_update_eye = -1;
@@ -44495,6 +44686,26 @@ void render_openxr_test_frame(
                                 1, &afw_source_to_copy);
                         }
                         g_stereo_eye_cache_initialized[eye] = true;
+                        const bool projection_metadata_valid =
+                            !copy_loading_mono &&
+                            (puredark_afw.valid
+                                ? (tagged_update_identity_valid &&
+                                    puredark_pair_projection_homogeneous)
+                                : (tagged_update_identity_valid &&
+                                    tagged_render_view_valid));
+                        g_stereo_eye_cache_projection_generation[eye] =
+                            projection_metadata_valid
+                            ? (puredark_afw.valid
+                                ? puredark_afw.generation
+                                : tagged_update_generation)
+                            : 0;
+                        g_stereo_eye_cache_projection_valid[eye] =
+                            projection_metadata_valid;
+                        g_stereo_eye_cache_native_asymmetric[eye] =
+                            projection_metadata_valid &&
+                            (puredark_afw.valid
+                                ? puredark_pair_native_asymmetric
+                                : tagged_update_native_asymmetric);
                         // [FIX:AER-CINEMA-IMMUTABLE-PAIR V12012 3/5]
                         // [FIX:AER-CINEMA-AER-PAIR-AUTHORITY V12013 1/1]
                         // Publish only AER's canonical Cinema identity from
@@ -44543,6 +44754,8 @@ void render_openxr_test_frame(
                     }
                     if (mode3_exact_afw_final_source &&
                         puredark_afw.valid &&
+                        tagged_update_identity_valid &&
+                        puredark_pair_projection_homogeneous &&
                         g_stereo_eye_cache_initialized[0] &&
                         g_stereo_eye_cache_initialized[1] &&
                         g_stereo_eye_cache_view_valid[0] &&
@@ -44557,10 +44770,7 @@ void render_openxr_test_frame(
                             puredark_afw.generation;
                         g_mode3_afw_sequenced_pair = puredark_afw.pair_id;
                         g_mode3_afw_sequenced_native_asymmetric =
-                            fov_has_off_axis_center(
-                                puredark_afw.render_views[0].fov) &&
-                            fov_has_off_axis_center(
-                                puredark_afw.render_views[1].fov);
+                            puredark_pair_native_asymmetric;
                         g_mode3_afw_last_real_eye = puredark_afw.real_eye;
                         const uint64_t accepted =
                             ++g_mode3_afw_sequenced_accepts;
@@ -44906,7 +45116,82 @@ void render_openxr_test_frame(
                 // Resolve the one final Mode-3 transport after both completed
                 // eye resources have been selected.
                 if (mode3_unified_openxr_submit) {
-                    bool full_source_pair_ready = target_desc_needed &&
+                    bool mode3_source_projection_ready = true;
+                    if (mode3_aer_presentation_active() &&
+                        !loading_video &&
+                        (g_engine_dual_gameplay_armed.load(
+                                std::memory_order_acquire) ||
+                            cinema_mode ||
+                            g_automatic_full_vr_camera_active.load(
+                                std::memory_order_acquire))) {
+                        const uint32_t projection_generation =
+                            g_streamline_capture_generation.load(
+                                std::memory_order_acquire);
+                        if (mode3_common_afw_sequenced_available) {
+                            mode3_source_projection_ready =
+                                g_mode3_afw_sequenced_generation ==
+                                    projection_generation;
+                            mode3_source_native_asymmetric =
+                                mode3_source_projection_ready &&
+                                g_mode3_afw_sequenced_native_asymmetric;
+                        } else if (packed_stereo_available) {
+                            if (mode3_final_source_cinema_pair_available) {
+                                // V1248 deliberately publishes AER Cinema's
+                                // repaired centered pair through the packed
+                                // cache even when an upstream ledger was
+                                // native. Preserve that source geometry.
+                                mode3_source_projection_ready =
+                                    g_sequential_cinema_accepted_generation ==
+                                        projection_generation &&
+                                    g_packed_present_cache_view_valid[0] &&
+                                    g_packed_present_cache_view_valid[1];
+                                mode3_source_native_asymmetric = false;
+                            } else {
+                                const auto packed_projection =
+                                    w3vr::mode3_transport::
+                                        decide_projection_pair(
+                                            g_packed_present_cache_valid &&
+                                                g_packed_present_cache_view_valid[0],
+                                            g_packed_present_cache_valid &&
+                                                g_packed_present_cache_view_valid[1],
+                                            g_mode3_aer_presentation_generation,
+                                            g_mode3_aer_presentation_generation,
+                                            projection_generation,
+                                            g_mode3_aer_packed_native_eye[0],
+                                            g_mode3_aer_packed_native_eye[1]);
+                                mode3_source_projection_ready =
+                                    packed_projection.ready;
+                                mode3_source_native_asymmetric =
+                                    packed_projection.native_asymmetric;
+                            }
+                        } else if (stereo_cached) {
+                            const auto final_projection =
+                                w3vr::mode3_transport::
+                                    decide_projection_pair(
+                                        g_stereo_eye_cache_projection_valid[0],
+                                        g_stereo_eye_cache_projection_valid[1],
+                                        g_stereo_eye_cache_projection_generation[0],
+                                        g_stereo_eye_cache_projection_generation[1],
+                                        projection_generation,
+                                        g_stereo_eye_cache_native_asymmetric[0],
+                                        g_stereo_eye_cache_native_asymmetric[1]);
+                            mode3_source_projection_ready =
+                                final_projection.ready;
+                            mode3_source_native_asymmetric =
+                                final_projection.native_asymmetric;
+                        } else {
+                            mode3_source_projection_ready = false;
+                            mode3_source_native_asymmetric = false;
+                        }
+                    } else {
+                        mode3_source_native_asymmetric =
+                            mode3_common_afw_sequenced_available
+                            ? g_mode3_afw_sequenced_native_asymmetric
+                            : native_asymmetric_projection;
+                    }
+
+                    bool full_source_pair_ready =
+                        mode3_source_projection_ready && target_desc_needed &&
                         target_desc.Dimension ==
                             D3D12_RESOURCE_DIMENSION_TEXTURE2D &&
                         target_desc.Width == swapchain.width &&
@@ -44969,11 +45254,6 @@ void render_openxr_test_frame(
                         w3vr::mode3_transport::FinalTransport::IdentityShader;
                     mode3_unified_black_frame = decision.transport ==
                         w3vr::mode3_transport::FinalTransport::Unavailable;
-                    mode3_source_native_asymmetric =
-                        mode3_common_afw_sequenced_available
-                        ? g_mode3_afw_sequenced_native_asymmetric
-                        : native_asymmetric_projection;
-
                     projection_image_rect.offset = {
                         0, 0};
                     projection_image_rect.extent = {
@@ -44994,22 +45274,21 @@ void render_openxr_test_frame(
                     projection_eye_fit_rect_valid = true;
                     projection_eye_float_fit_rect_valid = true;
 
-                    // V1330 keeps the completed texture transport common and
-                    // makes strict Stereo's optical submit reciprocal. A
+                    // V1331 keeps the completed texture transport common and
+                    // makes every Mode-3 optical submit reciprocal. A
                     // symmetric producer contains both displaced per-eye
                     // frusta in one centered envelope, so OpenXR selects each
                     // eye's p-scaled tangent interval from that envelope. A
                     // native asymmetric producer already encodes precisely
-                    // that interval in its full frame. AER is deliberately
-                    // excluded from this first producer-switch trial. F2
-                    // changes which producer runs; it is not a crop gate.
-                    const bool stereo_crop_requested =
+                    // that interval in its full frame. AER source metadata is
+                    // accepted only as a homogeneous current-generation pair.
+                    // F2 changes which producer runs; it is not a crop gate.
+                    const bool symmetric_subimage_requested =
                         w3vr::mode3_transport::
-                            strict_stereo_symmetric_subimage_active(
+                            mode3_symmetric_subimage_active(
                                 mode3_stereo_transport_active(),
-                                mode3_aer_presentation_active(),
                                 mode3_source_native_asymmetric);
-                    if (stereo_crop_requested &&
+                    if (symmetric_subimage_requested &&
                         g_hmd_render_fov_valid.load(
                             std::memory_order_acquire) &&
                         g_xr_views.size() >= 2) {
@@ -45040,7 +45319,7 @@ void render_openxr_test_frame(
                                         candidates[eye]);
                         }
                         if (candidates_valid) {
-                            strict_stereo_angular_crop = true;
+                            mode3_symmetric_subimage = true;
                             for (uint32_t eye = 0; eye < 2; ++eye) {
                                 projection_eye_image_rects[eye] =
                                     candidates[eye].image_rect;
@@ -45049,6 +45328,17 @@ void render_openxr_test_frame(
                                 projection_eye_exact_fov_valid[eye] = true;
                             }
                         }
+                    }
+
+                    // A centered source without its exact reciprocal subimage
+                    // would be interpreted with the wrong rays. Treat missing
+                    // or non-contained geometry as unavailable rather than
+                    // silently submitting the full symmetric envelope.
+                    if (symmetric_subimage_requested &&
+                        !mode3_symmetric_subimage) {
+                        mode3_unified_direct_copy = false;
+                        mode3_unified_identity_shader = false;
+                        mode3_unified_black_frame = true;
                     }
 
                     if (mode3_unified_black_frame) {
@@ -45061,12 +45351,12 @@ void render_openxr_test_frame(
                                 1, std::memory_order_relaxed);
                         if (log_index < 16) {
                             log_line(
-                                "V1330 final Mode3 OpenXR submit sample=%u "
+                                "V1331 final Mode3 OpenXR submit sample=%u "
                                 "route=%s backend=%s dlaa=%u projection=%s "
                                 "source=%ux%u swapchain=%ux%u "
                                 "rect0=%d,%d %dx%d rect1=%d,%d %dx%d "
                                 "transport=%s requested_projection=%s "
-                                "stereo_crop=%u "
+                                "projection_ready=%u symmetric_subimage=%u "
                                 "fit=0 shift=0 presentation_scale=%.6f",
                                 log_index,
                                 mode3_aer_presentation_active()
@@ -45091,7 +45381,8 @@ void render_openxr_test_frame(
                                         ? "identity_shader" : "black"),
                                 native_stereo_runtime_enabled()
                                     ? "asymmetric" : "symmetric",
-                                strict_stereo_angular_crop ? 1u : 0u,
+                                mode3_source_projection_ready ? 1u : 0u,
+                                mode3_symmetric_subimage ? 1u : 0u,
                                 requested_scale);
                         }
                     }
@@ -45545,7 +45836,7 @@ void render_openxr_test_frame(
                     projection_views[eye].fov =
                         current_panel_views[eye].fov;
                 } else if (mode3_unified_openxr_submit) {
-                    if (strict_stereo_angular_crop &&
+                    if (mode3_symmetric_subimage &&
                         projection_eye_exact_fov_valid[eye]) {
                         projection_views[eye].fov =
                             projection_eye_exact_fovs[eye];
@@ -45603,9 +45894,9 @@ void render_openxr_test_frame(
                         static_cast<int32_t>(swapchain.width),
                         static_cast<int32_t>(swapchain.height)};
                 } else if (mode3_unified_openxr_submit) {
-                    // GPU transport always owns the full slice. Strict Stereo
-                    // SYM may expose only its reciprocal per-eye tangent crop;
-                    // strict ASYM and every AER source keep the full rectangle.
+                    // GPU transport always owns the full slice. Every genuine
+                    // Mode-3 SYM source exposes its reciprocal per-eye tangent
+                    // subimage; every genuine ASYM source keeps the full rect.
                     projection_views[eye].subImage.imageRect =
                         projection_eye_image_rect_valid[eye]
                         ? projection_eye_image_rects[eye]
@@ -46336,28 +46627,28 @@ void handle_puredark_afw_visual_debug_hotkey() {
             g_present_count.load(std::memory_order_relaxed)));
 }
 
-void handle_runtime_stereo_projection_hotkey() {
+void handle_runtime_mode3_projection_hotkey() {
     const bool down = (GetAsyncKeyState(VK_F2) & 0x8000) != 0;
     const bool was_down = g_f2_hotkey_down.exchange(
         down, std::memory_order_acq_rel);
     if (!down || was_down) {
         return;
     }
-    if (!mode3_stereo_transport_active() ||
-        mode3_aer_presentation_active()) {
+    if (!mode3_stereo_transport_active()) {
         log_line(
-            "V1330 runtime projection hotkey=F2 ignored route=%s present=%llu",
-            mode3_aer_presentation_active() ? "aer" : "non_mode3",
+            "V1331 runtime projection hotkey=F2 ignored route=non_mode3 "
+            "present=%llu",
             static_cast<unsigned long long>(
                 g_present_count.load(std::memory_order_relaxed)));
         return;
     }
 
-    g_runtime_stereo_projection_toggle_requests.fetch_add(
+    g_runtime_mode3_projection_toggle_requests.fetch_add(
         1, std::memory_order_release);
     log_line(
-        "V1330 strict Stereo runtime projection toggle queued hotkey=F2 "
-        "present=%llu",
+        "V1331 Mode3 runtime projection toggle queued hotkey=F2 "
+        "route=%s present=%llu",
+        mode3_aer_presentation_active() ? "aer" : "stereo",
         static_cast<unsigned long long>(
             g_present_count.load(std::memory_order_relaxed)));
 }
@@ -46366,23 +46657,17 @@ void apply_present_boundary_requests() {
     const int requested_mode =
         g_engine_dual_render_requested.exchange(-1);
     const uint32_t projection_toggle_requests =
-        g_runtime_stereo_projection_toggle_requests.exchange(
+        g_runtime_mode3_projection_toggle_requests.exchange(
             0, std::memory_order_acq_rel);
     const auto projection_transition =
         w3vr::mode3_transport::decide_runtime_projection_transition(
             native_stereo_runtime_enabled(),
             projection_toggle_requests,
-            mode3_stereo_transport_active() &&
-                !mode3_aer_presentation_active());
+            mode3_stereo_transport_active());
 
     const bool projection_toggle = projection_transition.apply;
     const bool native_asymmetric =
         projection_transition.native_asymmetric;
-    if (projection_toggle) {
-        g_runtime_native_stereo.store(
-            native_asymmetric, std::memory_order_release);
-        g_mode3_final_submit_logs.store(0, std::memory_order_release);
-    }
 
     if (requested_mode >= 0 || projection_toggle) {
         const bool dual_render_enabled = requested_mode >= 0
@@ -46396,16 +46681,23 @@ void apply_present_boundary_requests() {
         apply_engine_dual_render_transition(
             dual_render_enabled,
             projection_toggle
-                ? "F2 strict Stereo projection"
+                ? "F2 Mode3 projection"
                 : "request",
             projection_toggle);
     }
 
     if (projection_toggle) {
+        // Publish the new producer only after the old generation and every
+        // retained authority have been revoked. No observer can classify an
+        // old cache with the new SYM/ASYM request during the teardown window.
+        g_runtime_native_stereo.store(
+            native_asymmetric, std::memory_order_release);
+        g_mode3_final_submit_logs.store(0, std::memory_order_release);
         log_line(
-            "V1330 strict Stereo runtime projection=%s hotkey=F2 "
+            "V1331 Mode3 runtime projection=%s hotkey=F2 route=%s "
             "boundary=post_submit present=%llu requests=%u",
             native_asymmetric ? "asymmetric" : "symmetric",
+            mode3_aer_presentation_active() ? "aer" : "stereo",
             static_cast<unsigned long long>(
                 g_present_count.load(std::memory_order_relaxed)),
             projection_toggle_requests);
@@ -46425,7 +46717,7 @@ void handle_f3_capture_hotkey(IDXGISwapChain* swapchain) {
     if (w3vr::pipeline_flight::enabled()) {
         w3vr::pipeline_flight::dump_last_ten_seconds();
     }
-    w3vr::route_flight::dump_last_seconds("V1330", 15);
+    w3vr::route_flight::dump_last_seconds("V1331", 15);
     trigger_renderdoc_capture(
         g_game_swapchain != nullptr ? g_game_swapchain : swapchain);
 }
@@ -46507,7 +46799,7 @@ HRESULT STDMETHODCALLTYPE hook_present(IDXGISwapChain* swapchain, UINT sync_inte
     if (w3vr::pipeline_flight::enabled()) {
         w3vr::pipeline_flight::process_gpu();
     }
-    handle_runtime_stereo_projection_hotkey();
+    handle_runtime_mode3_projection_hotkey();
     handle_f3_capture_hotkey(swapchain);
     // Toggle only the ABI debug bit. This does not enable AFW, alter
     // identities or change publication; the next Evaluate reflects it.
@@ -47286,7 +47578,7 @@ HRESULT STDMETHODCALLTYPE hook_present1(
     if (w3vr::pipeline_flight::enabled()) {
         w3vr::pipeline_flight::process_gpu();
     }
-    handle_runtime_stereo_projection_hotkey();
+    handle_runtime_mode3_projection_hotkey();
     handle_f3_capture_hotkey(swapchain);
     handle_puredark_afw_visual_debug_hotkey();
     const auto frame = ++g_present_count;

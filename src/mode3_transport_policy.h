@@ -51,6 +51,11 @@ struct RuntimeProjectionTransitionDecision {
     bool native_asymmetric{};
 };
 
+struct ProjectionPairDecision {
+    bool ready{};
+    bool native_asymmetric{};
+};
+
 // Coalesce every physical F2 edge observed before the next safe Present
 // boundary. An even number is a no-op; an odd number flips the producer once.
 // Route eligibility is revalidated at that boundary, not merely when the key
@@ -66,10 +71,31 @@ decide_runtime_projection_transition(
         apply ? !current_native_asymmetric : current_native_asymmetric};
 }
 
+// A completed source can define one OpenXR projection only when both eyes
+// belong to the current producer generation and encode the same geometry.
+// Mixed SYM/ASYM or stale-generation pairs are unavailable; callers must hold
+// or clear instead of interpreting either eye with the wrong rays.
+constexpr ProjectionPairDecision decide_projection_pair(
+    bool eye0_valid,
+    bool eye1_valid,
+    uint32_t eye0_generation,
+    uint32_t eye1_generation,
+    uint32_t current_generation,
+    bool eye0_native_asymmetric,
+    bool eye1_native_asymmetric) noexcept {
+    const bool ready = eye0_valid && eye1_valid &&
+        eye0_generation == current_generation &&
+        eye1_generation == current_generation &&
+        eye0_native_asymmetric == eye1_native_asymmetric;
+    return {
+        ready,
+        ready && eye0_native_asymmetric};
+}
+
 // A Mode-3 producer already owns the selected full-frame resolution. Give
 // OpenXR that exact destination extent so the GPU handoff remains an identity
-// operation with no stretch, padding or presentation-scale resize. Strict
-// Stereo may still select a per-eye subImage from the completed symmetric
+// operation with no stretch, padding or presentation-scale resize. A genuine
+// Mode-3 SYM source may still select a per-eye subImage from the completed
 // texture; that optical choice never changes the texture transport extent.
 // Legacy modes retain their existing runtime/presentation extent selection.
 constexpr uint32_t select_swapchain_dimension(
@@ -124,16 +150,14 @@ constexpr FinalSubmitDecision decide_final_submit(
     return result;
 }
 
-// A truly symmetric strict-Stereo producer stores a centered envelope, so its
-// final optical submit always selects the matching per-eye tangent interval.
-// A native asymmetric producer already owns that interval in its full frame.
-// AER remains outside this first runtime-projection trial.
-constexpr bool strict_stereo_symmetric_subimage_active(
+// A truly symmetric Mode-3 producer stores a centered envelope, so its final
+// optical submit always selects the matching per-eye tangent interval. A
+// native asymmetric producer already owns that interval in its full frame.
+// This source-geometry decision is identical in strict Stereo and AER.
+constexpr bool mode3_symmetric_subimage_active(
     bool mode3_transport,
-    bool aer_presentation,
     bool source_native_asymmetric) noexcept {
-    return mode3_transport && !aer_presentation &&
-        !source_native_asymmetric;
+    return mode3_transport && !source_native_asymmetric;
 }
 
 // Public Streamline is the universal Mode-3 DLSS boundary. Projection and
