@@ -23,4 +23,18 @@ constexpr AuthorityDecision decide_authority(
         : AuthorityDecision{incoming_pair, false};
 }
 
+// AFW TAAU camera payloads and native resolves are two views of the same
+// ordered alternating producer stream. The front payload is usable only when
+// generation, routed eye and the resolve-matrix validation all agree. A later
+// payload must never be searched for as a substitute.
+constexpr bool strict_raw_camera_fifo_entry_matches(
+    uint32_t expected_generation,
+    uint32_t expected_eye,
+    uint32_t producer_generation,
+    uint32_t producer_eye,
+    bool matrix_valid) noexcept {
+    return expected_eye <= 1 && producer_eye == expected_eye &&
+        producer_generation == expected_generation && matrix_valid;
+}
+
 }  // namespace w3vr::taau_submission

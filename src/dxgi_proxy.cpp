@@ -29,6 +29,13 @@
 #include "shadow_cascade_authority_policy.h"
 #include "taau_submission_policy.h"
 
+// V1299 applies the same gameplay/cinema/loading admission policy at both ends
+// of V1298's strict AER TAAU AFW camera FIFO. The producer had accidentally
+// inverted automatic Full VR, leaving normal gameplay with no raw cameras.
+// V1298 removes V1219's ambiguous full-history matrix search from AER TAAU
+// AFW. Streamline camera payloads enter a short strict FIFO with their routed
+// eye; each native resolve consumes exactly the front producer and attaches
+// its already-proven eye/pair/views. Any order or matrix mismatch fails closed.
 // V1296 gives every Mode-3 AER/Stereo backend one presentation contract:
 // the swapchain stays at selected source resolution and Presentation Size
 // changes only final FOV/zoom. AER TAAU and DLSS additionally share the same
@@ -1122,7 +1129,11 @@ struct PuredarkAfwCameraSnapshot {
 struct PuredarkAfwStreamlineCameraSnapshot {
     std::array<float, kPuredarkAfwStreamlineCameraFloatCount> constants{};
     uint64_t capture_present{};
+    uint64_t sequence{};
     uint32_t generation{};
+    uint32_t frame_token{};
+    uint32_t viewport{};
+    uint32_t eye{UINT32_MAX};
     bool valid{};
 };
 
@@ -1168,7 +1179,9 @@ struct PuredarkAfwPresentResult {
 // slots cover one recording producer, up to two ready producers and three
 // XR-fenced consumers.
 constexpr size_t kPuredarkAfwCameraHistorySize = 32;
-constexpr size_t kPuredarkAfwStreamlineCameraHistorySize = 64;
+// Two alternating eyes plus the validated 1-3 Present producer delay. This is
+// a transport FIFO, not a searchable temporal history.
+constexpr size_t kPuredarkAfwStreamlineCameraHistorySize = 4;
 constexpr size_t kPuredarkAfwBundleRingSize = 6;
 
 enum class PuredarkAfwBundleState : uint8_t {
@@ -1211,6 +1224,7 @@ std::mutex g_puredark_afw_mutex{};
 std::deque<PuredarkAfwCameraSnapshot> g_puredark_afw_camera_history{};
 std::deque<PuredarkAfwStreamlineCameraSnapshot>
     g_puredark_afw_streamline_camera_history{};
+uint64_t g_puredark_afw_streamline_camera_sequence{};
 std::array<PuredarkAfwBundleSlot, kPuredarkAfwBundleRingSize>
     g_puredark_afw_bundle_ring{};
 ID3D12RootSignature* g_puredark_afw_taau_motion_root_signature{};
@@ -1604,7 +1618,11 @@ PresentationProjectionScales presentation_projection_scales(
 bool ensure_stereo_eye_cache(const D3D12_RESOURCE_DESC& source_desc);
 bool update_packed_eye_cache();
 bool initialize_dxc();
-void capture_puredark_afw_mode3_taau_camera(const void* constants);
+void capture_puredark_afw_mode3_taau_camera(
+    const void* constants,
+    uint32_t routed_eye,
+    uint32_t frame_token,
+    uint32_t viewport);
 void mark_engine_pair_output_captured(uint64_t pair_id, uint32_t eye);
 bool capture_streamline_output(ID3D12GraphicsCommandList* command_list, D3D12_RESOURCE_STATES source_state);
 std::vector<PuredarkAfwPendingSubmission>
@@ -9587,112 +9605,9 @@ bool capture_puredark_afw_mode3_taau_inputs(
     }
 
     std::scoped_lock lock{g_puredark_afw_mutex};
-    const auto camera_found = std::find_if(
-        g_puredark_afw_camera_history.rbegin(),
-        g_puredark_afw_camera_history.rend(),
-        [&](const PuredarkAfwCameraSnapshot& camera) {
-            return camera.valid && camera.eye == eye &&
-                camera.pair_id == pair_id &&
-                camera.generation == generation &&
-                camera.render_views_valid &&
-                camera.exact_render_view_valid;
-        });
-    PuredarkAfwCameraSnapshot recovered_camera{};
-    const PuredarkAfwCameraSnapshot* camera_authority =
-        camera_found != g_puredark_afw_camera_history.rend()
-        ? &*camera_found
-        : nullptr;
-    if (camera_authority == nullptr) {
-        // [FIX:PUREDARK-AFW-TAAU-RESOLVE-CAMERA-RECOVERY V1219 1/2]
-        // slSetConstants can precede publication of the exact REDengine
-        // temporal tag. The old path then stored a valid camera under an older
-        // pair (or no pair), while the later native resolve successfully named
-        // the current pair and published color without an AFW bundle. Match the
-        // resolve's own CB10 matrix back to the immutable raw Streamline payload
-        // instead; camera data remains byte-derived from the exact producer.
-        constexpr float kMaximumRawCameraMatrixError = 0.05f;
-        const auto* resolve_matrix = reinterpret_cast<const float*>(
-            cb_data.data() + 6 * 16);
-        const PuredarkAfwStreamlineCameraSnapshot* raw_authority{};
-        float best_error = FLT_MAX;
-        for (auto it = g_puredark_afw_streamline_camera_history.rbegin();
-             it != g_puredark_afw_streamline_camera_history.rend(); ++it) {
-            if (!it->valid || it->generation != generation) {
-                continue;
-            }
-            float error{};
-            for (size_t index = 0; index < 16; ++index) {
-                error += fabsf(it->constants[48 + index] -
-                    resolve_matrix[index]);
-            }
-            if (std::isfinite(error) && error < best_error) {
-                best_error = error;
-                raw_authority = &*it;
-            }
-        }
 
-        std::wstring recovery_error;
-        float baseline =
-            g_runtime_eye_baseline_m.load(std::memory_order_relaxed);
-        if (!std::isfinite(baseline) || baseline < 0.04f ||
-            baseline > 0.10f) {
-            baseline = std::fabs(g_config.engine_factory_stereo_offset);
-        }
-        const bool recovered = raw_authority != nullptr &&
-            best_error <= kMaximumRawCameraMatrixError &&
-            exact_render_views_valid &&
-            w3vr::puredark_afw::build_camera_data_from_streamline(
-                raw_authority->constants.data(),
-                raw_authority->constants.size(), eye, baseline,
-                recovered_camera.camera, recovery_error);
-        if (!recovered) {
-            static std::atomic<uint64_t> recovery_failure_count{};
-            const uint64_t count = recovery_failure_count.fetch_add(
-                1, std::memory_order_relaxed) + 1;
-            if (g_config.runtime_diagnostics &&
-                (count <= 16 || count % 120 == 0)) {
-                log_line(
-                    "V1219 AFW TAAU camera recovery failed count=%llu present=%llu eye=%u pair=%llu raw=%u views=%u error=%.7f detail=%ls",
-                    static_cast<unsigned long long>(count),
-                    static_cast<unsigned long long>(
-                        g_present_count.load(std::memory_order_relaxed)),
-                    eye, static_cast<unsigned long long>(pair_id),
-                    raw_authority != nullptr ? 1u : 0u,
-                    exact_render_views_valid ? 1u : 0u, best_error,
-                    recovery_error.c_str());
-            }
-            return false;
-        }
-        recovered_camera.render_views = exact_render_views;
-        recovered_camera.render_views_valid = true;
-        recovered_camera.exact_render_view = exact_render_views[eye];
-        recovered_camera.exact_render_view_valid = true;
-        recovered_camera.capture_present = raw_authority->capture_present;
-        recovered_camera.pair_id = pair_id;
-        recovered_camera.generation = generation;
-        recovered_camera.eye = eye;
-        recovered_camera.valid = true;
-        camera_authority = &recovered_camera;
-
-        static std::atomic<uint64_t> recovery_count{};
-        const uint64_t count = recovery_count.fetch_add(
-            1, std::memory_order_relaxed) + 1;
-        if (g_config.runtime_diagnostics &&
-            (count <= 16 || count % 120 == 0)) {
-            log_line(
-                "V1219 AFW TAAU camera recovered count=%llu present=%llu eye=%u pair=%llu raw_present=%llu error=%.7f",
-                static_cast<unsigned long long>(count),
-                static_cast<unsigned long long>(
-                    g_present_count.load(std::memory_order_relaxed)),
-                eye, static_cast<unsigned long long>(pair_id),
-                static_cast<unsigned long long>(
-                    recovered_camera.capture_present),
-                best_error);
-        }
-    }
-
-    // A replay of the same resolve must not allocate another slot or replace
-    // its already submitted authority.
+    // A replay of the same resolve must not consume another camera producer,
+    // allocate another slot or replace its already submitted authority.
     for (const auto& existing : g_puredark_afw_bundle_ring) {
         if (existing.state != PuredarkAfwBundleState::Free &&
             existing.input.valid && existing.input.eye == eye &&
@@ -9700,6 +9615,104 @@ bool capture_puredark_afw_mode3_taau_inputs(
             existing.input.generation == generation) {
             return true;
         }
+    }
+
+    // [FIX:PUREDARK-AFW-TAAU-STRICT-CAMERA-FIFO V1298 2/3] Consume exactly
+    // the oldest raw producer. The resolve matrix validates that ordered join;
+    // it never selects another entry from the queue.
+    PuredarkAfwStreamlineCameraSnapshot raw_camera{};
+    bool raw_available{};
+    if (!g_puredark_afw_streamline_camera_history.empty()) {
+        raw_camera = g_puredark_afw_streamline_camera_history.front();
+        g_puredark_afw_streamline_camera_history.pop_front();
+        raw_available = true;
+    }
+    constexpr float kMaximumRawCameraMatrixError = 0.05f;
+    const auto* resolve_matrix = reinterpret_cast<const float*>(
+        cb_data.data() + 6 * 16);
+    float matrix_error{};
+    if (raw_available) {
+        for (size_t index = 0; index < 16; ++index) {
+            matrix_error += fabsf(raw_camera.constants[48 + index] -
+                resolve_matrix[index]);
+        }
+    }
+    const bool matrix_valid = raw_available &&
+        std::isfinite(matrix_error) &&
+        matrix_error <= kMaximumRawCameraMatrixError;
+    const bool fifo_identity_valid = raw_available && raw_camera.valid &&
+        w3vr::taau_submission::strict_raw_camera_fifo_entry_matches(
+            generation, eye, raw_camera.generation, raw_camera.eye,
+            matrix_valid);
+
+    PuredarkAfwCameraSnapshot recovered_camera{};
+    std::wstring recovery_error;
+    float baseline =
+        g_runtime_eye_baseline_m.load(std::memory_order_relaxed);
+    if (!std::isfinite(baseline) || baseline < 0.04f ||
+        baseline > 0.10f) {
+        baseline = std::fabs(g_config.engine_factory_stereo_offset);
+    }
+    const bool recovered = fifo_identity_valid && exact_render_views_valid &&
+        w3vr::puredark_afw::build_camera_data_from_streamline(
+            raw_camera.constants.data(), raw_camera.constants.size(), eye,
+            baseline, recovered_camera.camera, recovery_error);
+    if (!recovered) {
+        // Once FIFO identity is broken, no remaining entry may be shifted onto
+        // a later resolve. Discard the queue and resume from the next producer.
+        g_puredark_afw_streamline_camera_history.clear();
+        static std::atomic<uint64_t> fifo_failure_count{};
+        const uint64_t count = fifo_failure_count.fetch_add(
+            1, std::memory_order_relaxed) + 1;
+        if (g_config.runtime_diagnostics &&
+            (count <= 16 || count % 120 == 0)) {
+            log_line(
+                "V1298 AFW TAAU strict camera FIFO rejected count=%llu present=%llu pair=%llu expected_eye=%u raw=%u raw_eye=%u expected_generation=%u raw_generation=%u sequence=%llu token=%u viewport=%u matrix_error=%.7f views=%u detail=%ls",
+                static_cast<unsigned long long>(count),
+                static_cast<unsigned long long>(
+                    g_present_count.load(std::memory_order_relaxed)),
+                static_cast<unsigned long long>(pair_id), eye,
+                raw_available ? 1u : 0u, raw_camera.eye,
+                generation, raw_camera.generation,
+                static_cast<unsigned long long>(
+                    raw_camera.sequence),
+                raw_camera.frame_token, raw_camera.viewport, matrix_error,
+                exact_render_views_valid ? 1u : 0u,
+                recovery_error.c_str());
+        }
+        return false;
+    }
+    recovered_camera.render_views = exact_render_views;
+    recovered_camera.render_views_valid = true;
+    recovered_camera.exact_render_view = exact_render_views[eye];
+    recovered_camera.exact_render_view_valid = true;
+    recovered_camera.capture_present = raw_camera.capture_present;
+    recovered_camera.pair_id = pair_id;
+    recovered_camera.generation = generation;
+    recovered_camera.eye = eye;
+    recovered_camera.valid = true;
+    const PuredarkAfwCameraSnapshot* camera_authority = &recovered_camera;
+
+    static std::atomic<uint64_t> fifo_join_count{};
+    const uint64_t fifo_count = fifo_join_count.fetch_add(
+        1, std::memory_order_relaxed) + 1;
+    if (g_config.runtime_diagnostics &&
+        (fifo_count <= 16 || fifo_count % 240 == 0)) {
+        const uint64_t present =
+            g_present_count.load(std::memory_order_relaxed);
+        const uint64_t age = raw_camera.capture_present <= present
+            ? present - raw_camera.capture_present
+            : UINT64_MAX;
+        log_line(
+            "V1298 AFW TAAU strict camera FIFO joined count=%llu present=%llu pair=%llu eye=%u sequence=%llu token=%u viewport=%u raw_present=%llu age=%llu matrix_error=%.7f remaining=%zu",
+            static_cast<unsigned long long>(fifo_count),
+            static_cast<unsigned long long>(present),
+            static_cast<unsigned long long>(pair_id), eye,
+            static_cast<unsigned long long>(raw_camera.sequence),
+            raw_camera.frame_token, raw_camera.viewport,
+            static_cast<unsigned long long>(raw_camera.capture_present),
+            static_cast<unsigned long long>(age), matrix_error,
+            g_puredark_afw_streamline_camera_history.size());
     }
 
     uint32_t bundle_slot = UINT32_MAX;
@@ -21941,16 +21954,34 @@ bool find_taau_hmd_motion_parameters(
     return true;
 }
 
-// [FEATURE:PUREDARK-AFW-MODE3-TAAU V12055 3/8] TAAU obtains its exact camera
-// from the immutable REDengine temporal ledger, then freezes matching
-// Depth/MVec directly at the native resolve.
-void capture_puredark_afw_mode3_taau_camera(const void* constants) {
-    if (!puredark_afw_mode3_aer_taau_route_configured() ||
-        constants == nullptr ||
-        g_engine_menu_state.load(std::memory_order_relaxed) != 0 ||
-        g_cinema_mode_active.load(std::memory_order_relaxed) ||
+// [FIX:PUREDARK-AFW-TAAU-STRICT-CAMERA-FIFO V1298 1/3] Preserve the raw
+// Streamline camera producer in arrival order. Identity is deliberately not
+// guessed here: the native TAAU resolve later supplies its proven pair/views
+// and consumes exactly one FIFO entry.
+void capture_puredark_afw_mode3_taau_camera(
+    const void* constants,
+    uint32_t routed_eye,
+    uint32_t frame_token,
+    uint32_t viewport) {
+    const bool route_configured =
+        puredark_afw_mode3_aer_taau_route_configured();
+    const int menu_state =
+        g_engine_menu_state.load(std::memory_order_relaxed);
+    const bool cinema_active =
+        g_cinema_mode_active.load(std::memory_order_relaxed);
+    const bool loading_active =
         g_engine_loading_screen_video_active.load(
-            std::memory_order_acquire)) {
+            std::memory_order_acquire);
+    const bool automatic_full_vr_active =
+        !g_force_mono_cinema.load(std::memory_order_relaxed) &&
+        g_config.cinema_full_vr &&
+        g_automatic_full_vr_camera_active.load(std::memory_order_acquire);
+    const bool gameplay_capture_allowed =
+        w3vr::mode3_transport::afw_gameplay_capture_allowed(
+            route_configured, menu_state, cinema_active,
+            loading_active, automatic_full_vr_active);
+    if (!gameplay_capture_allowed || constants == nullptr ||
+        routed_eye > 1) {
         return;
     }
 
@@ -21963,73 +21994,32 @@ void capture_puredark_afw_mode3_taau_camera(const void* constants) {
         g_present_count.load(std::memory_order_relaxed);
     raw_camera.generation =
         g_streamline_capture_generation.load(std::memory_order_acquire);
+    raw_camera.frame_token = frame_token;
+    raw_camera.viewport = viewport;
+    raw_camera.eye = routed_eye;
     raw_camera.valid = true;
     {
         std::scoped_lock lock{g_puredark_afw_mutex};
-        g_puredark_afw_streamline_camera_history.push_back(raw_camera);
-        while (g_puredark_afw_streamline_camera_history.size() >
+        raw_camera.sequence = ++g_puredark_afw_streamline_camera_sequence;
+        if (!g_puredark_afw_streamline_camera_history.empty()) {
+            const auto& previous =
+                g_puredark_afw_streamline_camera_history.back();
+            if (previous.valid && previous.generation == raw_camera.generation &&
+                previous.eye == raw_camera.eye) {
+                // A duplicate eye breaks the one-producer/one-resolve contract.
+                // Start a fresh FIFO and let the next resolve fail closed rather
+                // than silently shifting every later camera by one frame.
+                g_puredark_afw_streamline_camera_history.clear();
+            }
+        }
+        if (g_puredark_afw_streamline_camera_history.size() >=
                 kPuredarkAfwStreamlineCameraHistorySize) {
-            g_puredark_afw_streamline_camera_history.pop_front();
+            // A producer backlog beyond the entire supported latency window
+            // is a broken transaction, not authority to evict one old frame
+            // and silently join the next resolve to a shifted camera.
+            g_puredark_afw_streamline_camera_history.clear();
         }
-    }
-
-    TaauHmdMotionParameters motion{};
-    if (!find_taau_hmd_motion_parameters(
-            values + 48, -1, 0, motion) ||
-        motion.matched_eye < 0 || motion.matched_eye > 1 ||
-        motion.matched_pair_id == 0 ||
-        motion.matched_pair_id == UINT64_MAX ||
-        !motion.matched_render_views_valid ||
-        !std::isfinite(values[82]) || !std::isfinite(values[83])) {
-        log_puredark_afw_failure(
-            "mode3_aer_camera_match",
-            L"no exact REDengine camera identity for Mode-3 AER Streamline constants");
-        return;
-    }
-
-    float baseline =
-        g_runtime_eye_baseline_m.load(std::memory_order_relaxed);
-    if (!std::isfinite(baseline) || baseline < 0.04f || baseline > 0.10f) {
-        baseline = std::fabs(g_config.engine_factory_stereo_offset);
-    }
-
-    PuredarkAfwCameraSnapshot captured{};
-    std::wstring error;
-    const uint32_t eye = static_cast<uint32_t>(motion.matched_eye);
-    if (!w3vr::puredark_afw::build_camera_data_from_streamline(
-            values, 102, eye, baseline, captured.camera, error)) {
-        log_puredark_afw_failure("mode3_aer_camera", error);
-        return;
-    }
-    captured.render_views = motion.matched_render_views;
-    captured.render_views_valid = true;
-    captured.exact_render_view = motion.matched_render_views[eye];
-    captured.exact_render_view_valid = true;
-    captured.motion_scale[0] = values[82];
-    captured.motion_scale[1] = values[83];
-    captured.capture_present =
-        g_present_count.load(std::memory_order_relaxed);
-    captured.pair_id = motion.matched_pair_id;
-    captured.generation =
-        g_streamline_capture_generation.load(std::memory_order_acquire);
-    captured.eye = eye;
-    captured.valid = true;
-    {
-        std::scoped_lock lock{g_puredark_afw_mutex};
-        g_puredark_afw_camera_history.push_back(captured);
-        while (g_puredark_afw_camera_history.size() >
-                kPuredarkAfwCameraHistorySize) {
-            g_puredark_afw_camera_history.pop_front();
-        }
-    }
-    if (take_bounded_log_slot(g_puredark_afw_camera_logs, 16)) {
-        log_line(
-            "V12055 AFW Mode-3 AER camera present=%llu pair=%llu eye=%u generation=%u backend=%s tag_scale=%.6f,%.6f matrix_error=%.7f",
-            static_cast<unsigned long long>(captured.capture_present),
-            static_cast<unsigned long long>(captured.pair_id),
-            captured.eye, captured.generation, temporal_backend_name(),
-            captured.motion_scale[0], captured.motion_scale[1],
-            motion.matrix_error);
+        g_puredark_afw_streamline_camera_history.push_back(raw_camera);
     }
 }
 
@@ -35941,7 +35931,8 @@ void __fastcall hook_sl_set_constants(void* constants, uint32_t frame_token, uin
     // handed to Streamline after all AER routing adjustments. The NGX
     // hook will accept them only when eye and AER pair match exactly.
     capture_puredark_afw_camera(constants, eye);
-    capture_puredark_afw_mode3_taau_camera(constants);
+    capture_puredark_afw_mode3_taau_camera(
+        constants, eye, frame_token, source_viewport);
 
     struct AsymmetricSlAuditSnapshot {
         bool active{};
@@ -37968,7 +37959,7 @@ void ensure_initialized() {
                 "focus_fire_b1=stereo_structural_aer_upstream_owner "
                 "aer_taau_hud=scene_and_retained_pair_fail_open");
             log_line(
-                "witcher3vr dxgi proxy initialized build=V1314 base=V1313_plus_V1296 "
+                "witcher3vr dxgi proxy initialized build=V1315 base=V1314_plus_V1298_V1299 "
                 "anchor_smoothing_ini=%d anchor_smoothing_seconds=%.4f "
                 "first_person_strafe_ini=%d mode3_aer_presentation=%d raytracing_enabled=%d raytracing_history_buffers=%d "
                 "aer_afw_enabled=%d persistent_registry=%d dlss_public_streamline=%d "
@@ -38018,6 +38009,10 @@ void ensure_initialized() {
                 "V1295 alternate presentation resize=removed vd_foveated_special_route=removed presentation_size=unchanged fullscreen_ini=preserved");
             log_line(
                 "V1296 Mode-3 presentation=aer_and_stereo_all_backends source_resolution_fixed_100_percent aer_dlss_taau_scale1_cover_crop=bypassed slider=fov_only cinema_unchanged=1");
+            log_line(
+                "V1298 AER TAAU AFW camera_transport=strict_ordered_alternating_fifo matrix=validation_only searchable_history=removed capacity=4 mismatch=fail_closed");
+            log_line(
+                "V1299 AER TAAU AFW camera producer_gate=shared_gameplay_policy consumer_gate=shared_gameplay_policy normal_gameplay_capture=restored");
             log_line(
                 "V1279 DLSS compatibility=public_streamline_aer_private_history_ngx_stereo legacy_module_agnostic_discovery=disabled_by_V1288");
             log_line(

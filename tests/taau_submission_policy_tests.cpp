@@ -4,6 +4,7 @@
 
 int main() {
     using w3vr::taau_submission::decide_authority;
+    using w3vr::taau_submission::strict_raw_camera_fifo_entry_matches;
 
     const auto forward = decide_authority(1603, 1604, false);
     assert(!forward.preserve_previous);
@@ -29,6 +30,12 @@ int main() {
     const auto stale_without_authority = decide_authority(0, 1604, true);
     assert(stale_without_authority.preserve_previous);
     assert(stale_without_authority.effective_pair == 0);
+
+    assert(strict_raw_camera_fifo_entry_matches(7, 0, 7, 0, true));
+    assert(strict_raw_camera_fifo_entry_matches(7, 1, 7, 1, true));
+    assert(!strict_raw_camera_fifo_entry_matches(7, 0, 7, 1, true));
+    assert(!strict_raw_camera_fifo_entry_matches(7, 0, 6, 0, true));
+    assert(!strict_raw_camera_fifo_entry_matches(7, 0, 7, 0, false));
 
     return 0;
 }
