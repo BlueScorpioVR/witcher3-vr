@@ -16,7 +16,6 @@
 #include <openxr/openxr_platform.h>
 
 #include "aer_scheduler.h"
-#include "mode3_openxr_submit_policy.h"
 #include "openxr_eye_geometry.h"
 #include "puredark_afw_bridge.h"
 #include "puredark_afw_camera.h"
@@ -1174,6 +1173,43 @@ struct PuredarkAfwPresentResult {
     bool valid{};
 };
 
+bool fov_has_off_axis_center(const XrFovf& fov) {
+    const float left = tanf(fov.angleLeft);
+    const float right = tanf(fov.angleRight);
+    const float down = tanf(fov.angleDown);
+    const float up = tanf(fov.angleUp);
+    const float span_x = right - left;
+    const float span_y = up - down;
+    return std::isfinite(span_x) && std::isfinite(span_y) &&
+        span_x > 0.01f && span_y > 0.01f &&
+        (fabsf((right + left) / span_x) > 0.0001f ||
+            fabsf((up + down) / span_y) > 0.0001f);
+}
+
+void pair_centered_afw_camera_with_centered_fov(
+    PuredarkAfwCameraSnapshot& snapshot) {
+    constexpr float kCenteredMatrixEpsilon = 0.0001f;
+    const auto& source = snapshot.camera.source_view_to_clip.values;
+    const auto& destination = snapshot.camera.destination_view_to_clip.values;
+    if (!snapshot.render_views_valid || !snapshot.exact_render_view_valid ||
+        !g_hmd_render_fov_valid.load(std::memory_order_acquire) ||
+        fabsf(source[8]) > kCenteredMatrixEpsilon ||
+        fabsf(source[9]) > kCenteredMatrixEpsilon ||
+        fabsf(destination[8]) > kCenteredMatrixEpsilon ||
+        fabsf(destination[9]) > kCenteredMatrixEpsilon) {
+        return;
+    }
+
+    const XrFovf centered_fov{
+        g_hmd_render_fov_left.load(std::memory_order_acquire),
+        g_hmd_render_fov_right.load(std::memory_order_acquire),
+        g_hmd_render_fov_up.load(std::memory_order_acquire),
+        g_hmd_render_fov_down.load(std::memory_order_acquire)};
+    snapshot.render_views[0].fov = centered_fov;
+    snapshot.render_views[1].fov = centered_fov;
+    snapshot.exact_render_view.fov = centered_fov;
+}
+
 // [FIX:PUREDARK-AFW-PRODUCER-PUBLICATION V12016 1/8] A DXGI Present is not
 // the producer clock. Keep camera snapshots as a small immutable history, and
 // keep every AFW input bundle private until the command list which writes its
@@ -1376,6 +1412,7 @@ uint64_t g_mode3_aer_last_promotion_present{UINT64_MAX};
 bool g_mode3_afw_sequenced_pair_valid{};
 uint32_t g_mode3_afw_sequenced_generation{};
 uint64_t g_mode3_afw_sequenced_pair{};
+bool g_mode3_afw_sequenced_native_asymmetric{};
 uint32_t g_mode3_afw_last_real_eye{UINT32_MAX};
 uint64_t g_mode3_afw_sequenced_accepts{};
 uint64_t g_mode3_afw_sequenced_holds{};
@@ -1398,6 +1435,7 @@ void reset_mode3_afw_sequenced_pair_state(uint32_t generation) {
     g_mode3_afw_sequenced_pair_valid = false;
     g_mode3_afw_sequenced_generation = generation;
     g_mode3_afw_sequenced_pair = 0;
+    g_mode3_afw_sequenced_native_asymmetric = false;
     g_mode3_afw_last_real_eye = UINT32_MAX;
     g_mode3_afw_selected_bundle_slot = UINT32_MAX;
 }
@@ -1503,9 +1541,12 @@ float runtime_presentation_cover_fraction(UINT source_width = 0) {
 }
 
 float presentation_render_fov_scale() {
+    if (mode3_stereo_transport_active()) {
+        return 1.0f;
+    }
     const float cover_fraction = runtime_presentation_cover_fraction();
-    return w3vr::mode3_openxr_submit_policy::presentation_fov_scale(
-        g_config.presentation_scale, cover_fraction);
+    return std::clamp(
+        g_config.presentation_scale / cover_fraction, 0.01f, 2.0f);
 }
 
 struct PresentationProjectionScales {
@@ -1584,8 +1625,9 @@ bool derive_pixel_exact_fov(
 // unavailable, conservatively cover the complete rectangular runtime FOV.
 PresentationProjectionScales presentation_projection_scales(
     float left, float right, float down, float up) {
-    const float selected_scale = std::clamp(
-        g_config.presentation_scale, 0.01f, 1.0f);
+    const float selected_scale = mode3_stereo_transport_active()
+        ? 1.0f
+        : std::clamp(g_config.presentation_scale, 0.01f, 1.0f);
     const float horizontal_span = right - left;
     const float vertical_span = up - down;
     if (g_config.fullscreen_projection &&
@@ -2574,18 +2616,13 @@ bool initialize_native_asymmetric_pair(uint64_t pair_id) {
         g_xr_views.size() < 2 || pair_id == 0 || pair_id == UINT64_MAX) {
         return false;
     }
-    // [FIX:UNIFIED-MODE3-OPENXR-SUBMIT V1320 5/6] Native asymmetric
-    // projection must interpret Presentation Size exactly like symmetric
-    // projection. At the audited 0.8/0.804821 values this is ~0.994, not the
-    // old literal 0.8 zoom that made ASYM much tighter.
-    const float presentation_scale = presentation_render_fov_scale();
+    // Freeze the raw runtime FOV into the native producer. Presentation Size
+    // is applied only after the completed source pair has been selected.
     std::array<XrFovf, 2> presentation_fovs{};
     for (uint32_t eye = 0; eye < 2; ++eye) {
         w3vr::openxr_eye_geometry::AsymmetricProjectionDescriptor descriptor{};
-        if (!w3vr::openxr_eye_geometry::scale_asymmetric_projection_fov(
-                g_xr_views[eye].fov, presentation_scale,
-                presentation_fovs[eye]) ||
-            !w3vr::openxr_eye_geometry::
+        presentation_fovs[eye] = g_xr_views[eye].fov;
+        if (!w3vr::openxr_eye_geometry::
                 derive_asymmetric_projection_descriptor(
                     presentation_fovs[eye], 1, 1, descriptor)) {
             return false;
@@ -9038,6 +9075,7 @@ void capture_puredark_afw_camera(
         captured.render_views = {g_xr_views[0], g_xr_views[1]};
         captured.render_views_valid = true;
     }
+    pair_centered_afw_camera_with_centered_fov(captured);
     captured.valid = true;
     {
         std::scoped_lock lock{g_puredark_afw_mutex};
@@ -9897,6 +9935,7 @@ bool capture_puredark_afw_mode3_taau_inputs(
     recovered_camera.render_views_valid = true;
     recovered_camera.exact_render_view = exact_render_views[eye];
     recovered_camera.exact_render_view_valid = true;
+    pair_centered_afw_camera_with_centered_fov(recovered_camera);
     recovered_camera.capture_present = raw_camera.capture_present;
     recovered_camera.pair_id = pair_id;
     recovered_camera.generation = generation;
@@ -11386,8 +11425,10 @@ bool publish_puredark_afw_mode3_common(
         result.render_views_valid;
     g_mode3_aer_packed_eye_valid[synthesized_eye] = true;
     g_mode3_aer_packed_eye_generated[synthesized_eye] = true;
-    g_mode3_aer_packed_native_eye[synthesized_eye] =
-        g_mode3_aer_packed_native_eye[result.real_eye];
+    for (uint32_t eye = 0; eye < 2; ++eye) {
+        g_mode3_aer_packed_native_eye[eye] =
+            fov_has_off_axis_center(result.render_views[eye].fov);
+    }
     g_packed_present_cache_native_asymmetric =
         g_mode3_aer_packed_native_eye[0] &&
         g_mode3_aer_packed_native_eye[1];
@@ -13797,8 +13838,7 @@ bool derive_asymmetric_bootstrap_hud_source_shifts(
         return false;
     }
 
-    const float presentation_scale = std::clamp(
-        g_config.presentation_scale, 0.01f, 1.0f);
+    const float presentation_scale = 1.0f;
     const float symmetric_half_tangent =
         g_xr_visibility_half_tan_x.load(std::memory_order_acquire);
     const float symmetric_horizontal_span =
@@ -38520,14 +38560,14 @@ void ensure_initialized() {
                 "afw_native_dlss_source=exact_final_backbuffer_tag_join "
                 "afw_transport=identity_depth_mvec_camera_fence_rt_ledger_nonblocking_final_color_trigger "
                 "afw_native_dlss_camera=final_source_centered "
-                "native_presentation_size=pair_fov_tangent_scaled "
+                "native_presentation_size=final_openxr_fov_only "
                 "aer_final_source_cinema=strict_sequential_pair "
                 "aer_cinema_eye_phase=final_backbuffer_opposite_command_list "
                 "aer_cinema_hud_phase=dlss_taau_exact_command_list "
                 "focus_fire_b1=stereo_structural_aer_upstream_owner "
                 "aer_taau_hud=scene_and_retained_pair_fail_open");
             log_line(
-                "witcher3vr dxgi proxy initialized build=V1321 base=V1320_plus_V1303_taau_afw_fifo_phase_barrier "
+                "witcher3vr dxgi proxy initialized build=V1323 base=V1321_clean_final_mode3_submit "
                 "anchor_smoothing_ini=%d anchor_smoothing_seconds=%.4f "
                 "first_person_strafe_ini=%d mode3_aer_presentation=%d raytracing_enabled=%d raytracing_history_buffers=%d "
                 "aer_afw_enabled=%d persistent_registry=%d dlss_public_streamline=%d "
@@ -38585,9 +38625,8 @@ void ensure_initialized() {
                 "V1302 AER TAAU Full-VR HUD authority=exact_pending_command_list matches_dlss=1 preceding_completed_eye=removed retained_t1_same_tag=1");
             log_line(
                 "V1310 route flight recorder=ini_opt_in default_off f3_dump=15s renderdoc_f3_preserved=1 qpc=present_only gpu_readback=0 descriptor_scan=0 text_hotpath=0");
-            // [FIX:UNIFIED-MODE3-OPENXR-SUBMIT V1320 6/6]
             log_line(
-                "V1320 Mode3 OpenXR submit=single_full_source_identity route=aer_and_stereo backend=noaa_taau_dlss_dlaa projection=symmetric_and_asymmetric image_rect=full shifts=zero crop=removed fit=removed asym_zoom=cover_normalized");
+                "V1323 Mode3 final submit=one_full_source_path producer_scale=1 presentation_scale=cover_normalized_final_fov image_rect=full crop=0 fit=0 shift=0");
             log_line(
                 "V1279 DLSS compatibility=public_streamline_aer_private_history_ngx_stereo legacy_module_agnostic_discovery=disabled_by_V1288");
             log_line(
@@ -40138,9 +40177,7 @@ bool create_openxr_swapchains() {
     const uint32_t source_height = requested_height > 0
         ? requested_height
         : scaled_height;
-    const bool mode3_fixed_resolution =
-        w3vr::mode3_openxr_submit_policy::fixed_resolution_route_active(
-            mode3_stereo_transport_active());
+    const bool mode3_fixed_resolution = mode3_stereo_transport_active();
     // [FIX:MODE3-FIXED-RESOLUTION-PRESENTATION V1296 1/3] Every Mode-3
     // backend already produced the selected-resolution eye texture. Never
     // divide swapchain extent by Presentation Size; the slider is only an
@@ -41100,6 +41137,8 @@ bool stage_mode3_afw_sequenced_pair(
     g_mode3_afw_sequenced_pair_valid = true;
     g_mode3_afw_sequenced_generation = generation;
     g_mode3_afw_sequenced_pair = pair_id;
+    g_mode3_afw_sequenced_native_asymmetric =
+        g_packed_present_cache_native_asymmetric;
     g_mode3_afw_last_real_eye = real_eye;
     const uint64_t accepted = ++g_mode3_afw_sequenced_accepts;
     if (g_config.runtime_diagnostics &&
@@ -43059,14 +43098,10 @@ void render_openxr_test_frame(
     bool native_asymmetric_projection{};
     bool native_asymmetric_direct_copy{};
     bool native_asymmetric_black_frame{};
-    // [FIX:UNIFIED-MODE3-OPENXR-SUBMIT V1320 1/6] Producer route and
-    // projection metadata may differ, but every non-panel Mode-3 image takes
-    // one final full-source identity handoff. These are transport results,
-    // never backend/projection selectors.
     const bool mode3_unified_openxr_submit =
         mode3_stereo_transport_active() && !spatial_panel_active;
-    const bool mode3_per_eye_fov_authority =
-        mode3_unified_openxr_submit && g_config.native_stereo;
+    bool mode3_source_native_asymmetric{};
+    float mode3_final_fov_scale{1.0f};
     bool mode3_unified_direct_copy{};
     bool mode3_unified_identity_shader{};
     bool mode3_unified_black_frame{};
@@ -44508,6 +44543,11 @@ void render_openxr_test_frame(
                         g_mode3_afw_sequenced_generation =
                             puredark_afw.generation;
                         g_mode3_afw_sequenced_pair = puredark_afw.pair_id;
+                        g_mode3_afw_sequenced_native_asymmetric =
+                            fov_has_off_axis_center(
+                                puredark_afw.render_views[0].fov) &&
+                            fov_has_off_axis_center(
+                                puredark_afw.render_views[1].fov);
                         g_mode3_afw_last_real_eye = puredark_afw.real_eye;
                         const uint64_t accepted =
                             ++g_mode3_afw_sequenced_accepts;
@@ -44850,11 +44890,8 @@ void render_openxr_test_frame(
                     }
                 }
 
-                // [FIX:UNIFIED-MODE3-OPENXR-SUBMIT V1320 2/6] Resolve the
-                // final transport exactly once, after the producer has chosen
-                // the two completed eye resources. Route, backend, DLAA and
-                // projection are diagnostic data only: none may select a
-                // crop, fit, resize or shifted copy here.
+                // Resolve the one final Mode-3 transport after both completed
+                // eye resources have been selected.
                 if (mode3_unified_openxr_submit) {
                     bool full_source_pair_ready = target_desc_needed &&
                         target_desc.Dimension ==
@@ -44903,53 +44940,35 @@ void render_openxr_test_frame(
                         g_xr_cinema_projection_pipeline != nullptr &&
                         g_xr_cinema_projection_root_signature != nullptr &&
                         g_xr_cinema_projection_srv_heap != nullptr;
-                    const auto backend = temporal_backend_is_dlss()
-                        ? w3vr::mode3_openxr_submit_policy::
-                            TemporalBackend::Dlss
-                        : (temporal_backend_is_taau()
-                            ? w3vr::mode3_openxr_submit_policy::
-                                TemporalBackend::Taau
-                            : w3vr::mode3_openxr_submit_policy::
-                                TemporalBackend::None);
                     const auto decision =
-                        w3vr::mode3_openxr_submit_policy::decide({
+                        w3vr::mode3_transport::decide_final_submit({
                             true,
-                            false,
                             full_source_pair_ready,
                             copy_width,
                             copy_height,
                             swapchain.width,
                             swapchain.height,
                             full_source_copy_compatible,
-                            identity_shader_ready,
-                            mode3_aer_presentation_active()
-                                ? w3vr::mode3_openxr_submit_policy::
-                                    PresentationRoute::Aer
-                                : w3vr::mode3_openxr_submit_policy::
-                                    PresentationRoute::Stereo,
-                            backend,
-                            mode3_per_eye_fov_authority
-                                ? w3vr::mode3_openxr_submit_policy::
-                                    Projection::Asymmetric
-                                : w3vr::mode3_openxr_submit_policy::
-                                    Projection::Symmetric,
-                            g_config.dlss_dlaa});
+                            identity_shader_ready},
+                            requested_scale,
+                            fullscreen_cover_fraction);
                     mode3_unified_direct_copy = decision.transport ==
-                        w3vr::mode3_openxr_submit_policy::
-                            Transport::DirectCopy;
+                        w3vr::mode3_transport::FinalTransport::DirectCopy;
                     mode3_unified_identity_shader = decision.transport ==
-                        w3vr::mode3_openxr_submit_policy::
-                            Transport::IdentityShader;
+                        w3vr::mode3_transport::FinalTransport::IdentityShader;
                     mode3_unified_black_frame = decision.transport ==
-                        w3vr::mode3_openxr_submit_policy::
-                            Transport::Unavailable;
+                        w3vr::mode3_transport::FinalTransport::Unavailable;
+                    mode3_source_native_asymmetric =
+                        mode3_common_afw_sequenced_available
+                        ? g_mode3_afw_sequenced_native_asymmetric
+                        : native_asymmetric_projection;
+                    mode3_final_fov_scale = decision.fov_scale;
 
                     projection_image_rect.offset = {
-                        decision.openxr_rect.x,
-                        decision.openxr_rect.y};
+                        0, 0};
                     projection_image_rect.extent = {
-                        static_cast<int32_t>(decision.openxr_rect.width),
-                        static_cast<int32_t>(decision.openxr_rect.height)};
+                        static_cast<int32_t>(decision.width),
+                        static_cast<int32_t>(decision.height)};
                     for (uint32_t eye = 0; eye < 2; ++eye) {
                         projection_eye_image_rects[eye] =
                             projection_image_rect;
@@ -44965,15 +44984,6 @@ void render_openxr_test_frame(
                     projection_eye_fit_rect_valid = true;
                     projection_eye_float_fit_rect_valid = true;
 
-                    // Retire every legacy transport selector for this submit.
-                    // native_asymmetric_projection remains only as the source
-                    // FOV authority used below.
-                    full_surface_projection = false;
-                    symmetric_subimage_copy = false;
-                    scaled_fov_projection = false;
-                    scaled_fov_direct_copy = false;
-                    native_asymmetric_direct_copy = false;
-                    native_asymmetric_black_frame = false;
                     if (mode3_unified_black_frame) {
                         hud_composite_ready = false;
                     }
@@ -44984,28 +44994,51 @@ void render_openxr_test_frame(
                             1, std::memory_order_relaxed);
                         if (log_index < 16) {
                             log_line(
-                                "V1320 unified Mode3 OpenXR submit sample=%u "
+                                "V1323 final Mode3 OpenXR submit sample=%u "
                                 "route=%s backend=%s dlaa=%u projection=%s "
                                 "source=%ux%u swapchain=%ux%u rect=0,0 %ux%u "
-                                "transport=%s crop=0 fit=0 shift=0",
+                                "transport=%s crop=0 fit=0 shift=0 "
+                                "producer_fov_scale=1 final_xr_fov_scale=%.6f",
                                 log_index,
                                 mode3_aer_presentation_active()
                                     ? "aer" : "stereo",
                                 temporal_backend_name(),
                                 g_config.dlss_dlaa ? 1u : 0u,
-                                mode3_per_eye_fov_authority
+                                mode3_source_native_asymmetric
                                     ? "asymmetric" : "symmetric",
                                 copy_width, copy_height,
                                 swapchain.width, swapchain.height,
-                                decision.openxr_rect.width,
-                                decision.openxr_rect.height,
+                                decision.width,
+                                decision.height,
                                 mode3_unified_direct_copy
                                     ? "direct"
                                     : (mode3_unified_identity_shader
-                                        ? "identity_shader" : "black"));
+                                        ? "identity_shader" : "black"),
+                                mode3_final_fov_scale);
                         }
                     }
                 }
+                const bool projection_direct_copy =
+                    mode3_unified_openxr_submit
+                    ? mode3_unified_direct_copy
+                    : ((!full_surface_projection &&
+                            !native_asymmetric_projection) ||
+                        symmetric_subimage_copy ||
+                        scaled_fov_direct_copy ||
+                        native_asymmetric_direct_copy);
+                const bool projection_black_frame =
+                    mode3_unified_openxr_submit
+                    ? mode3_unified_black_frame
+                    : native_asymmetric_black_frame;
+                const bool projection_identity_shader =
+                    mode3_unified_openxr_submit
+                    ? mode3_unified_identity_shader
+                    : ((full_surface_projection ||
+                            native_asymmetric_projection) &&
+                        !symmetric_subimage_copy &&
+                        !scaled_fov_direct_copy &&
+                        !native_asymmetric_direct_copy &&
+                        !native_asymmetric_black_frame);
                 if (g_config.runtime_diagnostics) {
                     static std::atomic<bool>
                         symmetric_subimage_route_logged{};
@@ -45136,13 +45169,7 @@ void render_openxr_test_frame(
                     // copy the complete post-temporal source without filtering.
                     // The per-eye OpenXR imageRect selects the useful tangent
                     // crop from this shared 1:1 placement below.
-                    if ((mode3_unified_direct_copy ||
-                            (!mode3_unified_openxr_submit &&
-                                ((!full_surface_projection &&
-                                        !native_asymmetric_projection) ||
-                                    symmetric_subimage_copy ||
-                                    scaled_fov_direct_copy ||
-                                    native_asymmetric_direct_copy))) &&
+                    if (projection_direct_copy &&
                         shifted_width > 0 && shifted_height > 0) {
                         g_xr_command_list->CopyTextureRegion(
                             &dst,
@@ -45152,15 +45179,7 @@ void render_openxr_test_frame(
                     }
                 }
 
-                if ((mode3_unified_direct_copy ||
-                        mode3_unified_black_frame ||
-                        (!mode3_unified_openxr_submit &&
-                            ((!full_surface_projection &&
-                                    !native_asymmetric_projection) ||
-                                symmetric_subimage_copy ||
-                                scaled_fov_direct_copy ||
-                                native_asymmetric_direct_copy ||
-                                native_asymmetric_black_frame))) &&
+                if ((projection_direct_copy || projection_black_frame) &&
                     live_backbuffer_source) {
                     std::swap(source_to_copy.Transition.StateBefore, source_to_copy.Transition.StateAfter);
                     g_xr_command_list->ResourceBarrier(1, &source_to_copy);
@@ -45169,23 +45188,9 @@ void render_openxr_test_frame(
                 std::swap(to_rtv.Transition.StateBefore, to_rtv.Transition.StateAfter);
                 g_xr_command_list->ResourceBarrier(1, &to_rtv);
 
-                bool fit_projection_ready = mode3_unified_direct_copy ||
-                    mode3_unified_black_frame ||
-                    (!mode3_unified_openxr_submit &&
-                        (native_asymmetric_black_frame ||
-                            (!full_surface_projection &&
-                                !native_asymmetric_projection) ||
-                            symmetric_subimage_copy ||
-                            scaled_fov_direct_copy ||
-                            native_asymmetric_direct_copy));
-                if (mode3_unified_identity_shader ||
-                    (!mode3_unified_openxr_submit &&
-                        (full_surface_projection ||
-                            native_asymmetric_projection) &&
-                        !symmetric_subimage_copy &&
-                        !scaled_fov_direct_copy &&
-                        !native_asymmetric_direct_copy &&
-                        !native_asymmetric_black_frame)) {
+                bool fit_projection_ready =
+                    projection_direct_copy || projection_black_frame;
+                if (projection_identity_shader) {
                     fit_projection_ready = projection_eye_fit_rect_valid &&
                         projection_eye_float_fit_rect_valid &&
                         render_supersampled_fit_projection(
@@ -45194,7 +45199,7 @@ void render_openxr_test_frame(
                             projection_eye_float_fit_rects);
                     if (!fit_projection_ready) {
                         log_line(
-                            "V1320 identity/fallback projection render failed image=%u present=%llu unified=%d scaled_fov=%d native_asymmetric=%d",
+                            "Projection identity render failed image=%u present=%llu mode3=%d scaled_fov=%d native_asymmetric=%d",
                             image_index,
                             static_cast<unsigned long long>(current_present),
                             mode3_unified_identity_shader ? 1 : 0,
@@ -45462,17 +45467,13 @@ void render_openxr_test_frame(
                     projection_views[eye].fov =
                         current_panel_views[eye].fov;
                 } else if (mode3_unified_openxr_submit) {
-                    // [FIX:UNIFIED-MODE3-OPENXR-SUBMIT V1320 3/6] FOV is
-                    // metadata owned by the pixels, not a transport branch.
-                    // Native off-axis pixels retain their exact captured eye
-                    // FOV; symmetric pixels retain the exact symmetric camera
-                    // FOV. Both use the identical full-source handoff above.
-                    if (mode3_per_eye_fov_authority ||
+                    XrFovf source_owned_fov{};
+                    if (mode3_source_native_asymmetric ||
                         !g_hmd_render_fov_valid.load(
                             std::memory_order_acquire)) {
-                        projection_views[eye].fov = render_view->fov;
+                        source_owned_fov = render_view->fov;
                     } else {
-                        projection_views[eye].fov = {
+                        source_owned_fov = {
                             g_hmd_render_fov_left.load(
                                 std::memory_order_acquire),
                             g_hmd_render_fov_right.load(
@@ -45481,6 +45482,31 @@ void render_openxr_test_frame(
                                 std::memory_order_acquire),
                             g_hmd_render_fov_down.load(
                                 std::memory_order_acquire)};
+                    }
+                    XrFovf final_openxr_fov{};
+                    if (w3vr::openxr_eye_geometry::
+                            scale_asymmetric_projection_fov(
+                                source_owned_fov,
+                                mode3_final_fov_scale,
+                                final_openxr_fov)) {
+                        projection_views[eye].fov = final_openxr_fov;
+                    } else {
+                        // Config is clamped and source-owned FOVs are already
+                        // validated by their producer. Retain exact geometry
+                        // if malformed external runtime metadata ever arrives.
+                        projection_views[eye].fov = source_owned_fov;
+                        static std::atomic<uint32_t>
+                            final_openxr_fov_failure_logs{};
+                        if (take_bounded_log_slot(
+                                final_openxr_fov_failure_logs, 8)) {
+                            log_line(
+                                "V1323 final OpenXR FOV scale rejected eye=%u scale=%.6f source=%.9g,%.9g,%.9g,%.9g",
+                                eye, mode3_final_fov_scale,
+                                source_owned_fov.angleLeft,
+                                source_owned_fov.angleRight,
+                                source_owned_fov.angleUp,
+                                source_owned_fov.angleDown);
+                        }
                     }
                 } else if (native_asymmetric_projection) {
                     // [FIX:PUREDARK-AFW-TAAU-SEQUENCED-FOV-AUTHORITY V12126
@@ -45521,9 +45547,7 @@ void render_openxr_test_frame(
                         static_cast<int32_t>(swapchain.width),
                         static_cast<int32_t>(swapchain.height)};
                 } else if (mode3_unified_openxr_submit) {
-                    // [FIX:UNIFIED-MODE3-OPENXR-SUBMIT V1320 4/6] This is the
-                    // sole non-panel Mode-3 OpenXR imageRect: always the full
-                    // swapchain slice, irrespective of route/backend/FOV type.
+                    // Every non-panel Mode-3 source owns the full slice.
                     projection_views[eye].subImage.imageRect.offset = {0, 0};
                     projection_views[eye].subImage.imageRect.extent = {
                         static_cast<int32_t>(swapchain.width),
@@ -46259,7 +46283,7 @@ void handle_route_flight_and_renderdoc_hotkey(IDXGISwapChain* swapchain) {
     }
     // F3 keeps its existing RenderDoc meaning. The independent route dump is
     // an additional no-op unless [debug] route_flight_recorder=1.
-    w3vr::route_flight::dump_last_seconds("V1321", 15);
+    w3vr::route_flight::dump_last_seconds("V1323", 15);
     trigger_renderdoc_capture(swapchain);
 }
 

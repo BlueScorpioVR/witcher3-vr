@@ -22,6 +22,59 @@ enum class DlssCompletionOwner : uint8_t {
     Streamline,
 };
 
+enum class FinalTransport : uint8_t {
+    Inactive,
+    DirectCopy,
+    IdentityShader,
+    Unavailable,
+};
+
+struct FinalSubmitInput {
+    bool active{};
+    bool source_pair_ready{};
+    uint32_t source_width{};
+    uint32_t source_height{};
+    uint32_t swapchain_width{};
+    uint32_t swapchain_height{};
+    bool copy_compatible{};
+    bool identity_shader_ready{};
+};
+
+struct FinalSubmitDecision {
+    FinalTransport transport{FinalTransport::Inactive};
+    uint32_t width{};
+    uint32_t height{};
+    float fov_scale{1.0f};
+};
+
+// Route, backend and projection encoding are deliberately absent. Once the
+// completed eye pair is selected, every non-panel Mode-3 route uses this same
+// full-image handoff and cover-normalized final FOV correction.
+constexpr FinalSubmitDecision decide_final_submit(
+    const FinalSubmitInput& input,
+    float requested_scale,
+    float cover_fraction) noexcept {
+    if (!input.active) return {};
+    const float safe_cover = cover_fraction < 0.01f
+        ? 0.01f : cover_fraction;
+    const float scale = requested_scale / safe_cover;
+    FinalSubmitDecision result{
+        FinalTransport::Unavailable,
+        input.swapchain_width,
+        input.swapchain_height,
+        scale < 0.01f ? 0.01f : (scale > 2.0f ? 2.0f : scale)};
+    if (!input.source_pair_ready || input.source_width == 0 ||
+        input.source_height == 0 ||
+        input.source_width != input.swapchain_width ||
+        input.source_height != input.swapchain_height) return result;
+    result.transport = input.copy_compatible
+        ? FinalTransport::DirectCopy
+        : (input.identity_shader_ready
+            ? FinalTransport::IdentityShader
+            : FinalTransport::Unavailable);
+    return result;
+}
+
 // Public Streamline is the universal Mode-3 DLSS boundary. Projection and
 // presentation policy are deliberately not inputs, so AER and strict Stereo
 // retain the same temporal ownership and remain independent of NVIDIA's private

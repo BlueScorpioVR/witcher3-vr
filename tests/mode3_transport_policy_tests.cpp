@@ -1,15 +1,18 @@
 #include "mode3_transport_policy.h"
 
 #include <cassert>
+#include <cmath>
 #include <initializer_list>
 
 int main() {
     using w3vr::mode3_transport::DlssCompletionOwner;
+    using w3vr::mode3_transport::FinalTransport;
     using w3vr::mode3_transport::HudProjectionRoute;
     using w3vr::mode3_transport::TemporalAdapter;
     using w3vr::mode3_transport::afw_gameplay_capture_allowed;
     using w3vr::mode3_transport::afw_queued_producer_expired;
     using w3vr::mode3_transport::dlss_submission_route_active;
+    using w3vr::mode3_transport::decide_final_submit;
     using w3vr::mode3_transport::dlss_completion_apply_public_jitter;
     using w3vr::mode3_transport::dlss_completion_capture_public_bundle;
     using w3vr::mode3_transport::dlss_completion_ngx_uses_public_bundle;
@@ -90,6 +93,17 @@ int main() {
     assert(exact_afw_backend(false, false) == TemporalAdapter::None);
     assert(final_color_submission_backend(false, false) ==
         TemporalAdapter::None);
+
+    const auto final_submit = decide_final_submit({
+        true, true, 3072, 3264, 3072, 3264, true, true},
+        0.8f, 0.804821f);
+    assert(final_submit.transport == FinalTransport::DirectCopy);
+    assert(final_submit.width == 3072 && final_submit.height == 3264);
+    assert(std::fabs(final_submit.fov_scale -
+        (0.8f / 0.804821f)) < 0.00001f);
+    assert(decide_final_submit({
+        true, true, 2458, 2611, 3072, 3264, true, true}, 0.8f, 0.8f)
+        .transport == FinalTransport::Unavailable);
 
     // An exact command-list publication must be observable on either queue.
     assert(submission_queue_eligible(true, true));
