@@ -33,6 +33,17 @@
 #include "shadow_cascade_authority_policy.h"
 #include "taau_submission_policy.h"
 
+// V1352 repairs the projection contract of the exact motion field consumed by
+// AER AFW. Packet captures proved that native-ASym geometry/object pixels used
+// native projection while far-plane/transparent pixels still used centered
+// camera motion in both DLSS and TAAU. Immediately before AFW, one common
+// normalizer now preserves native/object motion and reconstructs only that
+// centered population in the exact producer projection. No color resize,
+// crop, material fallback or headset-specific constant is introduced.
+// V1351 derives directly from V1350 and adds only a one-shot F3 AFW packet
+// capture for exact head-rotation analysis. The renderer inputs, evaluator,
+// transport and OpenXR presentation remain V1350-identical.
+//
 // V1350 derives directly from V1348 and changes only the AFW evaluator
 // projection for a proven native-ASym producer. The exact frozen per-eye FOV
 // now owns focal scale and optical centre together; full-frame pixels, OpenXR
@@ -1152,6 +1163,8 @@ struct PuredarkAfwCameraSnapshot {
     std::array<XrView, 2> render_views{{
         {XR_TYPE_VIEW}, {XR_TYPE_VIEW}}};
     XrView exact_render_view{XR_TYPE_VIEW};
+    std::array<float, kPuredarkAfwStreamlineCameraFloatCount>
+        streamline_constants{};
     float motion_scale[2]{};
     uint64_t capture_present{};
     uint64_t pair_id{};
@@ -1161,6 +1174,7 @@ struct PuredarkAfwCameraSnapshot {
         w3vr::mode3_transport::AfwPixelProjection::Invalid};
     bool render_views_valid{};
     bool exact_render_view_valid{};
+    bool streamline_constants_valid{};
     bool valid{};
 };
 
@@ -1185,6 +1199,9 @@ struct PuredarkAfwInputSnapshot {
     std::array<XrView, 2> render_views{{
         {XR_TYPE_VIEW}, {XR_TYPE_VIEW}}};
     XrView exact_render_view{XR_TYPE_VIEW};
+    std::array<uint8_t, 512> taau_cb10{};
+    std::array<float, kPuredarkAfwStreamlineCameraFloatCount>
+        streamline_constants{};
     float motion_scale[2]{};
     uint64_t pair_id{};
     uint32_t generation{};
@@ -1193,6 +1210,8 @@ struct PuredarkAfwInputSnapshot {
         w3vr::mode3_transport::AfwPixelProjection::Invalid};
     bool render_views_valid{};
     bool exact_render_view_valid{};
+    bool taau_cb10_valid{};
+    bool streamline_constants_valid{};
     bool valid{};
 };
 
@@ -1254,9 +1273,11 @@ enum class PuredarkAfwBundleState : uint8_t {
 
 struct PuredarkAfwBundleSlot {
     PuredarkAfwInputSnapshot input{};
-    // V12111: private, immutable descriptors for the TAAU RGBA16F -> RG16F
-    // normalization recorded into this bundle's own lifetime.
-    ID3D12DescriptorHeap* taau_motion_heap{};
+    // V1352: immutable input and descriptors for the common AFW motion
+    // normalization recorded into this bundle's own lifetime. DLSS retains
+    // its raw RG16F copy here while the normalized result remains in input.
+    w3vr::puredark_afw::TextureDesc motion_normalization_source{};
+    ID3D12DescriptorHeap* motion_normalization_heap{};
     uint64_t route_epoch{};
     uint64_t submission_serial{};
     uint64_t ready_present{UINT64_MAX};
@@ -1286,10 +1307,10 @@ std::deque<PuredarkAfwStreamlineCameraSnapshot>
 uint64_t g_puredark_afw_streamline_camera_sequence{};
 std::array<PuredarkAfwBundleSlot, kPuredarkAfwBundleRingSize>
     g_puredark_afw_bundle_ring{};
-ID3D12RootSignature* g_puredark_afw_taau_motion_root_signature{};
-ID3D12PipelineState* g_puredark_afw_taau_motion_pipeline{};
-std::once_flag g_puredark_afw_taau_motion_pipeline_once{};
-UINT g_puredark_afw_taau_motion_descriptor_increment{};
+ID3D12RootSignature* g_puredark_afw_motion_root_signature{};
+ID3D12PipelineState* g_puredark_afw_motion_pipeline{};
+std::once_flag g_puredark_afw_motion_pipeline_once{};
+UINT g_puredark_afw_motion_descriptor_increment{};
 std::unordered_map<ID3D12CommandList*,
     std::vector<PuredarkAfwPendingSubmission>>
     g_puredark_afw_pending_submissions{};
@@ -1335,6 +1356,76 @@ std::atomic<uint64_t> g_puredark_afw_missing_candidates{};
 std::atomic<uint64_t> g_puredark_afw_consumed_candidates{};
 std::atomic<uint64_t> g_puredark_afw_held_presents{};
 std::atomic<uint64_t> g_puredark_afw_slot_starvation{};
+
+// [DIAG:AFW-ROTATION-PACKET V1351] Capture one exact eye-0 AFW transaction
+// after F3. The live XR list remains untouched: a private copy list is queued
+// only after that list has been submitted, then a private fence authorizes the
+// file write. This is observation only and has no steady-state GPU work.
+enum class PuredarkAfwPacketDumpState : uint8_t {
+    Idle,
+    Recording,
+    Scheduled,
+    Submitted,
+    Writing,
+    Complete,
+    Failed,
+};
+
+struct PuredarkAfwPacketTextureDump {
+    ID3D12Resource* source{};
+    uintptr_t source_address{};
+    ID3D12Resource* readback{};
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+    D3D12_RESOURCE_DESC source_desc{};
+    D3D12_RESOURCE_STATES source_state{};
+    uint64_t total_bytes{};
+    bool scheduled{};
+};
+
+struct PuredarkAfwPacketDump {
+    PuredarkAfwPacketDumpState state{PuredarkAfwPacketDumpState::Idle};
+    std::array<PuredarkAfwPacketTextureDump, 4> textures{};
+    w3vr::puredark_afw::CameraData camera{};
+    std::array<XrView, 2> render_views{{
+        {XR_TYPE_VIEW}, {XR_TYPE_VIEW}}};
+    XrView exact_render_view{XR_TYPE_VIEW};
+    std::array<uint8_t, 512> taau_cb10{};
+    std::array<float, kPuredarkAfwStreamlineCameraFloatCount>
+        streamline_constants{};
+    ID3D12GraphicsCommandList* command_list{};
+    ID3D12CommandAllocator* copy_allocator{};
+    ID3D12GraphicsCommandList* copy_command_list{};
+    ID3D12Fence* fence{};
+    uint64_t evaluate_ordinal{};
+    uint64_t present{};
+    uint64_t pair_id{};
+    uint64_t submission_serial{};
+    uint32_t generation{};
+    uint32_t eye{UINT32_MAX};
+    w3vr::mode3_transport::AfwPixelProjection pixel_projection{
+        w3vr::mode3_transport::AfwPixelProjection::Invalid};
+    float motion_scale[2]{};
+    float ignore_motion_threshold{};
+    uint32_t mode{};
+    uint32_t motion_vectors_type{};
+    bool clear_before_warping{};
+    bool is_hudless_color{};
+    bool debug{};
+    bool use_uint64{};
+    bool render_views_valid{};
+    bool exact_render_view_valid{};
+    bool taau_cb10_valid{};
+    bool streamline_constants_valid{};
+    bool evaluate_succeeded{};
+    bool input_capture_complete{};
+    bool output_capture_complete{};
+    char backend[16]{};
+};
+
+std::mutex g_puredark_afw_packet_dump_mutex{};
+PuredarkAfwPacketDump g_puredark_afw_packet_dump{};
+std::atomic<uint64_t> g_puredark_afw_packet_dump_evaluates{};
+std::atomic<bool> g_puredark_afw_packet_dump_requested{};
 
 w3vr::puredark_afw::Bridge* g_puredark_afw_bridge{};
 w3vr::puredark_afw::EyeFrameBuffers g_puredark_afw_eye_buffers{};
@@ -3499,6 +3590,20 @@ struct TaauComputeBindingSnapshot {
     ID3D12PipelineState* pipeline_state{};
     ID3D12RootSignature* compute_root_signature{};
 };
+
+bool record_puredark_afw_motion_normalization_locked(
+    ID3D12GraphicsCommandList* command_list,
+    uint32_t bundle_slot,
+    const TaauComputeBindingSnapshot* restore_snapshot,
+    ID3D12Resource* depth,
+    DXGI_FORMAT depth_format,
+    ID3D12Resource* motion_vectors,
+    DXGI_FORMAT motion_format,
+    bool transition_motion_from_common,
+    const w3vr::puredark_afw::Matrix4x4& actual_clip_to_previous,
+    uint32_t input_kind,
+    w3vr::puredark_afw::TextureDesc& destination,
+    std::wstring& error);
 
 // SetDescriptorHeaps invalidates graphics and compute descriptor tables.  The
 // asymmetric tiled-culling replacement therefore retains all table handles,
@@ -9170,6 +9275,10 @@ void capture_puredark_afw_camera(
         log_puredark_afw_failure("camera", error);
         return;
     }
+    memcpy(
+        captured.streamline_constants.data(), constants,
+        sizeof(captured.streamline_constants));
+    captured.streamline_constants_valid = true;
     Mode3AfwPixelProjectionAuthority projection_authority{};
     if (!resolve_mode3_afw_pixel_projection(
             route_tag.pair_id, route_tag.generation, routed_eye,
@@ -9520,6 +9629,37 @@ int32_t capture_puredark_afw_dlss_inputs_from_resources(
             "ngx_camera_match", L"no exact Streamline camera for DLSS eye/pair");
         return -1;
     }
+    const auto& camera = *camera_found;
+    const bool normalize_native_motion = camera.pixel_projection ==
+        w3vr::mode3_transport::AfwPixelProjection::NativeAsymmetric;
+    w3vr::puredark_afw::Matrix4x4 actual_clip_to_previous{};
+    if (normalize_native_motion) {
+        if (!camera.streamline_constants_valid) {
+            log_puredark_afw_failure(
+                "dlss_motion_projection",
+                L"native AFW producer has no exact Streamline constants");
+            return -1;
+        }
+        w3vr::puredark_afw::Matrix4x4 centered_projection{};
+        w3vr::puredark_afw::Matrix4x4 centered_clip_to_previous{};
+        memcpy(
+            centered_projection.values,
+            camera.streamline_constants.data(),
+            sizeof(centered_projection.values));
+        memcpy(
+            centered_clip_to_previous.values,
+            camera.streamline_constants.data() + 48,
+            sizeof(centered_clip_to_previous.values));
+        std::wstring projection_error;
+        if (!w3vr::puredark_afw::rebase_clip_to_previous_projection(
+                centered_projection, camera.camera.source_view_to_clip,
+                centered_clip_to_previous, actual_clip_to_previous,
+                projection_error)) {
+            log_puredark_afw_failure(
+                "dlss_motion_projection", projection_error);
+            return -1;
+        }
+    }
 
     uint32_t bundle_slot = UINT32_MAX;
     const uint64_t completed_fence = g_xr_fence != nullptr
@@ -9574,11 +9714,24 @@ int32_t capture_puredark_afw_dlss_inputs_from_resources(
     auto& captured = slot.input;
     captured.valid = false;
     std::wstring error;
+    auto normalized_motion_desc = motion_desc;
+    normalized_motion_desc.Format = DXGI_FORMAT_R16G16_FLOAT;
+    if (normalize_native_motion &&
+        motion_desc.Format != DXGI_FORMAT_R16G16_FLOAT) {
+        slot.state = PuredarkAfwBundleState::Free;
+        log_puredark_afw_failure(
+            "dlss_motion_format",
+            L"native AFW DLSS motion is not the proven RG16F contract");
+        return -1;
+    }
     if (!ensure_puredark_afw_device_locked(error) ||
         !ensure_puredark_afw_capture_texture_locked(
             depth_desc, captured.depth, error) ||
         !ensure_puredark_afw_capture_texture_locked(
-            motion_desc, captured.motion_vectors, error)) {
+            normalized_motion_desc, captured.motion_vectors, error) ||
+        (normalize_native_motion &&
+            !ensure_puredark_afw_capture_texture_locked(
+                motion_desc, slot.motion_normalization_source, error))) {
         slot.state = PuredarkAfwBundleState::Free;
         log_puredark_afw_failure("ngx_resources", error);
         return -1;
@@ -9596,24 +9749,56 @@ int32_t capture_puredark_afw_dlss_inputs_from_resources(
     const D3D12_BOX motion_box{
         0, 0, 0, static_cast<UINT>(motion_desc.Width),
         motion_desc.Height, 1};
+    auto& motion_copy_destination = normalize_native_motion
+        ? slot.motion_normalization_source
+        : captured.motion_vectors;
     if (!g_puredark_afw_bridge->copy_texture(
             command_list, captured.depth, depth_source,
             depth_box, 0, 0, error) ||
         !g_puredark_afw_bridge->copy_texture(
-            command_list, captured.motion_vectors, motion_source,
+            command_list, motion_copy_destination, motion_source,
             motion_box, 0, 0, error)) {
         slot.state = PuredarkAfwBundleState::Free;
         log_puredark_afw_failure("dlss_copy", error);
         return -1;
     }
+    if (normalize_native_motion) {
+        const auto depth_srv_format = [](DXGI_FORMAT format) {
+            if (format == DXGI_FORMAT_R32G8X24_TYPELESS) {
+                return DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;
+            }
+            if (format == DXGI_FORMAT_R32_TYPELESS ||
+                format == DXGI_FORMAT_D32_FLOAT) {
+                return DXGI_FORMAT_R32_FLOAT;
+            }
+            return format;
+        }(depth_desc.Format);
+        // [FIX:AFW-NATIVE-MOTION-CONTRACT V1352 3/4] DLSS already contains
+        // correct native/object vectors wherever depth is valid. Its exact
+        // depth-zero population is centered camera motion, so the common
+        // normalizer replaces only that population in a private RG16F input.
+        if (!record_puredark_afw_motion_normalization_locked(
+                command_list, bundle_slot, nullptr,
+                captured.depth.texture, depth_srv_format,
+                slot.motion_normalization_source.texture,
+                motion_desc.Format, false, actual_clip_to_previous, 1,
+                captured.motion_vectors, error)) {
+            slot.state = PuredarkAfwBundleState::Free;
+            log_puredark_afw_failure(
+                "dlss_motion_contract", error);
+            return -1;
+        }
+    }
 
-    const auto& camera = *camera_found;
     captured.camera = camera.camera;
     captured.render_views = camera.render_views;
     captured.render_views_valid = camera.render_views_valid;
     captured.exact_render_view = camera.exact_render_view;
     captured.exact_render_view_valid = camera.exact_render_view_valid;
     captured.pixel_projection = camera.pixel_projection;
+    captured.streamline_constants = camera.streamline_constants;
+    captured.streamline_constants_valid =
+        camera.streamline_constants_valid;
     captured.motion_scale[0] = motion_scale_x *
         static_cast<float>(output_desc.Width) /
         static_cast<float>(motion_desc.Width);
@@ -9628,7 +9813,7 @@ int32_t capture_puredark_afw_dlss_inputs_from_resources(
         1, std::memory_order_relaxed);
     if (take_bounded_log_slot(g_puredark_afw_capture_logs, 12)) {
         log_line(
-            "PureDark AFW direct inputs pair=%llu eye=%u generation=%u depth=%llux%u:%u mvec=%llux%u:%u output=%llux%u:%u scale=%.6f,%.6f",
+            "V1352 PureDark AFW direct inputs pair=%llu eye=%u generation=%u depth=%llux%u:%u mvec=%llux%u:%u output=%llux%u:%u scale=%.6f,%.6f native_motion_normalized=%u",
             static_cast<unsigned long long>(route_tag.pair_id), routed_eye,
             route_tag.generation,
             static_cast<unsigned long long>(depth_desc.Width),
@@ -9637,7 +9822,8 @@ int32_t capture_puredark_afw_dlss_inputs_from_resources(
             motion_desc.Height, static_cast<unsigned>(motion_desc.Format),
             static_cast<unsigned long long>(output_desc.Width),
             output_desc.Height, static_cast<unsigned>(output_desc.Format),
-            captured.motion_scale[0], captured.motion_scale[1]);
+            captured.motion_scale[0], captured.motion_scale[1],
+            normalize_native_motion ? 1u : 0u);
     }
     return static_cast<int32_t>(bundle_slot);
 }
@@ -9674,27 +9860,26 @@ int32_t capture_puredark_afw_dlss_inputs(
         output, motion_scale_x, motion_scale_y, routed_eye);
 }
 
-bool initialize_puredark_afw_taau_motion_pipeline() {
-    std::call_once(g_puredark_afw_taau_motion_pipeline_once, []() {
+bool initialize_puredark_afw_motion_pipeline() {
+    std::call_once(g_puredark_afw_motion_pipeline_once, []() {
         if (g_d3d12_device == nullptr || !initialize_dxc()) {
             return;
         }
-        // [FIX:PUREDARK-AFW-TAAU-MOTION-CONTRACT V12111 1/5] PureDark's
-        // official non-DLSS route always supplies RG16F motion. REDengine's
-        // native TAAU field is RGBA16F and uses (2,2) for pixels whose camera
-        // motion is reconstructed from depth + CB10. Preserve valid native
-        // object/skinning motion and materialize only that missing camera
-        // component into an immutable RG16F AFW input.
+        // [FIX:AFW-NATIVE-MOTION-CONTRACT V1352 1/4] Both temporal backends
+        // feed AFW the same previous-minus-current RG16F contract. TAAU's
+        // RGBA16F sentinel pixels and DLSS's depth-zero/far-plane pixels still
+        // carry centered camera motion even when geometry is native-ASym.
+        // Preserve every valid geometry/object vector and reconstruct only
+        // that population from the exact rebased temporal matrix.
         static constexpr char kShaderSource[] = R"(
 Texture2D<float4> native_mvec : register(t0);
 Texture2D<float> depth_texture : register(t1);
 RWTexture2D<float2> normalized_mvec : register(u0);
 cbuffer Parameters : register(b0) {
-    row_major float4x4 corrected_clip_to_previous;
-    float4 taau_r0;
-    float4 taau_r1;
-    float4 taau_r2;
-    float4 taau_r3;
+    row_major float4x4 actual_clip_to_previous;
+    float2 inverse_extent;
+    uint input_kind;
+    uint reserved;
 };
 [numthreads(8, 8, 1)]
 void main(uint3 dispatch_id : SV_DispatchThreadID) {
@@ -9703,23 +9888,30 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     if (dispatch_id.x >= width || dispatch_id.y >= height) return;
 
     float4 native_motion = native_mvec.Load(int3(dispatch_id.xy, 0));
-    bool native_valid = all(isfinite(native_motion.xy)) &&
-        native_motion.x < 2.0 && native_motion.y < 2.0;
-    if (native_valid) {
-        // V12121: PureDark's validated DLSS input is previous minus current.
-        // REDengine TAAU stores the exact opposite direction, so normalize the
-        // entire field at this one backend boundary.
-        normalized_mvec[dispatch_id.xy] = -native_motion.xy;
+    float2 source_uv = (float2(dispatch_id.xy) + 0.5) * inverse_extent;
+    float depth = depth_texture.Load(int3(dispatch_id.xy, 0));
+    bool motion_finite = all(isfinite(native_motion.xy));
+    if (input_kind == 0) {
+        bool taau_native_valid = motion_finite &&
+            native_motion.x < 2.0 && native_motion.y < 2.0;
+        if (taau_native_valid) {
+            // V12121: REDengine TAAU is current-minus-previous.
+            normalized_mvec[dispatch_id.xy] = -native_motion.xy;
+            return;
+        }
+    } else if (motion_finite && depth > 1e-7) {
+        // DLSS already owns the validated previous-minus-current direction.
+        // Depth-valid geometry includes object/skinning motion; never replace
+        // it with camera-only reprojection.
+        normalized_mvec[dispatch_id.xy] = native_motion.xy;
         return;
     }
 
-    float2 source_uv = (float2(dispatch_id.xy) + 0.5) * taau_r1.zw;
-    float depth = depth_texture.Load(int3(dispatch_id.xy, 0));
     float4 clip = float4(
         source_uv.x * 2.0 - 1.0,
         1.0 - source_uv.y * 2.0,
         depth, 1.0);
-    float4 previous = mul(clip, corrected_clip_to_previous);
+    float4 previous = mul(clip, actual_clip_to_previous);
     if (!all(isfinite(previous)) || abs(previous.w) < 1e-6) {
         normalized_mvec[dispatch_id.xy] = 0.0;
         return;
@@ -9745,7 +9937,7 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
             IDxcBlobUtf8* errors{};
             result->GetOutput(DXC_OUT_ERRORS, IID_PPV_ARGS(&errors), nullptr);
             log_line(
-                "V12114 TAAU AFW motion shader compile failed: %s",
+                "V1352 AFW motion shader compile failed: %s",
                 errors != nullptr ? errors->GetStringPointer() : "unknown");
             if (errors != nullptr) errors->Release();
             result->Release();
@@ -9782,7 +9974,7 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
         parameters[2].ParameterType =
             D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         parameters[2].Constants.ShaderRegister = 0;
-        parameters[2].Constants.Num32BitValues = 32;
+        parameters[2].Constants.Num32BitValues = 20;
         parameters[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
         D3D12_ROOT_SIGNATURE_DESC root_desc{};
         root_desc.NumParameters = static_cast<UINT>(std::size(parameters));
@@ -9799,7 +9991,7 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
         }
         if (FAILED(g_d3d12_device->CreateRootSignature(
                 0, serialized->GetBufferPointer(), serialized->GetBufferSize(),
-                IID_PPV_ARGS(&g_puredark_afw_taau_motion_root_signature)))) {
+                IID_PPV_ARGS(&g_puredark_afw_motion_root_signature)))) {
             serialized->Release();
             shader->Release();
             result->Release();
@@ -9808,89 +10000,115 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
         serialized->Release();
         D3D12_COMPUTE_PIPELINE_STATE_DESC pipeline_desc{};
         pipeline_desc.pRootSignature =
-            g_puredark_afw_taau_motion_root_signature;
+            g_puredark_afw_motion_root_signature;
         pipeline_desc.CS = {
             shader->GetBufferPointer(), shader->GetBufferSize()};
         const HRESULT pipeline_result =
             g_d3d12_device->CreateComputePipelineState(
                 &pipeline_desc,
-                IID_PPV_ARGS(&g_puredark_afw_taau_motion_pipeline));
+                IID_PPV_ARGS(&g_puredark_afw_motion_pipeline));
         shader->Release();
         result->Release();
         if (FAILED(pipeline_result)) {
             return;
         }
-        g_puredark_afw_taau_motion_descriptor_increment =
+        g_puredark_afw_motion_descriptor_increment =
             g_d3d12_device->GetDescriptorHandleIncrementSize(
                 D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
         log_line(
-            "V12114 TAAU AFW normalized RG16F motion pipeline initialized");
+            "V1352 AFW exact-projection RG16F motion pipeline initialized");
     });
-    return g_puredark_afw_taau_motion_root_signature != nullptr &&
-        g_puredark_afw_taau_motion_pipeline != nullptr &&
-        g_puredark_afw_taau_motion_descriptor_increment != 0;
+    return g_puredark_afw_motion_root_signature != nullptr &&
+        g_puredark_afw_motion_pipeline != nullptr &&
+        g_puredark_afw_motion_descriptor_increment != 0;
 }
 
-bool record_puredark_afw_taau_motion_normalization_locked(
+bool record_puredark_afw_motion_normalization_locked(
     ID3D12GraphicsCommandList* command_list,
     uint32_t bundle_slot,
-    const TaauComputeBindingSnapshot& snapshot,
-    const ResourceDescriptorInfo& depth,
-    const ResourceDescriptorInfo& motion_vectors,
-    const std::array<uint8_t, kTaauPrivateCb10Bytes>& cb_data,
+    const TaauComputeBindingSnapshot* restore_snapshot,
+    ID3D12Resource* depth,
+    DXGI_FORMAT depth_format,
+    ID3D12Resource* motion_vectors,
+    DXGI_FORMAT motion_format,
+    bool transition_motion_from_common,
+    const w3vr::puredark_afw::Matrix4x4& actual_clip_to_previous,
+    uint32_t input_kind,
     w3vr::puredark_afw::TextureDesc& destination,
     std::wstring& error) {
     if (command_list == nullptr ||
         bundle_slot >= kPuredarkAfwBundleRingSize ||
-        depth.resource == nullptr || motion_vectors.resource == nullptr ||
+        depth == nullptr || motion_vectors == nullptr ||
         destination.texture == nullptr ||
-        motion_vectors.format != DXGI_FORMAT_R16G16B16A16_FLOAT ||
-        depth.format == DXGI_FORMAT_UNKNOWN ||
-        snapshot.cbv_srv_uav_heap == nullptr ||
-        snapshot.sampler_heap == nullptr ||
-        snapshot.compute_root_signature == nullptr ||
-        snapshot.pipeline_state == nullptr ||
+        (motion_format != DXGI_FORMAT_R16G16_FLOAT &&
+            motion_format != DXGI_FORMAT_R16G16B16A16_FLOAT) ||
+        depth_format == DXGI_FORMAT_UNKNOWN || input_kind > 1 ||
+        (restore_snapshot != nullptr &&
+            (restore_snapshot->cbv_srv_uav_heap == nullptr ||
+                restore_snapshot->sampler_heap == nullptr ||
+                restore_snapshot->compute_root_signature == nullptr ||
+                restore_snapshot->pipeline_state == nullptr)) ||
         g_set_descriptor_heaps == nullptr ||
         g_set_compute_root_signature == nullptr ||
         g_set_pipeline_state == nullptr ||
         g_set_compute_root_descriptor_table == nullptr ||
         g_set_compute_root_32bit_constants == nullptr ||
-        !initialize_puredark_afw_taau_motion_pipeline()) {
-        error = L"TAAU AFW normalized motion prerequisites are unavailable";
+        !initialize_puredark_afw_motion_pipeline()) {
+        error = L"AFW normalized motion prerequisites are unavailable";
         return false;
     }
 
+    const auto motion_desc = motion_vectors->GetDesc();
+    const auto depth_desc = depth->GetDesc();
+    const auto destination_desc = destination.texture->GetDesc();
+    if (motion_desc.Width == 0 || motion_desc.Height == 0 ||
+        depth_desc.Width != motion_desc.Width ||
+        depth_desc.Height != motion_desc.Height ||
+        destination_desc.Width != motion_desc.Width ||
+        destination_desc.Height != motion_desc.Height ||
+        destination_desc.Format != DXGI_FORMAT_R16G16_FLOAT) {
+        error = L"AFW normalized motion extents or destination format differ";
+        return false;
+    }
+    for (float value : actual_clip_to_previous.values) {
+        if (!std::isfinite(value)) {
+            error = L"AFW normalized temporal transform is non-finite";
+            return false;
+        }
+    }
+
     auto& slot = g_puredark_afw_bundle_ring[bundle_slot];
-    if (slot.taau_motion_heap == nullptr) {
+    if (slot.motion_normalization_heap == nullptr) {
         D3D12_DESCRIPTOR_HEAP_DESC heap_desc{};
         heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
         heap_desc.NumDescriptors = 3;
         heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         if (FAILED(g_d3d12_device->CreateDescriptorHeap(
-                &heap_desc, IID_PPV_ARGS(&slot.taau_motion_heap)))) {
-            error = L"TAAU AFW normalized motion descriptor heap failed";
+                &heap_desc,
+                IID_PPV_ARGS(&slot.motion_normalization_heap)))) {
+            error = L"AFW normalized motion descriptor heap failed";
             return false;
         }
     }
 
-    auto cpu = slot.taau_motion_heap->GetCPUDescriptorHandleForHeapStart();
+    auto cpu = slot.motion_normalization_heap->GetCPUDescriptorHandleForHeapStart();
     D3D12_SHADER_RESOURCE_VIEW_DESC motion_srv{};
-    motion_srv.Format = motion_vectors.format;
+    motion_srv.Format = motion_format;
     motion_srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     motion_srv.Shader4ComponentMapping =
         D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     motion_srv.Texture2D.MipLevels = 1;
     g_d3d12_device->CreateShaderResourceView(
-        motion_vectors.resource, &motion_srv, cpu);
-    cpu.ptr += g_puredark_afw_taau_motion_descriptor_increment;
+        motion_vectors, &motion_srv, cpu);
+    cpu.ptr += g_puredark_afw_motion_descriptor_increment;
     D3D12_SHADER_RESOURCE_VIEW_DESC depth_srv{};
-    depth_srv.Format = depth.format;
+    depth_srv.Format = depth_format;
     depth_srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     depth_srv.Shader4ComponentMapping =
         D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     depth_srv.Texture2D.MipLevels = 1;
-    g_d3d12_device->CreateShaderResourceView(depth.resource, &depth_srv, cpu);
-    cpu.ptr += g_puredark_afw_taau_motion_descriptor_increment;
+    g_d3d12_device->CreateShaderResourceView(depth, &depth_srv, cpu);
+    cpu.ptr += g_puredark_afw_motion_descriptor_increment;
     D3D12_UNORDERED_ACCESS_VIEW_DESC output_uav{};
     output_uav.Format = DXGI_FORMAT_R16G16_FLOAT;
     output_uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
@@ -9898,41 +10116,52 @@ bool record_puredark_afw_taau_motion_normalization_locked(
         destination.texture, nullptr, &output_uav, cpu);
 
     D3D12_RESOURCE_BARRIER to_compute[2]{};
-    to_compute[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    to_compute[0].Transition.pResource = motion_vectors.resource;
-    to_compute[0].Transition.Subresource =
+    UINT barrier_count{};
+    if (transition_motion_from_common) {
+        auto& source_barrier = to_compute[barrier_count++];
+        source_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        source_barrier.Transition.pResource = motion_vectors;
+        source_barrier.Transition.Subresource =
+            D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        source_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+        source_barrier.Transition.StateAfter =
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    }
+    auto& destination_barrier = to_compute[barrier_count++];
+    destination_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    destination_barrier.Transition.pResource = destination.texture;
+    destination_barrier.Transition.Subresource =
         D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    to_compute[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
-    to_compute[0].Transition.StateAfter =
-        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-    to_compute[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    to_compute[1].Transition.pResource = destination.texture;
-    to_compute[1].Transition.Subresource =
-        D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    to_compute[1].Transition.StateBefore =
+    destination_barrier.Transition.StateBefore =
         D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE;
-    to_compute[1].Transition.StateAfter =
+    destination_barrier.Transition.StateAfter =
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-    command_list->ResourceBarrier(2, to_compute);
+    command_list->ResourceBarrier(barrier_count, to_compute);
 
-    std::array<uint32_t, 32> constants{};
-    memcpy(constants.data(), cb_data.data() + 6 * 16, 64);
-    memcpy(constants.data() + 16, cb_data.data(), 64);
-    ID3D12DescriptorHeap* normalization_heaps[] = {
-        slot.taau_motion_heap};
+    std::array<uint32_t, 20> constants{};
+    memcpy(
+        constants.data(), actual_clip_to_previous.values,
+        sizeof(actual_clip_to_previous.values));
+    const float inverse_extent[2]{
+        1.0f / static_cast<float>(motion_desc.Width),
+        1.0f / static_cast<float>(motion_desc.Height)};
+    memcpy(constants.data() + 16, inverse_extent, sizeof(inverse_extent));
+    constants[18] = input_kind;
+    ID3D12DescriptorHeap* normalization_heaps[]{
+        slot.motion_normalization_heap};
     g_set_descriptor_heaps(command_list, 1, normalization_heaps);
     g_set_compute_root_signature(
-        command_list, g_puredark_afw_taau_motion_root_signature);
-    g_set_pipeline_state(command_list, g_puredark_afw_taau_motion_pipeline);
-    auto gpu = slot.taau_motion_heap->GetGPUDescriptorHandleForHeapStart();
+        command_list, g_puredark_afw_motion_root_signature);
+    g_set_pipeline_state(command_list, g_puredark_afw_motion_pipeline);
+    auto gpu =
+        slot.motion_normalization_heap->GetGPUDescriptorHandleForHeapStart();
     g_set_compute_root_descriptor_table(command_list, 0, gpu);
     gpu.ptr += static_cast<UINT64>(2) *
-        g_puredark_afw_taau_motion_descriptor_increment;
+        g_puredark_afw_motion_descriptor_increment;
     g_set_compute_root_descriptor_table(command_list, 1, gpu);
     g_set_compute_root_32bit_constants(
         command_list, 2, static_cast<UINT>(constants.size()),
         constants.data(), 0);
-    const auto motion_desc = motion_vectors.resource->GetDesc();
     g_dispatch(
         command_list,
         static_cast<UINT>((motion_desc.Width + 7) / 8),
@@ -9942,25 +10171,29 @@ bool record_puredark_afw_taau_motion_normalization_locked(
     uav_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
     uav_barrier.UAV.pResource = destination.texture;
     command_list->ResourceBarrier(1, &uav_barrier);
-    std::swap(
-        to_compute[0].Transition.StateBefore,
-        to_compute[0].Transition.StateAfter);
-    std::swap(
-        to_compute[1].Transition.StateBefore,
-        to_compute[1].Transition.StateAfter);
-    command_list->ResourceBarrier(2, to_compute);
+    for (UINT index = 0; index < barrier_count; ++index) {
+        std::swap(
+            to_compute[index].Transition.StateBefore,
+            to_compute[index].Transition.StateAfter);
+    }
+    command_list->ResourceBarrier(barrier_count, to_compute);
 
-    ID3D12DescriptorHeap* original_heaps[] = {
-        snapshot.cbv_srv_uav_heap, snapshot.sampler_heap};
-    g_set_descriptor_heaps(
-        command_list, static_cast<UINT>(std::size(original_heaps)),
-        original_heaps);
-    g_set_compute_root_signature(
-        command_list, snapshot.compute_root_signature);
-    g_set_pipeline_state(command_list, snapshot.pipeline_state);
-    for (UINT root = 0; root < snapshot.compute_tables.size(); ++root) {
-        g_set_compute_root_descriptor_table(
-            command_list, root, snapshot.compute_tables[root]);
+    if (restore_snapshot != nullptr) {
+        ID3D12DescriptorHeap* original_heaps[]{
+            restore_snapshot->cbv_srv_uav_heap,
+            restore_snapshot->sampler_heap};
+        g_set_descriptor_heaps(
+            command_list, static_cast<UINT>(std::size(original_heaps)),
+            original_heaps);
+        g_set_compute_root_signature(
+            command_list, restore_snapshot->compute_root_signature);
+        g_set_pipeline_state(command_list, restore_snapshot->pipeline_state);
+        for (UINT root = 0;
+             root < restore_snapshot->compute_tables.size(); ++root) {
+            g_set_compute_root_descriptor_table(
+                command_list, root,
+                restore_snapshot->compute_tables[root]);
+        }
     }
     error.clear();
     return true;
@@ -10125,6 +10358,28 @@ bool capture_puredark_afw_mode3_taau_inputs(
             }
         }
     }
+    w3vr::puredark_afw::Matrix4x4 actual_clip_to_previous{};
+    memcpy(
+        actual_clip_to_previous.values, cb_data.data() + 6 * 16,
+        sizeof(actual_clip_to_previous.values));
+    if (recovered && pixel_projection ==
+            w3vr::mode3_transport::AfwPixelProjection::NativeAsymmetric) {
+        w3vr::puredark_afw::Matrix4x4 centered_projection{};
+        memcpy(
+            centered_projection.values, raw_camera.constants.data(),
+            sizeof(centered_projection.values));
+        w3vr::puredark_afw::Matrix4x4 centered_clip_to_previous =
+            actual_clip_to_previous;
+        // [FIX:AFW-NATIVE-MOTION-CONTRACT V1352 2/4] The CB10 transform owns
+        // the centered temporal coordinate system. Express that same time
+        // delta in the actual source-eye tangent space before reconstructing
+        // only TAAU's sentinel population.
+        recovered = w3vr::puredark_afw::rebase_clip_to_previous_projection(
+            centered_projection,
+            recovered_camera.camera.source_view_to_clip,
+            centered_clip_to_previous, actual_clip_to_previous,
+            recovery_error);
+    }
     route_flight.set_previous(raw_camera.capture_present);
     route_flight.advance(
         4, (raw_available ? 0x02u : 0u) |
@@ -10288,9 +10543,12 @@ bool capture_puredark_afw_mode3_taau_inputs(
         log_puredark_afw_failure("taau_producer_copy", error);
         return false;
     }
-    if (!record_puredark_afw_taau_motion_normalization_locked(
-            command_list, bundle_slot, snapshot, depth, motion_vectors,
-            cb_data, captured.motion_vectors, error)) {
+    if (!record_puredark_afw_motion_normalization_locked(
+            command_list, bundle_slot, &snapshot,
+            captured.depth.texture, depth.format,
+            motion_vectors.resource, motion_vectors.format, true,
+            actual_clip_to_previous, 0,
+            captured.motion_vectors, error)) {
         slot.state = PuredarkAfwBundleState::Free;
         log_puredark_afw_failure(
             "taau_producer_motion_contract", error);
@@ -10305,6 +10563,10 @@ bool capture_puredark_afw_mode3_taau_inputs(
     captured.render_views_valid = true;
     captured.exact_render_view = camera_authority->exact_render_view;
     captured.exact_render_view_valid = true;
+    captured.taau_cb10 = cb_data;
+    captured.taau_cb10_valid = true;
+    captured.streamline_constants = raw_camera.constants;
+    captured.streamline_constants_valid = raw_camera.valid;
     // PureDark beta.5's official non-DLSS path scales normalized motion by
     // final output pixels. TAAU's Streamline constants carry 1,1 because NGX
     // is absent; propagating those values made valid motion effectively zero.
@@ -11200,6 +11462,525 @@ bool initialize_puredark_afw_frame_buffers_locked(
     return true;
 }
 
+constexpr size_t kPuredarkAfwPacketColor = 0;
+constexpr size_t kPuredarkAfwPacketDepth = 1;
+constexpr size_t kPuredarkAfwPacketMotion = 2;
+constexpr size_t kPuredarkAfwPacketOutput = 3;
+
+bool prepare_puredark_afw_packet_texture_locked(
+    const w3vr::puredark_afw::TextureDesc& source,
+    PuredarkAfwPacketTextureDump& dump) {
+    if (g_d3d12_device == nullptr || source.texture == nullptr ||
+        dump.scheduled) {
+        return false;
+    }
+    const auto desc = source.texture->GetDesc();
+    if (desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+        desc.Width == 0 || desc.Height == 0 || desc.DepthOrArraySize != 1 ||
+        desc.MipLevels == 0 || desc.SampleDesc.Count != 1) {
+        return false;
+    }
+
+    UINT64 total_bytes{};
+    UINT row_count{};
+    UINT64 row_bytes{};
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+    g_d3d12_device->GetCopyableFootprints(
+        &desc, 0, 1, 0, &footprint, &row_count, &row_bytes, &total_bytes);
+    if (total_bytes == 0 || row_count == 0 || row_bytes == 0) {
+        return false;
+    }
+
+    // Borrow the resources only until the private post-XR copy is queued.
+    // Their owning AFW bundle/eye buffers remain alive through that boundary;
+    // taking a late AddRef would recreate the V12098 lifetime race.
+    dump.source = source.texture;
+    dump.source_address = reinterpret_cast<uintptr_t>(source.texture);
+    dump.footprint = footprint;
+    dump.source_desc = desc;
+    dump.source_state = source.initial_state;
+    dump.total_bytes = total_bytes;
+    dump.scheduled = true;
+    return true;
+}
+
+bool allocate_puredark_afw_packet_readback_locked(
+    PuredarkAfwPacketTextureDump& dump) {
+    if (!dump.scheduled || dump.source == nullptr || dump.total_bytes == 0) {
+        return false;
+    }
+    if (dump.readback != nullptr) {
+        return true;
+    }
+    D3D12_HEAP_PROPERTIES heap{};
+    heap.Type = D3D12_HEAP_TYPE_READBACK;
+    heap.CreationNodeMask = 1;
+    heap.VisibleNodeMask = 1;
+    D3D12_RESOURCE_DESC buffer{};
+    buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    buffer.Width = dump.total_bytes;
+    buffer.Height = 1;
+    buffer.DepthOrArraySize = 1;
+    buffer.MipLevels = 1;
+    buffer.SampleDesc.Count = 1;
+    buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    return SUCCEEDED(g_d3d12_device->CreateCommittedResource(
+        &heap, D3D12_HEAP_FLAG_NONE, &buffer,
+        D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+        IID_PPV_ARGS(&dump.readback)));
+}
+
+void record_puredark_afw_packet_texture_copy(
+    ID3D12GraphicsCommandList* command_list,
+    const PuredarkAfwPacketTextureDump& dump) {
+    if (command_list == nullptr || !dump.scheduled || dump.source == nullptr ||
+        dump.readback == nullptr) {
+        return;
+    }
+    D3D12_RESOURCE_BARRIER to_copy{};
+    const bool transition =
+        dump.source_state != D3D12_RESOURCE_STATE_COPY_SOURCE;
+    if (transition) {
+        to_copy.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        to_copy.Transition.pResource = dump.source;
+        to_copy.Transition.Subresource =
+            D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        to_copy.Transition.StateBefore = dump.source_state;
+        to_copy.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        command_list->ResourceBarrier(1, &to_copy);
+    }
+    D3D12_TEXTURE_COPY_LOCATION destination{};
+    destination.pResource = dump.readback;
+    destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    destination.PlacedFootprint = dump.footprint;
+    D3D12_TEXTURE_COPY_LOCATION source{};
+    source.pResource = dump.source;
+    source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    source.SubresourceIndex = 0;
+    command_list->CopyTextureRegion(
+        &destination, 0, 0, 0, &source, nullptr);
+    if (transition) {
+        std::swap(
+            to_copy.Transition.StateBefore, to_copy.Transition.StateAfter);
+        command_list->ResourceBarrier(1, &to_copy);
+    }
+}
+
+bool begin_puredark_afw_packet_dump(
+    ID3D12GraphicsCommandList* command_list,
+    const w3vr::puredark_afw::FrameBufferDesc& input,
+    const w3vr::puredark_afw::FrameWarpEvaluateParams& evaluate,
+    const PuredarkAfwInputSnapshot& captured,
+    uint64_t submission_serial,
+    uint64_t present_count) {
+    const uint64_t ordinal =
+        g_puredark_afw_packet_dump_evaluates.fetch_add(
+            1, std::memory_order_relaxed) + 1;
+    if ((!temporal_backend_is_taau() && !temporal_backend_is_dlss()) ||
+        captured.eye != 0 || evaluate.camera_data == nullptr ||
+        !g_puredark_afw_packet_dump_requested.load(
+            std::memory_order_acquire)) {
+        return false;
+    }
+
+    std::scoped_lock lock{g_puredark_afw_packet_dump_mutex};
+    auto& dump = g_puredark_afw_packet_dump;
+    if (dump.state != PuredarkAfwPacketDumpState::Idle ||
+        !g_puredark_afw_packet_dump_requested.exchange(
+            false, std::memory_order_acq_rel)) {
+        return false;
+    }
+    dump = {};
+    dump.state = PuredarkAfwPacketDumpState::Recording;
+    dump.command_list = command_list;
+    dump.evaluate_ordinal = ordinal;
+    dump.present = present_count;
+    dump.pair_id = captured.pair_id;
+    dump.submission_serial = submission_serial;
+    dump.generation = captured.generation;
+    dump.eye = captured.eye;
+    dump.pixel_projection = captured.pixel_projection;
+    dump.motion_scale[0] = evaluate.motion_scale[0];
+    dump.motion_scale[1] = evaluate.motion_scale[1];
+    dump.ignore_motion_threshold = evaluate.ignore_motion_threshold;
+    dump.mode = static_cast<uint32_t>(evaluate.mode);
+    dump.motion_vectors_type =
+        static_cast<uint32_t>(evaluate.motion_vectors_type);
+    dump.clear_before_warping = evaluate.clear_before_warping;
+    dump.is_hudless_color = evaluate.is_hudless_color;
+    dump.debug = evaluate.debug;
+    dump.use_uint64 = evaluate.use_uint64;
+    dump.camera = *evaluate.camera_data;
+    dump.render_views = captured.render_views;
+    dump.render_views_valid = captured.render_views_valid;
+    dump.exact_render_view = captured.exact_render_view;
+    dump.exact_render_view_valid = captured.exact_render_view_valid;
+    dump.taau_cb10 = captured.taau_cb10;
+    dump.taau_cb10_valid = captured.taau_cb10_valid;
+    dump.streamline_constants = captured.streamline_constants;
+    dump.streamline_constants_valid =
+        captured.streamline_constants_valid;
+    strncpy_s(
+        dump.backend, std::size(dump.backend), temporal_backend_name(),
+        _TRUNCATE);
+
+    const bool color_scheduled = prepare_puredark_afw_packet_texture_locked(
+        input.color, dump.textures[kPuredarkAfwPacketColor]);
+    const bool depth_scheduled = prepare_puredark_afw_packet_texture_locked(
+        input.depth, dump.textures[kPuredarkAfwPacketDepth]);
+    const bool motion_scheduled = prepare_puredark_afw_packet_texture_locked(
+        input.motion_vectors, dump.textures[kPuredarkAfwPacketMotion]);
+    dump.input_capture_complete =
+        color_scheduled && depth_scheduled && motion_scheduled;
+    if (!color_scheduled && !depth_scheduled && !motion_scheduled) {
+        dump.state = PuredarkAfwPacketDumpState::Failed;
+        return false;
+    }
+    log_line(
+        "V1352 AFW rotation packet armed backend=%s ordinal=%llu "
+        "present=%llu pair=%llu eye=%u submission=%llu projection=%u "
+        "inputs_complete=%u cb10=%u streamline=%u",
+        dump.backend, static_cast<unsigned long long>(ordinal),
+        static_cast<unsigned long long>(present_count),
+        static_cast<unsigned long long>(captured.pair_id), captured.eye,
+        static_cast<unsigned long long>(submission_serial),
+        static_cast<unsigned>(captured.pixel_projection),
+        dump.input_capture_complete ? 1u : 0u,
+        dump.taau_cb10_valid ? 1u : 0u,
+        dump.streamline_constants_valid ? 1u : 0u);
+    return true;
+}
+
+void finish_puredark_afw_packet_dump(
+    bool armed,
+    bool evaluate_succeeded,
+    const w3vr::puredark_afw::TextureDesc* output) {
+    if (!armed) {
+        return;
+    }
+    std::scoped_lock lock{g_puredark_afw_packet_dump_mutex};
+    auto& dump = g_puredark_afw_packet_dump;
+    if (dump.state != PuredarkAfwPacketDumpState::Recording) {
+        return;
+    }
+    dump.evaluate_succeeded = evaluate_succeeded;
+    dump.output_capture_complete = evaluate_succeeded && output != nullptr &&
+        prepare_puredark_afw_packet_texture_locked(
+            *output, dump.textures[kPuredarkAfwPacketOutput]);
+    dump.state = PuredarkAfwPacketDumpState::Scheduled;
+}
+
+void release_unsubmitted_puredark_afw_packet_locked(
+    PuredarkAfwPacketDump& dump) {
+    for (auto& texture : dump.textures) {
+        texture.source = nullptr;
+        if (texture.readback != nullptr) {
+            texture.readback->Release();
+            texture.readback = nullptr;
+        }
+    }
+    if (dump.copy_command_list != nullptr) {
+        dump.copy_command_list->Release();
+        dump.copy_command_list = nullptr;
+    }
+    if (dump.copy_allocator != nullptr) {
+        dump.copy_allocator->Release();
+        dump.copy_allocator = nullptr;
+    }
+    if (dump.fence != nullptr) {
+        dump.fence->Release();
+        dump.fence = nullptr;
+    }
+}
+
+void submit_puredark_afw_packet_dump_after_xr() {
+    std::scoped_lock lock{g_puredark_afw_packet_dump_mutex};
+    auto& dump = g_puredark_afw_packet_dump;
+    if (dump.state != PuredarkAfwPacketDumpState::Scheduled ||
+        dump.command_list != g_xr_command_list ||
+        g_d3d12_device == nullptr || g_command_queue == nullptr ||
+        g_execute_command_lists == nullptr) {
+        return;
+    }
+
+    if (FAILED(g_d3d12_device->CreateFence(
+            0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&dump.fence)))) {
+        release_unsubmitted_puredark_afw_packet_locked(dump);
+        dump.state = PuredarkAfwPacketDumpState::Failed;
+        return;
+    }
+    bool allocation_complete = true;
+    for (auto& texture : dump.textures) {
+        if (texture.scheduled &&
+            !allocate_puredark_afw_packet_readback_locked(texture)) {
+            allocation_complete = false;
+        }
+    }
+    dump.input_capture_complete = dump.input_capture_complete &&
+        dump.textures[kPuredarkAfwPacketColor].readback != nullptr &&
+        dump.textures[kPuredarkAfwPacketDepth].readback != nullptr &&
+        dump.textures[kPuredarkAfwPacketMotion].readback != nullptr;
+    dump.output_capture_complete = dump.output_capture_complete &&
+        dump.textures[kPuredarkAfwPacketOutput].readback != nullptr;
+    if (!allocation_complete) {
+        release_unsubmitted_puredark_afw_packet_locked(dump);
+        dump.state = PuredarkAfwPacketDumpState::Failed;
+        return;
+    }
+    HRESULT result = g_d3d12_device->CreateCommandAllocator(
+        D3D12_COMMAND_LIST_TYPE_DIRECT,
+        IID_PPV_ARGS(&dump.copy_allocator));
+    if (SUCCEEDED(result)) {
+        result = g_d3d12_device->CreateCommandList(
+            0, D3D12_COMMAND_LIST_TYPE_DIRECT, dump.copy_allocator, nullptr,
+            IID_PPV_ARGS(&dump.copy_command_list));
+    }
+    if (FAILED(result) || dump.copy_command_list == nullptr) {
+        release_unsubmitted_puredark_afw_packet_locked(dump);
+        dump.state = PuredarkAfwPacketDumpState::Failed;
+        return;
+    }
+    for (const auto& texture : dump.textures) {
+        record_puredark_afw_packet_texture_copy(
+            dump.copy_command_list, texture);
+    }
+    result = dump.copy_command_list->Close();
+    if (FAILED(result)) {
+        release_unsubmitted_puredark_afw_packet_locked(dump);
+        dump.state = PuredarkAfwPacketDumpState::Failed;
+        return;
+    }
+    ID3D12CommandList* lists[]{dump.copy_command_list};
+    g_execute_command_lists(g_command_queue, 1, lists);
+    const HRESULT signal_result = g_command_queue->Signal(dump.fence, 1);
+    dump.state = SUCCEEDED(signal_result)
+        ? PuredarkAfwPacketDumpState::Submitted
+        : PuredarkAfwPacketDumpState::Failed;
+    log_line(
+        "V1352 AFW rotation packet readback submitted signal=0x%08X",
+        static_cast<unsigned>(signal_result));
+}
+
+void write_puredark_afw_packet_matrix(
+    FILE* file,
+    const char* name,
+    const w3vr::puredark_afw::Matrix4x4& matrix,
+    bool trailing_comma) {
+    fprintf(file, "    \"%s\": [", name);
+    for (size_t index = 0; index < std::size(matrix.values); ++index) {
+        const float value = matrix.values[index];
+        if (std::isfinite(value)) {
+            fprintf(file, "%.9g", value);
+        } else {
+            fprintf(file, "null");
+        }
+        fprintf(file, index + 1 == std::size(matrix.values) ? "]" : ", ");
+    }
+    fprintf(file, trailing_comma ? ",\n" : "\n");
+}
+
+void try_write_puredark_afw_packet_dump() {
+    std::scoped_lock lock{g_puredark_afw_packet_dump_mutex};
+    auto& dump = g_puredark_afw_packet_dump;
+    if (dump.state != PuredarkAfwPacketDumpState::Submitted ||
+        dump.fence == nullptr || dump.fence->GetCompletedValue() < 1) {
+        return;
+    }
+    dump.state = PuredarkAfwPacketDumpState::Writing;
+
+    char directory[MAX_PATH]{};
+    GetModuleFileNameA(nullptr, directory, sizeof(directory));
+    char* slash = strrchr(directory, '\\');
+    if (slash == nullptr) {
+        dump.state = PuredarkAfwPacketDumpState::Failed;
+        return;
+    }
+    slash[1] = '\0';
+    strcat_s(directory, "witcher3vr_afw_packets");
+    CreateDirectoryA(directory, nullptr);
+    char stem[160]{};
+    sprintf_s(stem, "v1352_%s_pid_%lu_present_%llu_pair_%llu_eye_%u",
+        dump.backend, static_cast<unsigned long>(GetCurrentProcessId()),
+        static_cast<unsigned long long>(dump.present),
+        static_cast<unsigned long long>(dump.pair_id), dump.eye);
+    static constexpr const char* kTextureNames[]{
+        "color", "depth", "motion", "output"};
+
+    size_t scheduled_texture_count{};
+    size_t written_texture_count{};
+    for (size_t index = 0; index < dump.textures.size(); ++index) {
+        auto& texture = dump.textures[index];
+        if (!texture.scheduled || texture.readback == nullptr) {
+            continue;
+        }
+        ++scheduled_texture_count;
+        uint8_t* mapped{};
+        const D3D12_RANGE read_range{
+            0, static_cast<SIZE_T>(texture.total_bytes)};
+        if (FAILED(texture.readback->Map(
+                0, &read_range, reinterpret_cast<void**>(&mapped))) ||
+            mapped == nullptr) {
+            continue;
+        }
+        char path[MAX_PATH]{};
+        sprintf_s(path, "%s\\%s_%s.bin", directory, stem,
+            kTextureNames[index]);
+        FILE* file{};
+        if (fopen_s(&file, path, "wb") == 0 && file != nullptr) {
+            const size_t written = fwrite(
+                mapped, 1, static_cast<size_t>(texture.total_bytes), file);
+            fclose(file);
+            if (written == static_cast<size_t>(texture.total_bytes)) {
+                ++written_texture_count;
+            }
+        }
+        const D3D12_RANGE written_range{0, 0};
+        texture.readback->Unmap(0, &written_range);
+    }
+
+    bool taau_cb10_ok = !dump.taau_cb10_valid;
+    if (dump.taau_cb10_valid) {
+        char path[MAX_PATH]{};
+        sprintf_s(path, "%s\\%s_taau_cb10.bin", directory, stem);
+        FILE* file{};
+        if (fopen_s(&file, path, "wb") == 0 && file != nullptr) {
+            taau_cb10_ok = fwrite(
+                dump.taau_cb10.data(), 1, dump.taau_cb10.size(), file) ==
+                dump.taau_cb10.size();
+            fclose(file);
+        }
+    }
+    bool streamline_ok = !dump.streamline_constants_valid;
+    if (dump.streamline_constants_valid) {
+        char path[MAX_PATH]{};
+        sprintf_s(path, "%s\\%s_streamline_constants.bin", directory, stem);
+        FILE* file{};
+        if (fopen_s(&file, path, "wb") == 0 && file != nullptr) {
+            streamline_ok = fwrite(
+                dump.streamline_constants.data(), 1,
+                sizeof(dump.streamline_constants), file) ==
+                sizeof(dump.streamline_constants);
+            fclose(file);
+        }
+    }
+
+    bool manifest_ok{};
+    char manifest_path[MAX_PATH]{};
+    sprintf_s(manifest_path, "%s\\%s_manifest.json", directory, stem);
+    FILE* manifest{};
+    if (fopen_s(&manifest, manifest_path, "w") == 0 && manifest != nullptr) {
+        fprintf(manifest, "{\n");
+        fprintf(manifest, "  \"build\": \"V1352\",\n");
+        fprintf(manifest, "  \"backend\": \"%s\",\n", dump.backend);
+        fprintf(manifest,
+            "  \"evaluate_ordinal\": %llu,\n  \"present\": %llu,\n  \"pair_id\": %llu,\n  \"submission_serial\": %llu,\n  \"generation\": %u,\n  \"eye\": %u,\n  \"pixel_projection\": %u,\n  \"evaluate_succeeded\": %s,\n  \"input_capture_complete\": %s,\n  \"output_capture_complete\": %s,\n",
+            static_cast<unsigned long long>(dump.evaluate_ordinal),
+            static_cast<unsigned long long>(dump.present),
+            static_cast<unsigned long long>(dump.pair_id),
+            static_cast<unsigned long long>(dump.submission_serial),
+            dump.generation, dump.eye,
+            static_cast<unsigned>(dump.pixel_projection),
+            dump.evaluate_succeeded ? "true" : "false",
+            dump.input_capture_complete ? "true" : "false",
+            dump.output_capture_complete ? "true" : "false");
+        fprintf(manifest,
+            "  \"evaluate\": {\"motion_scale\": [%.9g, %.9g], \"mode\": %u, \"eye_index\": %u, \"ignore_motion_threshold\": %.9g, \"motion_vectors_type\": %u, \"clear_before_warping\": %s, \"is_hudless_color\": %s, \"debug\": %s, \"use_uint64\": %s},\n",
+            dump.motion_scale[0], dump.motion_scale[1], dump.mode, dump.eye,
+            dump.ignore_motion_threshold, dump.motion_vectors_type,
+            dump.clear_before_warping ? "true" : "false",
+            dump.is_hudless_color ? "true" : "false",
+            dump.debug ? "true" : "false",
+            dump.use_uint64 ? "true" : "false");
+        fprintf(manifest, "  \"textures\": {\n");
+        for (size_t index = 0; index < dump.textures.size(); ++index) {
+            const auto& texture = dump.textures[index];
+            fprintf(manifest,
+                "    \"%s\": {\"scheduled\": %s, \"resource\": \"0x%llX\", \"width\": %llu, \"height\": %u, \"format\": %u, \"mip_levels\": %u, \"array_size\": %u, \"sample_count\": %u, \"flags\": %u, \"initial_state\": %u, \"footprint_offset\": %llu, \"row_pitch\": %u, \"footprint_width\": %u, \"footprint_height\": %u, \"total_bytes\": %llu, \"file\": \"%s_%s.bin\"}%s\n",
+                kTextureNames[index], texture.scheduled ? "true" : "false",
+                static_cast<unsigned long long>(texture.source_address),
+                static_cast<unsigned long long>(texture.source_desc.Width),
+                texture.source_desc.Height,
+                static_cast<unsigned>(texture.source_desc.Format),
+                texture.source_desc.MipLevels,
+                texture.source_desc.DepthOrArraySize,
+                texture.source_desc.SampleDesc.Count,
+                static_cast<unsigned>(texture.source_desc.Flags),
+                static_cast<unsigned>(texture.source_state),
+                static_cast<unsigned long long>(texture.footprint.Offset),
+                texture.footprint.Footprint.RowPitch,
+                texture.footprint.Footprint.Width,
+                texture.footprint.Footprint.Height,
+                static_cast<unsigned long long>(texture.total_bytes), stem,
+                kTextureNames[index],
+                index + 1 == dump.textures.size() ? "" : ",");
+        }
+        fprintf(manifest, "  },\n");
+        fprintf(manifest, "  \"render_views_valid\": %s,\n",
+            dump.render_views_valid ? "true" : "false");
+        fprintf(manifest, "  \"render_views\": [\n");
+        for (size_t eye = 0; eye < dump.render_views.size(); ++eye) {
+            const auto& view = dump.render_views[eye];
+            fprintf(manifest,
+                "    {\"position\": [%.9g, %.9g, %.9g], \"orientation\": [%.9g, %.9g, %.9g, %.9g], \"fov\": [%.9g, %.9g, %.9g, %.9g]}%s\n",
+                view.pose.position.x, view.pose.position.y,
+                view.pose.position.z, view.pose.orientation.x,
+                view.pose.orientation.y, view.pose.orientation.z,
+                view.pose.orientation.w, view.fov.angleLeft,
+                view.fov.angleRight, view.fov.angleUp, view.fov.angleDown,
+                eye + 1 == dump.render_views.size() ? "" : ",");
+        }
+        fprintf(manifest, "  ],\n  \"camera\": {\n");
+        write_puredark_afw_packet_matrix(manifest,
+            "destination_world_to_view", dump.camera.destination_world_to_view,
+            true);
+        write_puredark_afw_packet_matrix(manifest,
+            "destination_view_to_world", dump.camera.destination_view_to_world,
+            true);
+        write_puredark_afw_packet_matrix(manifest,
+            "destination_view_to_clip", dump.camera.destination_view_to_clip,
+            true);
+        write_puredark_afw_packet_matrix(manifest,
+            "destination_clip_to_view", dump.camera.destination_clip_to_view,
+            true);
+        write_puredark_afw_packet_matrix(manifest,
+            "source_world_to_view", dump.camera.source_world_to_view, true);
+        write_puredark_afw_packet_matrix(manifest,
+            "source_view_to_world", dump.camera.source_view_to_world, true);
+        write_puredark_afw_packet_matrix(manifest,
+            "source_view_to_clip", dump.camera.source_view_to_clip, true);
+        write_puredark_afw_packet_matrix(manifest,
+            "source_clip_to_view", dump.camera.source_clip_to_view, true);
+        write_puredark_afw_packet_matrix(manifest,
+            "camera_world_to_view", dump.camera.camera_world_to_view, true);
+        write_puredark_afw_packet_matrix(manifest,
+            "camera_view_to_world", dump.camera.camera_view_to_world, true);
+        write_puredark_afw_packet_matrix(manifest,
+            "camera_view_to_clip", dump.camera.camera_view_to_clip, true);
+        write_puredark_afw_packet_matrix(manifest,
+            "camera_clip_to_view", dump.camera.camera_clip_to_view, false);
+        fprintf(manifest, "  }\n}\n");
+        manifest_ok = fclose(manifest) == 0;
+    }
+
+    const bool write_ok = taau_cb10_ok && streamline_ok && manifest_ok &&
+        scheduled_texture_count == written_texture_count &&
+        dump.input_capture_complete &&
+        (!dump.evaluate_succeeded || dump.output_capture_complete);
+    release_unsubmitted_puredark_afw_packet_locked(dump);
+    dump.state = write_ok
+        ? PuredarkAfwPacketDumpState::Complete
+        : PuredarkAfwPacketDumpState::Failed;
+    log_line(
+        "V1352 AFW rotation packet written backend=%s present=%llu pair=%llu "
+        "eye=%u success=%u textures=%zu/%zu cb10=%u streamline=%u "
+        "directory=%s",
+        dump.backend, static_cast<unsigned long long>(dump.present),
+        static_cast<unsigned long long>(dump.pair_id), dump.eye,
+        write_ok ? 1u : 0u, written_texture_count,
+        scheduled_texture_count, taau_cb10_ok ? 1u : 0u,
+        streamline_ok ? 1u : 0u, directory);
+}
+
 // [REFACTOR:PUREDARK-AFW-COMMON-TRANSPORT V12104 3/8] DLSS and TAAU use the
 // same transaction after their producer freezes an exact immutable bundle:
 // color copy, EvaluateFrameWarp and peer publication remain on the XR list.
@@ -11539,6 +12320,13 @@ bool evaluate_puredark_afw_mode3_common(
     result.bundle_slot = bundle_slot;
     result.submission_serial = slot.submission_serial;
     result.valid = true;
+
+    const bool packet_dump_armed =
+        begin_puredark_afw_packet_dump(
+            command_list, input, evaluate, captured,
+            slot.submission_serial, present_count);
+    finish_puredark_afw_packet_dump(
+        packet_dump_armed, true, &synthesized);
 
     g_puredark_afw_consumed_candidates.fetch_add(
         1, std::memory_order_relaxed);
@@ -39810,7 +40598,7 @@ void ensure_initialized() {
                 "focus_fire_b1=stereo_and_aer_centered_draw_proven "
                 "aer_taau_hud=scene_and_retained_pair_fail_open");
             log_line(
-                "witcher3vr dxgi proxy initialized build=V1350 base=V1348_afw_exact_native_projection "
+                "witcher3vr dxgi proxy initialized build=V1352 base=V1351_afw_rotation_packet_diagnostic "
                 "anchor_smoothing_ini=%d anchor_smoothing_seconds=%.4f "
                 "first_person_strafe_ini=%d mode3_aer_presentation=%d raytracing_enabled=%d raytracing_history_buffers=%d "
                 "aer_afw_enabled=%d persistent_registry=%d dlss_public_streamline=%d "
@@ -39872,6 +40660,8 @@ void ensure_initialized() {
                 "V1348 base=V1347 smoke_selection=V1341_live_ASYM_command_eye smoke_visibility=exact_canonical_draw pipeline_statistics=IA_VS_GS_CLIP_PS b1=hash_matrix_camera raster=viewport_scissor_cull always_record=1 file_write=F3_last15s V1342_actual_producer_authority=removed");
             log_line(
                 "V1350 AER AFW native projection=exact_frozen_per_eye_scale_and_center source_and_peer=full_tangent_geometry imageRect=full identity_copy=1 fallback=none smoke=unchanged_V1348");
+            log_line(
+                "V1352 AFW rotation packet diagnostic=F3_next_exact_eye0 color_depth_motion_camera_output native_motion_normalization=1");
             log_line(
                 "V1279 DLSS compatibility=public_streamline_aer_private_history_ngx_stereo legacy_module_agnostic_discovery=disabled_by_V1288");
             log_line(
@@ -46474,7 +47264,7 @@ void render_openxr_test_frame(
                                 1, std::memory_order_relaxed);
                         if (log_index < 16) {
                             log_line(
-                                "V1350 final Mode3 OpenXR submit sample=%u "
+                                "V1352 final Mode3 OpenXR submit sample=%u "
                                 "route=%s backend=%s dlaa=%u projection=%s "
                                 "source=%ux%u swapchain=%ux%u "
                                 "rect0=%d,%d %dx%d rect1=%d,%d %dx%d "
@@ -47281,6 +48071,7 @@ void render_openxr_test_frame(
             if (SUCCEEDED(close_result)) {
                 ID3D12CommandList* lists[] = {g_xr_command_list};
                 g_command_queue->ExecuteCommandLists(1, lists);
+                submit_puredark_afw_packet_dump_after_xr();
                 // [FIX:AER-FULL-VR-COMPLETED-FRAME-AUTHORITY V1209 4/5]
                 // Retire the completed-frame serial only after the command
                 // list containing its final-backbuffer copy has reached the
@@ -47759,7 +48550,7 @@ void handle_runtime_mode3_projection_hotkey() {
     }
     if (!mode3_stereo_transport_active()) {
         log_line(
-            "V1350 runtime projection hotkey=F2 ignored route=non_mode3 "
+            "V1352 runtime projection hotkey=F2 ignored route=non_mode3 "
             "present=%llu",
             static_cast<unsigned long long>(
                 g_present_count.load(std::memory_order_relaxed)));
@@ -47769,7 +48560,7 @@ void handle_runtime_mode3_projection_hotkey() {
     g_runtime_mode3_projection_toggle_requests.fetch_add(
         1, std::memory_order_release);
     log_line(
-        "V1350 Mode3 runtime projection toggle queued hotkey=F2 "
+        "V1352 Mode3 runtime projection toggle queued hotkey=F2 "
         "route=%s present=%llu",
         mode3_aer_presentation_active() ? "aer" : "stereo",
         static_cast<unsigned long long>(
@@ -47825,7 +48616,7 @@ void apply_present_boundary_requests() {
             native_asymmetric, std::memory_order_release);
         g_mode3_final_submit_logs.store(0, std::memory_order_release);
         log_line(
-            "V1350 Mode3 runtime projection=%s hotkey=F2 route=%s "
+            "V1352 Mode3 runtime projection=%s hotkey=F2 route=%s "
             "boundary=post_submit present=%llu requests=%u",
             native_asymmetric ? "asymmetric" : "symmetric",
             mode3_aer_presentation_active() ? "aer" : "stereo",
@@ -47848,8 +48639,20 @@ void handle_f3_capture_hotkey(IDXGISwapChain* swapchain) {
     if (w3vr::pipeline_flight::enabled()) {
         w3vr::pipeline_flight::dump_last_ten_seconds();
     }
-    w3vr::smoke_visibility::dump_last_seconds("V1350", 15);
-    w3vr::route_flight::dump_last_seconds("V1350", 15);
+    if (g_config.runtime_diagnostics &&
+        puredark_afw_mode3_aer_common_transport_configured()) {
+        g_puredark_afw_packet_dump_requested.store(
+            true, std::memory_order_release);
+        log_line(
+            "V1352 AFW rotation packet requested hotkey=F3 backend=%s "
+            "projection=%s present=%llu",
+            temporal_backend_name(),
+            native_stereo_runtime_enabled() ? "asymmetric" : "symmetric",
+            static_cast<unsigned long long>(
+                g_present_count.load(std::memory_order_relaxed)));
+    }
+    w3vr::smoke_visibility::dump_last_seconds("V1352", 15);
+    w3vr::route_flight::dump_last_seconds("V1352", 15);
     trigger_renderdoc_capture(
         g_game_swapchain != nullptr ? g_game_swapchain : swapchain);
 }
@@ -47932,6 +48735,7 @@ HRESULT STDMETHODCALLTYPE hook_present(IDXGISwapChain* swapchain, UINT sync_inte
     if (w3vr::pipeline_flight::enabled()) {
         w3vr::pipeline_flight::process_gpu();
     }
+    try_write_puredark_afw_packet_dump();
     handle_runtime_mode3_projection_hotkey();
     handle_f3_capture_hotkey(swapchain);
     // Toggle only the ABI debug bit. This does not enable AFW, alter
@@ -48670,6 +49474,7 @@ HRESULT STDMETHODCALLTYPE hook_present1(
     if (w3vr::pipeline_flight::enabled()) {
         w3vr::pipeline_flight::process_gpu();
     }
+    try_write_puredark_afw_packet_dump();
     handle_runtime_mode3_projection_hotkey();
     handle_f3_capture_hotkey(swapchain);
     handle_puredark_afw_visual_debug_hotkey();

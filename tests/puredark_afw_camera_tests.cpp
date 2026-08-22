@@ -75,6 +75,55 @@ int main() {
         return 1;
     }
 
+    // V1352 packet-exact regression: the engine motion field mixes a centered
+    // far-plane transform with native-ASym geometry. Re-express the temporal
+    // matrix in the actual eye tangent space without changing its time delta.
+    Matrix4x4 centered_projection{{
+        1.062044978f, 0.0f, 0.0f, 0.0f,
+        0.0f, 0.982916236f, 0.0f, 0.0f,
+        0.0f, 0.0f, -3.07559967e-05f, 1.0f,
+        0.0f, 0.0f, 0.200006157f, 0.0f}};
+    Matrix4x4 actual_projection = centered_projection;
+    actual_projection.values[8] = 0.242512703f;
+    actual_projection.values[9] = 0.193187416f;
+    Matrix4x4 centered_temporal{{
+        0.999895692f, 0.00116386043f, 4.16770604e-07f, -0.0135508729f,
+        -0.00136685208f, 0.999999106f, 1.59179390e-08f, -0.000517555629f,
+        0.00885576755f, 0.000388084823f, 0.999999940f, 0.00196051435f,
+        0.0152841182f, 0.000517883280f, 3.18937832e-09f, 0.999896288f}};
+    Matrix4x4 actual_temporal{};
+    if (!rebase_clip_to_previous_projection(
+            centered_projection, actual_projection, centered_temporal,
+            actual_temporal, error) ||
+        !nearly_equal(actual_temporal.values[0], 0.996609449f) ||
+        !nearly_equal(actual_temporal.values[5], 0.999899149f) ||
+        !nearly_equal(actual_temporal.values[8], 0.00933121704f) ||
+        !nearly_equal(actual_temporal.values[9], 0.000766831508f) ||
+        !nearly_equal(actual_temporal.values[12], 0.0163695291f) ||
+        !nearly_equal(actual_temporal.values[15], 1.00328255f)) {
+        std::fwprintf(
+            stderr, L"native temporal projection rebase failed: %ls\n",
+            error.c_str());
+        return 1;
+    }
+    Matrix4x4 unchanged_temporal{};
+    if (!rebase_clip_to_previous_projection(
+            centered_projection, centered_projection, centered_temporal,
+            unchanged_temporal, error)) {
+        std::fwprintf(
+            stderr, L"identity temporal projection rebase failed: %ls\n",
+            error.c_str());
+        return 1;
+    }
+    for (size_t index = 0; index < 16; ++index) {
+        if (!nearly_equal(
+                unchanged_temporal.values[index],
+                centered_temporal.values[index])) {
+            std::fputs("identity temporal projection changed the matrix\n", stderr);
+            return 1;
+        }
+    }
+
     fill_constants(constants, baseline * 0.5f);
     if (!build_camera_data_from_streamline(
             constants, std::size(constants), EyeRight,

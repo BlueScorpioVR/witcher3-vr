@@ -105,6 +105,20 @@ bool invert_4x4(const Matrix4x4& source, Matrix4x4& inverse) {
     return true;
 }
 
+Matrix4x4 multiply_4x4(const Matrix4x4& left, const Matrix4x4& right) {
+    Matrix4x4 result{};
+    for (size_t row = 0; row < 4; ++row) {
+        for (size_t column = 0; column < 4; ++column) {
+            for (size_t index = 0; index < 4; ++index) {
+                result.values[row * 4 + column] +=
+                    left.values[row * 4 + index] *
+                    right.values[index * 4 + column];
+            }
+        }
+    }
+    return result;
+}
+
 void build_view_to_world(
     const float* right,
     const float* up,
@@ -296,6 +310,49 @@ bool retarget_destination_eye_projection(
     }
     camera_data.destination_view_to_clip = destination;
     camera_data.destination_clip_to_view = destination_inverse;
+    error.clear();
+    return true;
+}
+
+bool rebase_clip_to_previous_projection(
+    const Matrix4x4& centered_view_to_clip,
+    const Matrix4x4& actual_view_to_clip,
+    const Matrix4x4& centered_clip_to_previous,
+    Matrix4x4& actual_clip_to_previous,
+    std::wstring& error) {
+    actual_clip_to_previous = {};
+    if (!finite_values(centered_view_to_clip.values, 16) ||
+        !finite_values(actual_view_to_clip.values, 16) ||
+        !finite_values(centered_clip_to_previous.values, 16)) {
+        error = L"AFW temporal projection contains non-finite values";
+        return false;
+    }
+
+    Matrix4x4 centered_clip_to_view{};
+    Matrix4x4 actual_clip_to_view{};
+    if (!invert_4x4(centered_view_to_clip, centered_clip_to_view) ||
+        !invert_4x4(actual_view_to_clip, actual_clip_to_view)) {
+        error = L"AFW centered or actual temporal projection is singular";
+        return false;
+    }
+
+    // Row-vector convention:
+    // actualClip -> view -> centeredClip -> previousCenteredClip
+    //            -> previousView -> previousActualClip.
+    actual_clip_to_previous = multiply_4x4(
+        multiply_4x4(
+            multiply_4x4(
+                multiply_4x4(
+                    actual_clip_to_view,
+                    centered_view_to_clip),
+                centered_clip_to_previous),
+            centered_clip_to_view),
+        actual_view_to_clip);
+    if (!finite_values(actual_clip_to_previous.values, 16)) {
+        actual_clip_to_previous = {};
+        error = L"AFW rebased temporal transform is non-finite";
+        return false;
+    }
     error.clear();
     return true;
 }

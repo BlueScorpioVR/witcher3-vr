@@ -53,6 +53,17 @@ bool retarget_destination_eye_projection(
     CameraData& camera_data,
     std::wstring& error);
 
+// Re-expresses a row-vector clip-to-previous transform from the centered
+// projection carried by Streamline/REDengine into the exact projection that
+// encoded the selected pixels. This changes only coordinate convention; the
+// temporal pose and object motion remain owned by the original field.
+bool rebase_clip_to_previous_projection(
+    const Matrix4x4& centered_view_to_clip,
+    const Matrix4x4& actual_view_to_clip,
+    const Matrix4x4& centered_clip_to_previous,
+    Matrix4x4& actual_clip_to_previous,
+    std::wstring& error);
+
 // Reanchors a same-time parallel-eye pair to the exact source-eye pose which
 // completed REDengine rendering. The captured inter-eye translation remains
 // intact while both eyes inherit the exact rendered orientation.
