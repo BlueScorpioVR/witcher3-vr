@@ -15665,6 +15665,29 @@ bool resolve_focus_fire_b1_authority(
         return true;
     }
 
+    // [FIX:STRICT-DLSS-FOCUS-FIRE-EXACT-EYE V1304] This draw has proved that
+    // b1 is still centered and therefore needs exactly one optical-center
+    // correction. In strict Stereo DLSS, use the immutable command-scoped tag
+    // transported from REDengine's exact sequential emitter, just as the
+    // specialized real-smoke route already does. This removes the normal-run
+    // dependency on whether an earlier smoke draw populated the command-list
+    // cache or the temporal camera ledger is already matchable. Contract 2
+    // returned above, so an already-asymmetric b1 can never be corrected twice.
+    if (g_streamline_dlss_route_tag_valid) {
+        const EngineFrameTag tag = g_streamline_dlss_route_tag;
+        const uint32_t generation =
+            g_streamline_capture_generation.load(std::memory_order_acquire);
+        if (tag.task_provenance_valid && tag.eye <= 1 &&
+            tag.pair_id != 0 && tag.pair_id != UINT64_MAX &&
+            tag.generation == generation) {
+            eye = static_cast<int>(tag.eye);
+            authority_route = 4;
+            store_native_focus_draw_eye(
+                command_list, present, tag.eye, tag.pair_id);
+            return true;
+        }
+    }
+
     NativeFocusDrawEyeAuthority authority{};
     if (load_native_focus_draw_eye(command_list, present, authority)) {
         eye = static_cast<int>(authority.eye);
@@ -37970,7 +37993,7 @@ void ensure_initialized() {
                 "focus_fire_b1=stereo_structural_aer_upstream_owner "
                 "aer_taau_hud=scene_and_retained_pair_fail_open");
             log_line(
-                "witcher3vr dxgi proxy initialized build=V1316 base=V1315_plus_V1302 "
+                "witcher3vr dxgi proxy initialized build=V1317 base=V1316_plus_V1304 "
                 "anchor_smoothing_ini=%d anchor_smoothing_seconds=%.4f "
                 "first_person_strafe_ini=%d mode3_aer_presentation=%d raytracing_enabled=%d raytracing_history_buffers=%d "
                 "aer_afw_enabled=%d persistent_registry=%d dlss_public_streamline=%d "
