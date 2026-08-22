@@ -1789,6 +1789,7 @@ using CopyDescriptorsSimpleFn = void(STDMETHODCALLTYPE*)(
     D3D12_CPU_DESCRIPTOR_HANDLE,
     D3D12_CPU_DESCRIPTOR_HANDLE,
     D3D12_DESCRIPTOR_HEAP_TYPE);
+using ResourceReleaseFn = ULONG(STDMETHODCALLTYPE*)(ID3D12Resource*);
 using ResourceMapFn = HRESULT(STDMETHODCALLTYPE*)(ID3D12Resource*, UINT, const D3D12_RANGE*, void**);
 using ResourceUnmapFn = void(STDMETHODCALLTYPE*)(ID3D12Resource*, UINT, const D3D12_RANGE*);
 using SetDescriptorHeapsFn = void(STDMETHODCALLTYPE*)(
@@ -1876,6 +1877,7 @@ CreateGraphicsPipelineStateFn g_create_graphics_pipeline_state{};
 CreateComputePipelineStateFn g_create_compute_pipeline_state{};
 CopyDescriptorsFn g_copy_descriptors{};
 CopyDescriptorsSimpleFn g_copy_descriptors_simple{};
+ResourceReleaseFn g_resource_release{};
 ResourceMapFn g_resource_map{};
 ResourceUnmapFn g_resource_unmap{};
 SetDescriptorHeapsFn g_set_descriptor_heaps{};
@@ -3346,6 +3348,7 @@ struct ResourceInfo {
     D3D12_GPU_VIRTUAL_ADDRESS gpu_va{};
     void* mapped{};
     size_t mapped_size{};
+    uint64_t registry_serial{};
 };
 
 struct CommandListInfo {
@@ -3822,6 +3825,7 @@ struct RootSignatureInfo {
 std::mutex g_reverse_mutex{};
 std::unordered_map<ID3D12Resource*, ResourceInfo> g_resource_infos{};
 std::atomic<uint64_t> g_resource_registry_generation{1};
+std::atomic<uint64_t> g_resource_registry_serial{1};
 std::unordered_map<ID3D12GraphicsCommandList*, CommandListInfo> g_command_list_infos{};
 std::unordered_map<ID3D12DescriptorHeap*, DescriptorHeapInfo> g_descriptor_heap_infos{};
 std::unordered_map<SIZE_T, ResourceDescriptorInfo> g_resource_descriptors{};
@@ -8506,6 +8510,7 @@ void STDMETHODCALLTYPE hook_om_set_render_targets(
     const D3D12_CPU_DESCRIPTOR_HANDLE* render_target_descriptors,
     BOOL rts_single_handle_to_descriptor_range,
     const D3D12_CPU_DESCRIPTOR_HANDLE* depth_stencil_descriptor);
+ULONG STDMETHODCALLTYPE hook_resource_release(ID3D12Resource* resource);
 void install_resource_hooks(ID3D12Resource* resource);
 void install_command_list_hooks();
 void install_streamline_resource_barrier_probe();
@@ -16134,14 +16139,8 @@ bool copy_gpu_va_bytes(D3D12_GPU_VIRTUAL_ADDRESS gpu_va, void* destination, size
     bool copied{};
     {
         std::scoped_lock lock{g_reverse_mutex};
-        // [FIX:RT-FRESH-GPU-VA-RESOLUTION V1152 1/1] V1145's generation-
-        // guarded fast path predates the canonical RT merge. NRD consumes a
-        // coherent same-eye camera tuple across several dispatches, so a
-        // cached mapped allocation must not survive as the authority for one
-        // member of that tuple. Restore V13044's validated fresh registry scan
-        // while the RT route is active; retain the V1145 cache everywhere else.
-        const bool rt_fresh_registry_resolution =
-            rt_symmetric_dlss_per_eye_ao_history_active();
+        // Creation, mapping and final Release each advance the registry epoch,
+        // so the fast path can never retain a destroyed allocation.
         struct GpuVaReadCache {
             uint64_t generation{};
             D3D12_GPU_VIRTUAL_ADDRESS base{};
@@ -16169,8 +16168,7 @@ bool copy_gpu_va_bytes(D3D12_GPU_VIRTUAL_ADDRESS gpu_va, void* destination, size
                 destination, mapped + static_cast<size_t>(offset), size);
         };
 
-        if (!rt_fresh_registry_resolution &&
-            cache.generation == generation &&
+        if (cache.generation == generation &&
             try_copy(cache.base, cache.width, cache.mapped,
                 cache.mapped_size)) {
             copied = true;
@@ -16187,18 +16185,13 @@ bool copy_gpu_va_bytes(D3D12_GPU_VIRTUAL_ADDRESS gpu_va, void* destination, size
             if (try_copy(info.gpu_va, info.desc.Width,
                     static_cast<const uint8_t*>(info.mapped),
                     info.mapped_size)) {
-                if (!rt_fresh_registry_resolution) {
-                    cache = GpuVaReadCache{
-                        generation, info.gpu_va, info.desc.Width,
-                        static_cast<const uint8_t*>(info.mapped),
-                        info.mapped_size};
-                }
+                cache = GpuVaReadCache{
+                    generation, info.gpu_va, info.desc.Width,
+                    static_cast<const uint8_t*>(info.mapped),
+                    info.mapped_size};
                 copied = true;
                 break;
             }
-
-            // A released resource can leave a stale mapping record. Keep searching:
-            // a newer allocation may legitimately reuse the same GPU virtual address.
         }
     }
     g_taau_cb_snapshots_in_progress.fetch_sub(1, std::memory_order_acq_rel);
@@ -16968,6 +16961,16 @@ void install_resource_hooks(ID3D12Resource* resource) {
             !focus_projection_metadata_hooks_needed() &&
             !rt_symmetric_dlss_per_eye_ao_history_active())) {
         return;
+    }
+
+    if (g_resource_release == nullptr) {
+        auto target = method<void*>(resource, 2);
+        if (MH_CreateHook(target,
+                reinterpret_cast<void*>(&hook_resource_release),
+                reinterpret_cast<void**>(&g_resource_release)) == MH_OK &&
+            MH_EnableHook(target) == MH_OK) {
+            log_line("Renderer hooked ID3D12Resource::Release at %p", target);
+        }
     }
 
     if (g_resource_map == nullptr) {
@@ -18089,7 +18092,9 @@ HRESULT STDMETHODCALLTYPE hook_create_committed_resource(
                     heap_type,
                     d3d_resource->GetGPUVirtualAddress(),
                     nullptr,
-                    static_cast<size_t>(std::min<uint64_t>(desc->Width, SIZE_MAX))};
+                    static_cast<size_t>(std::min<uint64_t>(desc->Width, SIZE_MAX)),
+                    g_resource_registry_serial.fetch_add(
+                        1, std::memory_order_relaxed)};
                 g_resource_registry_generation.fetch_add(
                     1, std::memory_order_release);
             }
@@ -19004,6 +19009,30 @@ void STDMETHODCALLTYPE hook_copy_descriptors_simple(
     }
 }
 
+ULONG STDMETHODCALLTYPE hook_resource_release(ID3D12Resource* resource) {
+    uint64_t released_serial{};
+    {
+        std::scoped_lock lock{g_reverse_mutex};
+        const auto it = g_resource_infos.find(resource);
+        if (it != g_resource_infos.end()) {
+            released_serial = it->second.registry_serial;
+        }
+    }
+
+    const ULONG remaining_references = g_resource_release(resource);
+    if (remaining_references == 0 && released_serial != 0) {
+        std::scoped_lock lock{g_reverse_mutex};
+        const auto it = g_resource_infos.find(resource);
+        if (it != g_resource_infos.end() &&
+            it->second.registry_serial == released_serial) {
+            g_resource_infos.erase(it);
+            g_resource_registry_generation.fetch_add(
+                1, std::memory_order_release);
+        }
+    }
+    return remaining_references;
+}
+
 HRESULT STDMETHODCALLTYPE hook_resource_map(
     ID3D12Resource* resource,
     UINT subresource,
@@ -19040,6 +19069,8 @@ HRESULT STDMETHODCALLTYPE hook_resource_map(
             info.mapped_size = info.desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER
                 ? static_cast<size_t>(std::min<uint64_t>(info.desc.Width, SIZE_MAX))
                 : 0;
+            info.registry_serial = g_resource_registry_serial.fetch_add(
+                1, std::memory_order_relaxed);
 
             if (info.desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) {
                 std::scoped_lock lock{g_reverse_mutex};
