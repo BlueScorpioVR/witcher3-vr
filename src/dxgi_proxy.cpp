@@ -4050,6 +4050,7 @@ std::atomic<uint32_t> g_mode3_hud_srv_offset{UINT32_MAX};
 std::mutex g_hud_composite_pso_creation_mutex{};
 
 bool mode3_early_hud_pair_ready();
+bool mode3_retained_hud_pair_ready_for_active_route();
 bool mode3_afw_sequenced_pair_available();
 bool sequential_cinema_pair_available();
 bool label_mode3_early_hud_at_present(
@@ -19130,7 +19131,7 @@ void STDMETHODCALLTYPE hook_set_pipeline_state(
             normal_stereo_cinema_hud &&
             mode3_stereo_transport_active() &&
             g_mode3_hud_layer_available.load(std::memory_order_acquire) &&
-            mode3_early_hud_pair_ready();
+            mode3_retained_hud_pair_ready_for_active_route();
         const bool automatic_full_vr_hud =
             mode3_stereo_transport_active() &&
             g_config.cinema_full_vr &&
@@ -19337,7 +19338,7 @@ void STDMETHODCALLTYPE hook_set_pipeline_state(
             // retained path after one complete HUD pair exists; until then the
             // baked eye PSO above remains a visible fail-open bootstrap.
             const bool retained_hud_pair_ready =
-                mode3_early_hud_pair_ready();
+                mode3_retained_hud_pair_ready_for_active_route();
             // [FIX:AER-FINAL-SOURCE-HUD-FAIL-OPEN V1180 1/2] TAAU's final
             // source is the sequential AFW pair, not the packed scene cache.
             // Do not remove the native HUD until that pair (or the strict
@@ -21013,6 +21014,31 @@ bool mode3_early_hud_pair_ready() {
     DXGI_FORMAT formats[2]{
         DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN};
     return get_mode3_early_hud_pair(sources, formats);
+}
+
+// [FIX:STRICT-STEREO-RETAINED-HUD-FRESHNESS V1305] A complete pair from an
+// earlier loading epoch is not permission to remove the current native HUD and
+// blend that old texture forever. Strict Stereo requires its accepted retained
+// pair to have reached the exact predecessor target of the current scene.
+// Missing/stale identity therefore fails open on REDengine's baked HUD. AER
+// keeps its existing exact final-source policy unchanged.
+bool mode3_retained_hud_pair_ready_for_active_route() {
+    if (!mode3_strict_stereo_submitted_hud_join_active()) {
+        return mode3_early_hud_pair_ready();
+    }
+    const uint32_t generation =
+        g_streamline_capture_generation.load(std::memory_order_acquire);
+    const uint32_t target_generation =
+        g_mode3_strict_hud_target_generation.load(
+            std::memory_order_acquire);
+    const uint64_t target_pair =
+        g_mode3_strict_hud_target_pair.load(std::memory_order_acquire);
+    std::scoped_lock lock{g_mode3_early_hud_mutex};
+    return w3vr::mode3_transport::
+        strict_stereo_retained_hud_pair_fresh(
+            generation, target_generation, target_pair,
+            g_mode3_early_hud_accepted_generation,
+            g_mode3_early_hud_accepted_pair);
 }
 
 // [FIX:RETAINED-EYE-HUD 6/9] Resolve native t1 from the lock-free command-list
@@ -37993,7 +38019,7 @@ void ensure_initialized() {
                 "focus_fire_b1=stereo_structural_aer_upstream_owner "
                 "aer_taau_hud=scene_and_retained_pair_fail_open");
             log_line(
-                "witcher3vr dxgi proxy initialized build=V1317 base=V1316_plus_V1304 "
+                "witcher3vr dxgi proxy initialized build=V1318 base=V1317_plus_V1305 "
                 "anchor_smoothing_ini=%d anchor_smoothing_seconds=%.4f "
                 "first_person_strafe_ini=%d mode3_aer_presentation=%d raytracing_enabled=%d raytracing_history_buffers=%d "
                 "aer_afw_enabled=%d persistent_registry=%d dlss_public_streamline=%d "
@@ -42578,7 +42604,7 @@ void render_openxr_test_frame(
         retained_hud_projection_route_active() &&
         post_loading_stereo_pair_ready &&
         g_mode3_hud_layer_available.load(std::memory_order_acquire) &&
-        mode3_early_hud_pair_ready() &&
+        mode3_retained_hud_pair_ready_for_active_route() &&
         hud_source_ready;
 
     if (submitted) {

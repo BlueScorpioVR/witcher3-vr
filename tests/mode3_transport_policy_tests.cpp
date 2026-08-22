@@ -25,6 +25,7 @@ int main() {
     using w3vr::mode3_transport::streamline_dlss_evaluate_callback_active;
     using w3vr::mode3_transport::submitted_hud_join_route_active;
     using w3vr::mode3_transport::submitted_hud_join_window_matches;
+    using w3vr::mode3_transport::strict_stereo_retained_hud_pair_fresh;
 
     // The public owner is intentionally narrow. Only Mode-3 OpenXR DLSS can
     // enter it. Projection is not an input, so AER and strict Stereo receive
@@ -149,6 +150,16 @@ int main() {
     assert(submitted_hud_join_window_matches(7, 7, 102, 100));
     assert(!submitted_hud_join_window_matches(7, 7, 97, 100));
     assert(!submitted_hud_join_window_matches(7, 8, 100, 100));
+
+    // A stale retained HUD must not outlive loading and darken newer Stereo
+    // scene pairs. Bootstrap remains on the native baked HUD until a retained
+    // pair reaches the exact predecessor target in the current generation.
+    assert(!strict_stereo_retained_hud_pair_fresh(7, 7, 0, 7, 1));
+    assert(!strict_stereo_retained_hud_pair_fresh(7, 7, 100, 7, 99));
+    assert(!strict_stereo_retained_hud_pair_fresh(7, 6, 100, 7, 100));
+    assert(!strict_stereo_retained_hud_pair_fresh(7, 7, 100, 6, 100));
+    assert(strict_stereo_retained_hud_pair_fresh(7, 7, 100, 7, 100));
+    assert(strict_stereo_retained_hud_pair_fresh(7, 7, 100, 7, 101));
 
     // AER retains its AFW-scoped contract. Strict Stereo uses the same
     // submitted-order safety net for both temporal backends, but not No AA.

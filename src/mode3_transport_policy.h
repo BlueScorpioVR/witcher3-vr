@@ -177,6 +177,22 @@ constexpr bool submitted_hud_join_window_matches(
         distance <= kSubmittedHudJoinMaxPresentDistance;
 }
 
+// Strict Stereo removes the native baked HUD before compositing its retained
+// copy. A previously accepted HUD pair is safe only while it has reached the
+// exact predecessor required by the currently published scene. Otherwise a
+// loading fade captured by an old pair could be blended forever.
+constexpr bool strict_stereo_retained_hud_pair_fresh(
+    uint32_t current_generation,
+    uint32_t target_generation,
+    uint64_t target_pair,
+    uint32_t accepted_generation,
+    uint64_t accepted_pair) noexcept {
+    return target_pair != 0 &&
+        target_generation == current_generation &&
+        accepted_generation == current_generation &&
+        accepted_pair >= target_pair;
+}
+
 // The submitted-order fallback repairs a D3D12 command-list topology, not an
 // AFW or DLSS algorithm. AER enters it only when its validated AFW retained-HUD
 // route is configured. Strict Stereo can use the same queue/generation/window
