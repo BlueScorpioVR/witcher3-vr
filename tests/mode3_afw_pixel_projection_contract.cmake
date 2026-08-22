@@ -21,6 +21,9 @@ set(required_fragments
     "puredark_afw.pixel_projection =="
     "g_mode3_afw_sequenced_native_asymmetric ="
     "puredark_pair_native_asymmetric;"
+    "native_asymmetric_source_views_valid"
+    "mode3_common_afw_sequenced_available"
+    "stereo_cached &&"
 )
 
 foreach(fragment IN LISTS required_fragments)
@@ -30,6 +33,14 @@ foreach(fragment IN LISTS required_fragments)
             "Missing AFW pixel-projection contract: ${fragment}")
     endif()
 endforeach()
+
+string(FIND "${dxgi_proxy}"
+    "native_asymmetric_noaa_route_active() &&\n                    packed_stereo_available &&"
+    stale_packed_only_preflight)
+if(NOT stale_packed_only_preflight EQUAL -1)
+    message(FATAL_ERROR
+        "AER native-ASym preflight regressed to the packed-only source")
+endif()
 
 foreach(forbidden_fragment IN ITEMS
         "pair_centered_afw_camera_with_centered_fov"

@@ -29,11 +29,11 @@
 #include "shadow_cascade_authority_policy.h"
 #include "taau_submission_policy.h"
 
-// V1336 retains V1335's AER+AFW pixel-projection ownership and V1334's
-// strict-Stereo HUD lifecycle. Strict Stereo now prepares every enrolled
-// transparent-effect correction while the route is configured, including a
-// SYM startup, but selects those variants only for actual ASYM frames. AER
-// remains excluded. No symmetric full-height trial is present.
+// V1337 retains V1336's validated strict-Stereo transparent-effect fix and
+// V1334's generation-atomic HUD lifecycle. It completes V1335's AER+AFW
+// pixel-projection ownership by preflighting the final source actually selected
+// for OpenXR: strict packed pairs and sequential AFW pairs can both establish
+// native ASYM. No symmetric full-height trial is present.
 // V1299 applies the same gameplay/cinema/loading admission policy at both ends
 // of V1298's strict AER TAAU AFW camera FIFO. The producer had accidentally
 // inverted automatic Full VR, leaving normal gameplay with no raw cameras.
@@ -39179,7 +39179,7 @@ void ensure_initialized() {
                 "focus_fire_b1=stereo_structural_aer_upstream_owner "
                 "aer_taau_hud=scene_and_retained_pair_fail_open");
             log_line(
-                "witcher3vr dxgi proxy initialized build=V1336 base=V1335_aer_afw_native_full_frame "
+                "witcher3vr dxgi proxy initialized build=V1337 base=V1336_strict_asym_effect_prewarm "
                 "anchor_smoothing_ini=%d anchor_smoothing_seconds=%.4f "
                 "first_person_strafe_ini=%d mode3_aer_presentation=%d raytracing_enabled=%d raytracing_history_buffers=%d "
                 "aer_afw_enabled=%d persistent_registry=%d dlss_public_streamline=%d "
@@ -39238,7 +39238,7 @@ void ensure_initialized() {
             log_line(
                 "V1310 route flight recorder=ini_opt_in default_off f3_dump=15s renderdoc_f3_preserved=1 qpc=present_only gpu_readback=0 descriptor_scan=0 text_hotpath=0");
             log_line(
-                "V1336 mode3_projection=V1331_runtime_SYM_ASYM stereo_hud_generation_reset=atomic asymmetric_hud_pso=deferred_openxr_geometry aer_afw_projection=producer_owned native_asym_submit=full_frame strict_asym_effects=prewarm_then_active_only flight_recorders=F3");
+                "V1337 mode3_projection=V1331_runtime_SYM_ASYM stereo_hud_generation_reset=atomic asymmetric_hud_pso=deferred_openxr_geometry aer_afw_projection=producer_owned_sequential_preflight native_asym_submit=full_frame strict_asym_effects=prewarm_then_active_only flight_recorders=F3");
             log_line(
                 "V1279 DLSS compatibility=public_streamline_aer_private_history_ngx_stereo legacy_module_agnostic_discovery=disabled_by_V1288");
             log_line(
@@ -45340,9 +45340,25 @@ void render_openxr_test_frame(
                 // off-axis must keep its raw-FOV transport until a symmetric
                 // pair replaces it; only a true spatial panel consumes the
                 // cached image in a different projection space.
+                // Strict Stereo owns the packed cache, while AER TAAU/DLSS
+                // AFW owns the sequential stereo cache. Requiring a packed
+                // publication here kept AER's transport-ready latch false
+                // forever, so its factory could never render a native pair.
+                // Validate the views belonging to the source selected above;
+                // both transports remain full-extent 1:1 copies.
+                const bool native_asymmetric_source_views_valid =
+                    mode3_common_afw_sequenced_available
+                    ? (g_stereo_eye_cache_view_valid[0] &&
+                        g_stereo_eye_cache_view_valid[1])
+                    : (packed_stereo_available
+                        ? (g_packed_present_cache_view_valid[0] &&
+                            g_packed_present_cache_view_valid[1])
+                        : (stereo_cached &&
+                            g_stereo_eye_cache_view_valid[0] &&
+                            g_stereo_eye_cache_view_valid[1]));
                 bool native_asymmetric_geometry_transport_valid =
                     native_asymmetric_noaa_route_active() &&
-                    packed_stereo_available &&
+                    stereo_cached &&
                     !spatial_panel_active &&
                     copy_width > 0 && copy_height > 0 &&
                     source_desc.Width == copy_width &&
@@ -45351,8 +45367,7 @@ void render_openxr_test_frame(
                     copy_height <= swapchain.height &&
                     target_desc_needed &&
                     target_desc.SampleDesc.Count == 1 &&
-                    g_packed_present_cache_view_valid[0] &&
-                    g_packed_present_cache_view_valid[1];
+                    native_asymmetric_source_views_valid;
                 bool native_asymmetric_copy_compatible =
                     native_asymmetric_geometry_transport_valid;
                 for (uint32_t eye = 0;
@@ -45794,7 +45809,7 @@ void render_openxr_test_frame(
                                 1, std::memory_order_relaxed);
                         if (log_index < 16) {
                             log_line(
-                                "V1336 final Mode3 OpenXR submit sample=%u "
+                                "V1337 final Mode3 OpenXR submit sample=%u "
                                 "route=%s backend=%s dlaa=%u projection=%s "
                                 "source=%ux%u swapchain=%ux%u "
                                 "rect0=%d,%d %dx%d rect1=%d,%d %dx%d "
@@ -47079,7 +47094,7 @@ void handle_runtime_mode3_projection_hotkey() {
     }
     if (!mode3_stereo_transport_active()) {
         log_line(
-            "V1336 runtime projection hotkey=F2 ignored route=non_mode3 "
+            "V1337 runtime projection hotkey=F2 ignored route=non_mode3 "
             "present=%llu",
             static_cast<unsigned long long>(
                 g_present_count.load(std::memory_order_relaxed)));
@@ -47089,7 +47104,7 @@ void handle_runtime_mode3_projection_hotkey() {
     g_runtime_mode3_projection_toggle_requests.fetch_add(
         1, std::memory_order_release);
     log_line(
-        "V1336 Mode3 runtime projection toggle queued hotkey=F2 "
+        "V1337 Mode3 runtime projection toggle queued hotkey=F2 "
         "route=%s present=%llu",
         mode3_aer_presentation_active() ? "aer" : "stereo",
         static_cast<unsigned long long>(
@@ -47137,7 +47152,7 @@ void apply_present_boundary_requests() {
             native_asymmetric, std::memory_order_release);
         g_mode3_final_submit_logs.store(0, std::memory_order_release);
         log_line(
-            "V1336 Mode3 runtime projection=%s hotkey=F2 route=%s "
+            "V1337 Mode3 runtime projection=%s hotkey=F2 route=%s "
             "boundary=post_submit present=%llu requests=%u",
             native_asymmetric ? "asymmetric" : "symmetric",
             mode3_aer_presentation_active() ? "aer" : "stereo",
@@ -47160,7 +47175,7 @@ void handle_f3_capture_hotkey(IDXGISwapChain* swapchain) {
     if (w3vr::pipeline_flight::enabled()) {
         w3vr::pipeline_flight::dump_last_ten_seconds();
     }
-    w3vr::route_flight::dump_last_seconds("V1336", 15);
+    w3vr::route_flight::dump_last_seconds("V1337", 15);
     trigger_renderdoc_capture(
         g_game_swapchain != nullptr ? g_game_swapchain : swapchain);
 }

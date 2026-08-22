@@ -47,6 +47,8 @@ int main() {
         "invalid transport must fail closed");
     require(policy::preflight_ready({true, false, false, true, false}),
         "gameplay keeps the established preflight route");
+    require(policy::preflight_ready({true, false, false, true, false, true}),
+        "AER gameplay may bootstrap native asymmetric transport");
     require(policy::preflight_ready({true, true, true, true, false}),
         "strict Stereo Full VR may bootstrap asymmetric transport");
     require(!policy::preflight_ready({true, true, true, true, false, true}),
