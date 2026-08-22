@@ -29,6 +29,12 @@
 #include "shadow_cascade_authority_policy.h"
 #include "taau_submission_policy.h"
 
+// V1334 returns to V1331's validated projection geometry and changes only the
+// strict-Stereo HUD lifecycle. A live SYM/ASYM generation boundary now revokes
+// every retained HUD identity without falsifying the Cinema detector. The
+// native-ASymmetric HUD PSOs are completed once the first OpenXR visibility
+// tangents exist, so a SYM startup cannot leave DLSS or TAAU on mismatched
+// symmetric convergence shaders for the rest of the process.
 // V1299 applies the same gameplay/cinema/loading admission policy at both ends
 // of V1298's strict AER TAAU AFW camera FIFO. The producer had accidentally
 // inverted automatic Full VR, leaving normal gameplay with no raw cameras.
@@ -3972,6 +3978,22 @@ std::atomic<ID3D12PipelineState*> g_auto_cinema_hud_composite_eye1_pso{};
 std::atomic<ID3D12PipelineState*> g_full_vr_hud_composite_eye0_pso{};
 std::atomic<ID3D12PipelineState*> g_full_vr_hud_composite_eye1_pso{};
 std::atomic<ID3D12PipelineState*> g_mode3_scene_only_pso{};
+struct HudCompositePsoRecipe {
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC desc{};
+    std::vector<uint8_t> vs{};
+    std::vector<uint8_t> ds{};
+    std::vector<uint8_t> hs{};
+    std::vector<uint8_t> gs{};
+    std::vector<D3D12_INPUT_ELEMENT_DESC> input_elements{};
+    std::vector<std::string> input_semantics{};
+    std::vector<D3D12_SO_DECLARATION_ENTRY> stream_output_entries{};
+    std::vector<std::string> stream_output_semantics{};
+    std::vector<UINT> stream_output_strides{};
+    PipelineInfo pipeline_info{};
+    ID3D12Device* device{};
+    bool valid{};
+};
+HudCompositePsoRecipe g_hud_composite_pso_recipe{};
 constexpr uint32_t kMode3SceneOnlyPairHistory = 4;
 std::mutex g_mode3_scene_only_output_mutex{};
 std::array<uint64_t, kMode3SceneOnlyPairHistory>
@@ -13831,7 +13853,7 @@ bool derive_asymmetric_bootstrap_hud_source_shifts(
     std::array<float, 2>& optical_offsets_x,
     std::array<float, 2>& optical_offsets_y,
     std::array<float, 2>& hud_sizes) {
-    if (!native_asymmetric_noaa_route_active() ||
+    if (!mode3_stereo_transport_active() ||
         mode3_aer_presentation_active() ||
         !g_xr_visibility_bounds_valid.load(std::memory_order_acquire) ||
         g_game_render_width == 0 || g_game_render_height == 0) {
@@ -13906,6 +13928,211 @@ bool derive_asymmetric_bootstrap_hud_source_shifts(
             return false;
         }
     }
+    return true;
+}
+
+bool copy_hud_pso_shader_bytecode(
+    const D3D12_SHADER_BYTECODE& source,
+    std::vector<uint8_t>& storage,
+    D3D12_SHADER_BYTECODE& destination) {
+    storage.clear();
+    destination = {};
+    if (source.BytecodeLength == 0) {
+        return true;
+    }
+    if (source.pShaderBytecode == nullptr) {
+        return false;
+    }
+    const auto* bytes = static_cast<const uint8_t*>(source.pShaderBytecode);
+    storage.assign(bytes, bytes + source.BytecodeLength);
+    destination = {storage.data(), storage.size()};
+    return true;
+}
+
+bool capture_hud_composite_pso_recipe(
+    ID3D12Device* device,
+    const D3D12_GRAPHICS_PIPELINE_STATE_DESC& source,
+    const PipelineInfo& pipeline_info) {
+    if (device == nullptr || source.pRootSignature == nullptr) {
+        return false;
+    }
+
+    auto& recipe = g_hud_composite_pso_recipe;
+    recipe = {};
+    recipe.desc = source;
+    recipe.desc.PS = {};
+    recipe.desc.CachedPSO = {};
+    if (!copy_hud_pso_shader_bytecode(source.VS, recipe.vs, recipe.desc.VS) ||
+        !copy_hud_pso_shader_bytecode(source.DS, recipe.ds, recipe.desc.DS) ||
+        !copy_hud_pso_shader_bytecode(source.HS, recipe.hs, recipe.desc.HS) ||
+        !copy_hud_pso_shader_bytecode(source.GS, recipe.gs, recipe.desc.GS)) {
+        recipe = {};
+        return false;
+    }
+
+    if (source.InputLayout.NumElements != 0) {
+        if (source.InputLayout.pInputElementDescs == nullptr) {
+            recipe = {};
+            return false;
+        }
+        recipe.input_elements.assign(
+            source.InputLayout.pInputElementDescs,
+            source.InputLayout.pInputElementDescs +
+                source.InputLayout.NumElements);
+    }
+    recipe.input_semantics.reserve(recipe.input_elements.size());
+    for (const auto& element : recipe.input_elements) {
+        recipe.input_semantics.emplace_back(
+            element.SemanticName != nullptr ? element.SemanticName : "");
+    }
+    for (size_t index = 0; index < recipe.input_elements.size(); ++index) {
+        recipe.input_elements[index].SemanticName =
+            recipe.input_semantics[index].c_str();
+    }
+    recipe.desc.InputLayout = {
+        recipe.input_elements.empty() ? nullptr : recipe.input_elements.data(),
+        static_cast<UINT>(recipe.input_elements.size())};
+
+    if (source.StreamOutput.NumEntries != 0) {
+        if (source.StreamOutput.pSODeclaration == nullptr) {
+            recipe = {};
+            return false;
+        }
+        recipe.stream_output_entries.assign(
+            source.StreamOutput.pSODeclaration,
+            source.StreamOutput.pSODeclaration +
+                source.StreamOutput.NumEntries);
+    }
+    recipe.stream_output_semantics.reserve(
+        recipe.stream_output_entries.size());
+    for (const auto& entry : recipe.stream_output_entries) {
+        recipe.stream_output_semantics.emplace_back(
+            entry.SemanticName != nullptr ? entry.SemanticName : "");
+    }
+    for (size_t index = 0;
+         index < recipe.stream_output_entries.size(); ++index) {
+        recipe.stream_output_entries[index].SemanticName =
+            recipe.stream_output_semantics[index].c_str();
+    }
+    if (source.StreamOutput.NumStrides != 0) {
+        if (source.StreamOutput.pBufferStrides == nullptr) {
+            recipe = {};
+            return false;
+        }
+        recipe.stream_output_strides.assign(
+            source.StreamOutput.pBufferStrides,
+            source.StreamOutput.pBufferStrides +
+                source.StreamOutput.NumStrides);
+    }
+    recipe.desc.StreamOutput.pSODeclaration =
+        recipe.stream_output_entries.empty()
+        ? nullptr : recipe.stream_output_entries.data();
+    recipe.desc.StreamOutput.NumEntries =
+        static_cast<UINT>(recipe.stream_output_entries.size());
+    recipe.desc.StreamOutput.pBufferStrides =
+        recipe.stream_output_strides.empty()
+        ? nullptr : recipe.stream_output_strides.data();
+    recipe.desc.StreamOutput.NumStrides =
+        static_cast<UINT>(recipe.stream_output_strides.size());
+    recipe.pipeline_info = pipeline_info;
+    recipe.device = device;
+    recipe.valid = true;
+    return true;
+}
+
+bool ensure_asymmetric_bootstrap_hud_psos() {
+    if (g_asymmetric_hud_composite_eye0_pso.load(
+            std::memory_order_acquire) != nullptr &&
+        g_asymmetric_hud_composite_eye1_pso.load(
+            std::memory_order_acquire) != nullptr) {
+        return true;
+    }
+    if (!mode3_stereo_transport_active() ||
+        mode3_aer_presentation_active()) {
+        return false;
+    }
+
+    std::scoped_lock creation_lock{g_hud_composite_pso_creation_mutex};
+    if (g_asymmetric_hud_composite_eye0_pso.load(
+            std::memory_order_relaxed) != nullptr &&
+        g_asymmetric_hud_composite_eye1_pso.load(
+            std::memory_order_relaxed) != nullptr) {
+        return true;
+    }
+    auto& recipe = g_hud_composite_pso_recipe;
+    if (!recipe.valid || recipe.device == nullptr ||
+        g_create_graphics_pipeline_state == nullptr) {
+        return false;
+    }
+
+    std::array<int, 2> source_shifts_x{};
+    std::array<int, 2> source_shifts_y{};
+    std::array<float, 2> optical_offsets_x{};
+    std::array<float, 2> optical_offsets_y{};
+    std::array<float, 2> hud_sizes{};
+    if (!derive_asymmetric_bootstrap_hud_source_shifts(
+            source_shifts_x, source_shifts_y,
+            optical_offsets_x, optical_offsets_y, hud_sizes)) {
+        return false;
+    }
+
+    IDxcBlob* shaders[2]{
+        compile_asymmetric_hud_composite_pixel_shader(
+            source_shifts_x[0], source_shifts_y[0], hud_sizes[0]),
+        compile_asymmetric_hud_composite_pixel_shader(
+            source_shifts_x[1], source_shifts_y[1], hud_sizes[1])};
+    if (shaders[0] == nullptr || shaders[1] == nullptr) {
+        if (shaders[0] != nullptr) shaders[0]->Release();
+        if (shaders[1] != nullptr) shaders[1]->Release();
+        recipe.valid = false;
+        return false;
+    }
+
+    ID3D12PipelineState* pipelines[2]{};
+    HRESULT results[2]{E_FAIL, E_FAIL};
+    for (uint32_t eye = 0; eye < 2; ++eye) {
+        auto desc = recipe.desc;
+        desc.PS = {
+            shaders[eye]->GetBufferPointer(),
+            shaders[eye]->GetBufferSize()};
+        results[eye] = g_create_graphics_pipeline_state(
+            recipe.device, &desc, IID_PPV_ARGS(&pipelines[eye]));
+    }
+    shaders[0]->Release();
+    shaders[1]->Release();
+    if (FAILED(results[0]) || FAILED(results[1]) ||
+        pipelines[0] == nullptr || pipelines[1] == nullptr) {
+        if (pipelines[0] != nullptr) pipelines[0]->Release();
+        if (pipelines[1] != nullptr) pipelines[1]->Release();
+        log_line(
+            "V1334 deferred asymmetric HUD PSO creation failed "
+            "hr=0x%08X,0x%08X",
+            static_cast<unsigned>(results[0]),
+            static_cast<unsigned>(results[1]));
+        recipe.valid = false;
+        return false;
+    }
+
+    {
+        std::scoped_lock reverse_lock{g_reverse_mutex};
+        g_pipeline_infos[pipelines[0]] = recipe.pipeline_info;
+        g_pipeline_infos[pipelines[1]] = recipe.pipeline_info;
+    }
+    g_asymmetric_hud_composite_eye0_pso.store(
+        pipelines[0], std::memory_order_relaxed);
+    g_asymmetric_hud_composite_eye1_pso.store(
+        pipelines[1], std::memory_order_release);
+    log_line(
+        "V1334 deferred asymmetric HUD ready pso=%p,%p "
+        "optical_px=%.3f,%.3f/%.3f,%.3f "
+        "hud_size=%.4f,%.4f source_shift=%d,%d/%d,%d render=%ux%u",
+        pipelines[0], pipelines[1],
+        optical_offsets_x[0], optical_offsets_y[0],
+        optical_offsets_x[1], optical_offsets_y[1],
+        hud_sizes[0], hud_sizes[1],
+        source_shifts_x[0], source_shifts_y[0],
+        source_shifts_x[1], source_shifts_y[1],
+        g_game_render_width, g_game_render_height);
     return true;
 }
 
@@ -18330,6 +18557,10 @@ HRESULT STDMETHODCALLTYPE hook_create_graphics_pipeline_state(
         g_hud_composite_original_pso.load(std::memory_order_acquire) == nullptr) {
         std::scoped_lock creation_lock{g_hud_composite_pso_creation_mutex};
         if (g_hud_composite_original_pso.load(std::memory_order_acquire) == nullptr) {
+            if (!capture_hud_composite_pso_recipe(device, *desc, info)) {
+                log_line(
+                    "V1334 HUD PSO recipe capture failed; deferred asymmetric HUD unavailable");
+            }
             IDxcBlob* eye0_shader = compile_hud_composite_pixel_shader(
                 g_config.hud_stereo_shift_px, g_config.hud_size);
             IDxcBlob* eye1_shader = compile_hud_composite_pixel_shader(
@@ -19639,9 +19870,7 @@ void STDMETHODCALLTYPE hook_set_pipeline_state(
                         g_asymmetric_hud_composite_eye0_pso.load(
                             std::memory_order_acquire);
                     if (bound_pipeline_state == nullptr) {
-                        bound_pipeline_state =
-                            g_hud_composite_eye0_pso.load(
-                                std::memory_order_acquire);
+                        bound_pipeline_state = pipeline_state;
                     }
                 } else {
                     bound_pipeline_state =
@@ -19666,9 +19895,7 @@ void STDMETHODCALLTYPE hook_set_pipeline_state(
                         g_asymmetric_hud_composite_eye1_pso.load(
                             std::memory_order_acquire);
                     if (bound_pipeline_state == nullptr) {
-                        bound_pipeline_state =
-                            g_hud_composite_eye1_pso.load(
-                                std::memory_order_acquire);
+                        bound_pipeline_state = pipeline_state;
                     }
                 } else {
                     bound_pipeline_state =
@@ -20745,6 +20972,38 @@ void reset_mode3_early_hud_generation_locked(uint32_t generation) {
     }
 }
 
+void reset_mode3_hud_publication_state(uint32_t generation) {
+    g_mode3_strict_hud_target_pair.store(0, std::memory_order_relaxed);
+    g_mode3_strict_hud_target_generation.store(
+        generation, std::memory_order_release);
+    {
+        std::scoped_lock scene_only_lock{
+            g_mode3_scene_only_output_mutex};
+        g_mode3_scene_only_output_pairs.fill(0);
+        g_mode3_scene_only_draw_generations.clear();
+        g_mode3_scene_only_output_generation = generation;
+        g_mode3_scene_only_output_cursor = 0;
+        g_mode3_scene_only_pending_pair = 0;
+        g_mode3_scene_only_pending_eye_mask = 0;
+        g_mode3_scene_only_pending_valid = false;
+    }
+
+    g_mode3_latest_hud_source.store(nullptr, std::memory_order_release);
+    g_mode3_latest_hud_format.store(
+        static_cast<uint32_t>(DXGI_FORMAT_UNKNOWN),
+        std::memory_order_release);
+    {
+        std::scoped_lock lock{g_mode3_aer_afw_hud_mutex};
+        g_mode3_aer_afw_pending_hud_tags.clear();
+        g_mode3_aer_afw_pending_hud_presents.clear();
+        g_mode3_aer_afw_submitted_hud_tags.clear();
+    }
+    {
+        std::scoped_lock lock{g_mode3_early_hud_mutex};
+        reset_mode3_early_hud_generation_locked(generation);
+    }
+}
+
 void reset_loading_video_presentation_state(uint64_t present) {
     // [FIX:POST-LOADING-INIT-TRANSACTION 2/8] Loading video is a hard content
     // boundary. Mono HUD replays and completed Mode-3 pairs belong to the
@@ -20782,36 +21041,7 @@ void reset_loading_video_presentation_state(uint64_t present) {
     g_mode3_settled_scene_slot[1] = UINT32_MAX;
     g_mode3_settled_scene_pair = 0;
     g_mode3_settled_scene_generation = generation;
-    g_mode3_strict_hud_target_pair.store(0, std::memory_order_relaxed);
-    g_mode3_strict_hud_target_generation.store(
-        generation, std::memory_order_release);
-    {
-        std::scoped_lock scene_only_lock{
-            g_mode3_scene_only_output_mutex};
-        g_mode3_scene_only_output_pairs.fill(0);
-        g_mode3_scene_only_output_generation = generation;
-        g_mode3_scene_only_output_cursor = 0;
-        g_mode3_scene_only_pending_pair = 0;
-        g_mode3_scene_only_pending_eye_mask = 0;
-        g_mode3_scene_only_pending_valid = false;
-    }
-
-    g_mode3_latest_hud_source.store(nullptr, std::memory_order_release);
-    g_mode3_latest_hud_format.store(
-        static_cast<uint32_t>(DXGI_FORMAT_UNKNOWN),
-        std::memory_order_release);
-    // [FIX:AER-AFW-POST-HUD V1189 8/9] Loading changes the renderer
-    // generation and invalidates every recorded HUD writer identity.
-    {
-        std::scoped_lock lock{g_mode3_aer_afw_hud_mutex};
-        g_mode3_aer_afw_pending_hud_tags.clear();
-        g_mode3_aer_afw_pending_hud_presents.clear();
-        g_mode3_aer_afw_submitted_hud_tags.clear();
-    }
-    {
-        std::scoped_lock lock{g_mode3_early_hud_mutex};
-        reset_mode3_early_hud_generation_locked(generation);
-    }
+    reset_mode3_hud_publication_state(generation);
     {
         std::scoped_lock lock{g_engine_completed_tag_queue_mutex};
         g_engine_completed_tag_queue.clear();
@@ -35586,11 +35816,17 @@ void apply_engine_dual_render_transition(
 
     const auto present = g_present_count.load();
     const auto generation = g_streamline_capture_generation.fetch_add(1) + 1;
+    const bool strict_stereo_projection_reset =
+        force_generation_reset && mode3_stereo_transport_active() &&
+        !mode3_aer_presentation_active();
     if (force_generation_reset &&
         puredark_afw_mode3_aer_common_transport_configured()) {
         // Read the new generation while revoking every old ready publication;
         // submitted/in-flight allocations keep their normal fence lifetime.
         reset_puredark_afw_publication_state();
+    }
+    if (strict_stereo_projection_reset) {
+        reset_mode3_hud_publication_state(generation);
     }
     record_route_flight(
         w3vr::route_flight::EventCode::RouteReset,
@@ -35674,10 +35910,14 @@ void apply_engine_dual_render_transition(
     g_engine_render_pair_id = 0;
     g_engine_render_hmd_pose = {};
     g_engine_pair_retry_present.store(0, std::memory_order_relaxed);
-    g_engine_hmd_camera_last_present.store(UINT64_MAX, std::memory_order_relaxed);
-    g_cinema_mode_active.store(false, std::memory_order_relaxed);
-    g_automatic_full_vr_camera_active.store(false, std::memory_order_release);
-    g_automatic_full_vr_native_camera.store(0, std::memory_order_release);
+    if (!strict_stereo_projection_reset) {
+        g_engine_hmd_camera_last_present.store(
+            UINT64_MAX, std::memory_order_relaxed);
+        g_cinema_mode_active.store(false, std::memory_order_relaxed);
+        g_automatic_full_vr_camera_active.store(
+            false, std::memory_order_release);
+        g_automatic_full_vr_native_camera.store(0, std::memory_order_release);
+    }
     g_mode3_projection_reset_generation.store(
         force_generation_reset ? generation : 0,
         std::memory_order_release);
@@ -38731,7 +38971,7 @@ void ensure_initialized() {
                 "focus_fire_b1=stereo_structural_aer_upstream_owner "
                 "aer_taau_hud=scene_and_retained_pair_fail_open");
             log_line(
-                "witcher3vr dxgi proxy initialized build=V1331 base=V1330_runtime_stereo_projection "
+                "witcher3vr dxgi proxy initialized build=V1334 base=V1331_runtime_mode3_projection "
                 "anchor_smoothing_ini=%d anchor_smoothing_seconds=%.4f "
                 "first_person_strafe_ini=%d mode3_aer_presentation=%d raytracing_enabled=%d raytracing_history_buffers=%d "
                 "aer_afw_enabled=%d persistent_registry=%d dlss_public_streamline=%d "
@@ -38790,7 +39030,7 @@ void ensure_initialized() {
             log_line(
                 "V1310 route flight recorder=ini_opt_in default_off f3_dump=15s renderdoc_f3_preserved=1 qpc=present_only gpu_readback=0 descriptor_scan=0 text_hotpath=0");
             log_line(
-                "V1331 mode3_projection=F2_runtime_SYM_ASYM startup_from_ini symmetric_submit=per_eye_tangent_subimage asymmetric_submit=full_frame presentation_size=producer_owned aer=enabled homogeneous_generation_pair=required flight_recorders=F3");
+                "V1334 mode3_projection=V1331_runtime_SYM_ASYM stereo_hud_generation_reset=atomic asymmetric_hud_pso=deferred_openxr_geometry aer=unchanged flight_recorders=F3");
             log_line(
                 "V1279 DLSS compatibility=public_streamline_aer_private_history_ngx_stereo legacy_module_agnostic_discovery=disabled_by_V1288");
             log_line(
@@ -45351,7 +45591,7 @@ void render_openxr_test_frame(
                                 1, std::memory_order_relaxed);
                         if (log_index < 16) {
                             log_line(
-                                "V1331 final Mode3 OpenXR submit sample=%u "
+                                "V1334 final Mode3 OpenXR submit sample=%u "
                                 "route=%s backend=%s dlaa=%u projection=%s "
                                 "source=%ux%u swapchain=%ux%u "
                                 "rect0=%d,%d %dx%d rect1=%d,%d %dx%d "
@@ -46636,7 +46876,7 @@ void handle_runtime_mode3_projection_hotkey() {
     }
     if (!mode3_stereo_transport_active()) {
         log_line(
-            "V1331 runtime projection hotkey=F2 ignored route=non_mode3 "
+            "V1334 runtime projection hotkey=F2 ignored route=non_mode3 "
             "present=%llu",
             static_cast<unsigned long long>(
                 g_present_count.load(std::memory_order_relaxed)));
@@ -46646,7 +46886,7 @@ void handle_runtime_mode3_projection_hotkey() {
     g_runtime_mode3_projection_toggle_requests.fetch_add(
         1, std::memory_order_release);
     log_line(
-        "V1331 Mode3 runtime projection toggle queued hotkey=F2 "
+        "V1334 Mode3 runtime projection toggle queued hotkey=F2 "
         "route=%s present=%llu",
         mode3_aer_presentation_active() ? "aer" : "stereo",
         static_cast<unsigned long long>(
@@ -46694,7 +46934,7 @@ void apply_present_boundary_requests() {
             native_asymmetric, std::memory_order_release);
         g_mode3_final_submit_logs.store(0, std::memory_order_release);
         log_line(
-            "V1331 Mode3 runtime projection=%s hotkey=F2 route=%s "
+            "V1334 Mode3 runtime projection=%s hotkey=F2 route=%s "
             "boundary=post_submit present=%llu requests=%u",
             native_asymmetric ? "asymmetric" : "symmetric",
             mode3_aer_presentation_active() ? "aer" : "stereo",
@@ -46717,7 +46957,7 @@ void handle_f3_capture_hotkey(IDXGISwapChain* swapchain) {
     if (w3vr::pipeline_flight::enabled()) {
         w3vr::pipeline_flight::dump_last_ten_seconds();
     }
-    w3vr::route_flight::dump_last_seconds("V1331", 15);
+    w3vr::route_flight::dump_last_seconds("V1334", 15);
     trigger_renderdoc_capture(
         g_game_swapchain != nullptr ? g_game_swapchain : swapchain);
 }
@@ -47535,6 +47775,13 @@ HRESULT STDMETHODCALLTYPE hook_present(IDXGISwapChain* swapchain, UINT sync_inte
         render_openxr_test_frame(
             PoseTimelineEvent::SubmitOther, trace_pair);
     }
+
+    // OpenXR publishes the headset visibility tangents during the first
+    // rendered frame, a few milliseconds after REDengine creates its HUD PSO.
+    // Complete the two strict-Stereo ASYM variants here from the immutable
+    // recipe captured at PSO creation. This is a one-time setup operation; it
+    // does not depend on the current F2 projection and never runs for AER.
+    ensure_asymmetric_bootstrap_hud_psos();
 
     apply_present_boundary_requests();
     // [FIX:MODE3-AER-PRESENTATION V12032 7/7] Every completed AER eye closes
