@@ -47,6 +47,7 @@ add_library(witcher3vr_dxgi SHARED
     src/openxr_eye_geometry.cpp
     src/pipeline_flight_recorder.cpp
     src/route_flight_recorder.cpp
+    src/smoke_visibility_recorder.cpp
     src/puredark_afw_bridge.cpp
     src/puredark_afw_camera.cpp
     src/rt_ingress_join.cpp
@@ -199,6 +200,16 @@ if(BUILD_TESTING)
         COMMAND w3vr_cinema_aspect_tests
     )
 
+    add_executable(w3vr_smoke_visibility_policy_tests
+        tests/smoke_visibility_policy_tests.cpp
+    )
+    target_include_directories(
+        w3vr_smoke_visibility_policy_tests PRIVATE src)
+    add_test(
+        NAME smoke_visibility_policy
+        COMMAND w3vr_smoke_visibility_policy_tests
+    )
+
     add_executable(w3vr_camera_follow_policy_tests
         tests/camera_follow_policy_tests.cpp
     )
@@ -311,6 +322,14 @@ if(BUILD_TESTING)
         COMMAND "${CMAKE_COMMAND}"
             "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/mode3_asymmetric_effect_contract.cmake"
+    )
+
+    add_test(
+        NAME renderer_smoke_visibility_recorder_contract
+        COMMAND "${CMAKE_COMMAND}"
+            "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
+            "-DRECORDER_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/smoke_visibility_recorder.cpp"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/smoke_visibility_recorder_contract.cmake"
     )
 endif()
 

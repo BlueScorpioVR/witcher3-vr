@@ -87,29 +87,6 @@ constexpr bool native_asymmetric_effect_center_application_active(
         !cinema_panel && !full_vr_scene;
 }
 
-// A deferred transparent draw may outlive the request that produced it. Keep
-// the producer's tri-state projection intact through command recording:
-// SharedSymmetric is a complete negative authority (use no per-eye centre),
-// not a lookup failure which may fall through to an older native frame.
-// NativeAsymmetric additionally requires the post-rebuild source-eye proof.
-constexpr AfwPixelProjection decide_effect_draw_projection(
-    AfwPixelProjection actual_producer,
-    bool exact_identity_valid,
-    uint32_t producer_generation,
-    uint32_t current_generation,
-    bool source_eye_factory_tagged) noexcept {
-    if (!exact_identity_valid || producer_generation != current_generation) {
-        return AfwPixelProjection::Invalid;
-    }
-    if (actual_producer == AfwPixelProjection::SharedSymmetric) {
-        return AfwPixelProjection::SharedSymmetric;
-    }
-    return actual_producer == AfwPixelProjection::NativeAsymmetric &&
-            source_eye_factory_tagged
-        ? AfwPixelProjection::NativeAsymmetric
-        : AfwPixelProjection::Invalid;
-}
-
 // Validate the producer-owned projection at the exact AFW transaction. Native
 // pixels require the source eye's post-rebuild factory proof and both immutable
 // pair FOVs. AFW synthesizes the peer, so its factory bit is deliberately not
