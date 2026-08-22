@@ -33,6 +33,19 @@
 #include "shadow_cascade_authority_policy.h"
 #include "taau_submission_policy.h"
 
+// V1355 removes the startup-order dependency from real-smoke projection PSO
+// preparation: the immutable original recipe is retained and missing eye
+// variants are completed as soon as OpenXR publishes valid views. V1354's
+// no-write smoke clipping A/B and independent
+// per-draw camera-to-temporal-ledger eye match.  The dump now compares the
+// mutable command-list cache used by the renderer with a fresh decision over
+// the same b1 camera, including exact pair, distance and separation margin.
+// The fresh decision is diagnostic only and never selects the rendered PSO.
+// V1353 keeps V1352's validated AFW motion repair unchanged and replaces the
+// completed AFW packet recorder with a deterministic smoke clipping A/B.  Each
+// canonical smoke draw is measured as rendered and through three hidden,
+// color/depth/stencil-no-write projection variants that share one draw-group
+// identity.  The diagnostic changes no visible smoke pixels.
 // V1352 repairs the projection contract of the exact motion field consumed by
 // AER AFW. Packet captures proved that native-ASym geometry/object pixels used
 // native projection while far-plane/transparent pixels still used centered
@@ -1199,7 +1212,6 @@ struct PuredarkAfwInputSnapshot {
     std::array<XrView, 2> render_views{{
         {XR_TYPE_VIEW}, {XR_TYPE_VIEW}}};
     XrView exact_render_view{XR_TYPE_VIEW};
-    std::array<uint8_t, 512> taau_cb10{};
     std::array<float, kPuredarkAfwStreamlineCameraFloatCount>
         streamline_constants{};
     float motion_scale[2]{};
@@ -1210,7 +1222,6 @@ struct PuredarkAfwInputSnapshot {
         w3vr::mode3_transport::AfwPixelProjection::Invalid};
     bool render_views_valid{};
     bool exact_render_view_valid{};
-    bool taau_cb10_valid{};
     bool streamline_constants_valid{};
     bool valid{};
 };
@@ -1356,76 +1367,6 @@ std::atomic<uint64_t> g_puredark_afw_missing_candidates{};
 std::atomic<uint64_t> g_puredark_afw_consumed_candidates{};
 std::atomic<uint64_t> g_puredark_afw_held_presents{};
 std::atomic<uint64_t> g_puredark_afw_slot_starvation{};
-
-// [DIAG:AFW-ROTATION-PACKET V1351] Capture one exact eye-0 AFW transaction
-// after F3. The live XR list remains untouched: a private copy list is queued
-// only after that list has been submitted, then a private fence authorizes the
-// file write. This is observation only and has no steady-state GPU work.
-enum class PuredarkAfwPacketDumpState : uint8_t {
-    Idle,
-    Recording,
-    Scheduled,
-    Submitted,
-    Writing,
-    Complete,
-    Failed,
-};
-
-struct PuredarkAfwPacketTextureDump {
-    ID3D12Resource* source{};
-    uintptr_t source_address{};
-    ID3D12Resource* readback{};
-    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
-    D3D12_RESOURCE_DESC source_desc{};
-    D3D12_RESOURCE_STATES source_state{};
-    uint64_t total_bytes{};
-    bool scheduled{};
-};
-
-struct PuredarkAfwPacketDump {
-    PuredarkAfwPacketDumpState state{PuredarkAfwPacketDumpState::Idle};
-    std::array<PuredarkAfwPacketTextureDump, 4> textures{};
-    w3vr::puredark_afw::CameraData camera{};
-    std::array<XrView, 2> render_views{{
-        {XR_TYPE_VIEW}, {XR_TYPE_VIEW}}};
-    XrView exact_render_view{XR_TYPE_VIEW};
-    std::array<uint8_t, 512> taau_cb10{};
-    std::array<float, kPuredarkAfwStreamlineCameraFloatCount>
-        streamline_constants{};
-    ID3D12GraphicsCommandList* command_list{};
-    ID3D12CommandAllocator* copy_allocator{};
-    ID3D12GraphicsCommandList* copy_command_list{};
-    ID3D12Fence* fence{};
-    uint64_t evaluate_ordinal{};
-    uint64_t present{};
-    uint64_t pair_id{};
-    uint64_t submission_serial{};
-    uint32_t generation{};
-    uint32_t eye{UINT32_MAX};
-    w3vr::mode3_transport::AfwPixelProjection pixel_projection{
-        w3vr::mode3_transport::AfwPixelProjection::Invalid};
-    float motion_scale[2]{};
-    float ignore_motion_threshold{};
-    uint32_t mode{};
-    uint32_t motion_vectors_type{};
-    bool clear_before_warping{};
-    bool is_hudless_color{};
-    bool debug{};
-    bool use_uint64{};
-    bool render_views_valid{};
-    bool exact_render_view_valid{};
-    bool taau_cb10_valid{};
-    bool streamline_constants_valid{};
-    bool evaluate_succeeded{};
-    bool input_capture_complete{};
-    bool output_capture_complete{};
-    char backend[16]{};
-};
-
-std::mutex g_puredark_afw_packet_dump_mutex{};
-PuredarkAfwPacketDump g_puredark_afw_packet_dump{};
-std::atomic<uint64_t> g_puredark_afw_packet_dump_evaluates{};
-std::atomic<bool> g_puredark_afw_packet_dump_requested{};
 
 w3vr::puredark_afw::Bridge* g_puredark_afw_bridge{};
 w3vr::puredark_afw::EyeFrameBuffers g_puredark_afw_eye_buffers{};
@@ -3712,6 +3653,9 @@ constexpr uint64_t kRealSmokePsHash = 0x88504F5A627B9F03ull;
 std::atomic<ID3D12PipelineState*> g_real_smoke_pipeline{};
 std::array<std::atomic<ID3D12PipelineState*>, 3>
     g_real_smoke_center_pipelines{};
+std::array<std::atomic<ID3D12PipelineState*>, 3>
+    g_real_smoke_clip_probe_pipelines{};
+std::atomic<uint64_t> g_real_smoke_draw_group{};
 
 // The automatic focus path reads the vertex-visible b1/b12 table at root 3.
 constexpr uint32_t kFocusVsCbvRoot = 3;
@@ -4228,6 +4172,7 @@ std::atomic<ID3D12PipelineState*> g_mode3_scene_only_pso{};
 struct HudCompositePsoRecipe {
     D3D12_GRAPHICS_PIPELINE_STATE_DESC desc{};
     std::vector<uint8_t> vs{};
+    std::vector<uint8_t> ps{};
     std::vector<uint8_t> ds{};
     std::vector<uint8_t> hs{};
     std::vector<uint8_t> gs{};
@@ -4241,6 +4186,8 @@ struct HudCompositePsoRecipe {
     bool valid{};
 };
 HudCompositePsoRecipe g_hud_composite_pso_recipe{};
+HudCompositePsoRecipe g_real_smoke_pso_recipe{};
+std::mutex g_real_smoke_pso_creation_mutex{};
 constexpr uint32_t kMode3SceneOnlyPairHistory = 4;
 std::mutex g_mode3_scene_only_output_mutex{};
 std::array<uint64_t, kMode3SceneOnlyPairHistory>
@@ -10563,8 +10510,6 @@ bool capture_puredark_afw_mode3_taau_inputs(
     captured.render_views_valid = true;
     captured.exact_render_view = camera_authority->exact_render_view;
     captured.exact_render_view_valid = true;
-    captured.taau_cb10 = cb_data;
-    captured.taau_cb10_valid = true;
     captured.streamline_constants = raw_camera.constants;
     captured.streamline_constants_valid = raw_camera.valid;
     // PureDark beta.5's official non-DLSS path scales normalized motion by
@@ -11462,525 +11407,6 @@ bool initialize_puredark_afw_frame_buffers_locked(
     return true;
 }
 
-constexpr size_t kPuredarkAfwPacketColor = 0;
-constexpr size_t kPuredarkAfwPacketDepth = 1;
-constexpr size_t kPuredarkAfwPacketMotion = 2;
-constexpr size_t kPuredarkAfwPacketOutput = 3;
-
-bool prepare_puredark_afw_packet_texture_locked(
-    const w3vr::puredark_afw::TextureDesc& source,
-    PuredarkAfwPacketTextureDump& dump) {
-    if (g_d3d12_device == nullptr || source.texture == nullptr ||
-        dump.scheduled) {
-        return false;
-    }
-    const auto desc = source.texture->GetDesc();
-    if (desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
-        desc.Width == 0 || desc.Height == 0 || desc.DepthOrArraySize != 1 ||
-        desc.MipLevels == 0 || desc.SampleDesc.Count != 1) {
-        return false;
-    }
-
-    UINT64 total_bytes{};
-    UINT row_count{};
-    UINT64 row_bytes{};
-    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
-    g_d3d12_device->GetCopyableFootprints(
-        &desc, 0, 1, 0, &footprint, &row_count, &row_bytes, &total_bytes);
-    if (total_bytes == 0 || row_count == 0 || row_bytes == 0) {
-        return false;
-    }
-
-    // Borrow the resources only until the private post-XR copy is queued.
-    // Their owning AFW bundle/eye buffers remain alive through that boundary;
-    // taking a late AddRef would recreate the V12098 lifetime race.
-    dump.source = source.texture;
-    dump.source_address = reinterpret_cast<uintptr_t>(source.texture);
-    dump.footprint = footprint;
-    dump.source_desc = desc;
-    dump.source_state = source.initial_state;
-    dump.total_bytes = total_bytes;
-    dump.scheduled = true;
-    return true;
-}
-
-bool allocate_puredark_afw_packet_readback_locked(
-    PuredarkAfwPacketTextureDump& dump) {
-    if (!dump.scheduled || dump.source == nullptr || dump.total_bytes == 0) {
-        return false;
-    }
-    if (dump.readback != nullptr) {
-        return true;
-    }
-    D3D12_HEAP_PROPERTIES heap{};
-    heap.Type = D3D12_HEAP_TYPE_READBACK;
-    heap.CreationNodeMask = 1;
-    heap.VisibleNodeMask = 1;
-    D3D12_RESOURCE_DESC buffer{};
-    buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    buffer.Width = dump.total_bytes;
-    buffer.Height = 1;
-    buffer.DepthOrArraySize = 1;
-    buffer.MipLevels = 1;
-    buffer.SampleDesc.Count = 1;
-    buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-    return SUCCEEDED(g_d3d12_device->CreateCommittedResource(
-        &heap, D3D12_HEAP_FLAG_NONE, &buffer,
-        D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
-        IID_PPV_ARGS(&dump.readback)));
-}
-
-void record_puredark_afw_packet_texture_copy(
-    ID3D12GraphicsCommandList* command_list,
-    const PuredarkAfwPacketTextureDump& dump) {
-    if (command_list == nullptr || !dump.scheduled || dump.source == nullptr ||
-        dump.readback == nullptr) {
-        return;
-    }
-    D3D12_RESOURCE_BARRIER to_copy{};
-    const bool transition =
-        dump.source_state != D3D12_RESOURCE_STATE_COPY_SOURCE;
-    if (transition) {
-        to_copy.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        to_copy.Transition.pResource = dump.source;
-        to_copy.Transition.Subresource =
-            D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        to_copy.Transition.StateBefore = dump.source_state;
-        to_copy.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
-        command_list->ResourceBarrier(1, &to_copy);
-    }
-    D3D12_TEXTURE_COPY_LOCATION destination{};
-    destination.pResource = dump.readback;
-    destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-    destination.PlacedFootprint = dump.footprint;
-    D3D12_TEXTURE_COPY_LOCATION source{};
-    source.pResource = dump.source;
-    source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-    source.SubresourceIndex = 0;
-    command_list->CopyTextureRegion(
-        &destination, 0, 0, 0, &source, nullptr);
-    if (transition) {
-        std::swap(
-            to_copy.Transition.StateBefore, to_copy.Transition.StateAfter);
-        command_list->ResourceBarrier(1, &to_copy);
-    }
-}
-
-bool begin_puredark_afw_packet_dump(
-    ID3D12GraphicsCommandList* command_list,
-    const w3vr::puredark_afw::FrameBufferDesc& input,
-    const w3vr::puredark_afw::FrameWarpEvaluateParams& evaluate,
-    const PuredarkAfwInputSnapshot& captured,
-    uint64_t submission_serial,
-    uint64_t present_count) {
-    const uint64_t ordinal =
-        g_puredark_afw_packet_dump_evaluates.fetch_add(
-            1, std::memory_order_relaxed) + 1;
-    if ((!temporal_backend_is_taau() && !temporal_backend_is_dlss()) ||
-        captured.eye != 0 || evaluate.camera_data == nullptr ||
-        !g_puredark_afw_packet_dump_requested.load(
-            std::memory_order_acquire)) {
-        return false;
-    }
-
-    std::scoped_lock lock{g_puredark_afw_packet_dump_mutex};
-    auto& dump = g_puredark_afw_packet_dump;
-    if (dump.state != PuredarkAfwPacketDumpState::Idle ||
-        !g_puredark_afw_packet_dump_requested.exchange(
-            false, std::memory_order_acq_rel)) {
-        return false;
-    }
-    dump = {};
-    dump.state = PuredarkAfwPacketDumpState::Recording;
-    dump.command_list = command_list;
-    dump.evaluate_ordinal = ordinal;
-    dump.present = present_count;
-    dump.pair_id = captured.pair_id;
-    dump.submission_serial = submission_serial;
-    dump.generation = captured.generation;
-    dump.eye = captured.eye;
-    dump.pixel_projection = captured.pixel_projection;
-    dump.motion_scale[0] = evaluate.motion_scale[0];
-    dump.motion_scale[1] = evaluate.motion_scale[1];
-    dump.ignore_motion_threshold = evaluate.ignore_motion_threshold;
-    dump.mode = static_cast<uint32_t>(evaluate.mode);
-    dump.motion_vectors_type =
-        static_cast<uint32_t>(evaluate.motion_vectors_type);
-    dump.clear_before_warping = evaluate.clear_before_warping;
-    dump.is_hudless_color = evaluate.is_hudless_color;
-    dump.debug = evaluate.debug;
-    dump.use_uint64 = evaluate.use_uint64;
-    dump.camera = *evaluate.camera_data;
-    dump.render_views = captured.render_views;
-    dump.render_views_valid = captured.render_views_valid;
-    dump.exact_render_view = captured.exact_render_view;
-    dump.exact_render_view_valid = captured.exact_render_view_valid;
-    dump.taau_cb10 = captured.taau_cb10;
-    dump.taau_cb10_valid = captured.taau_cb10_valid;
-    dump.streamline_constants = captured.streamline_constants;
-    dump.streamline_constants_valid =
-        captured.streamline_constants_valid;
-    strncpy_s(
-        dump.backend, std::size(dump.backend), temporal_backend_name(),
-        _TRUNCATE);
-
-    const bool color_scheduled = prepare_puredark_afw_packet_texture_locked(
-        input.color, dump.textures[kPuredarkAfwPacketColor]);
-    const bool depth_scheduled = prepare_puredark_afw_packet_texture_locked(
-        input.depth, dump.textures[kPuredarkAfwPacketDepth]);
-    const bool motion_scheduled = prepare_puredark_afw_packet_texture_locked(
-        input.motion_vectors, dump.textures[kPuredarkAfwPacketMotion]);
-    dump.input_capture_complete =
-        color_scheduled && depth_scheduled && motion_scheduled;
-    if (!color_scheduled && !depth_scheduled && !motion_scheduled) {
-        dump.state = PuredarkAfwPacketDumpState::Failed;
-        return false;
-    }
-    log_line(
-        "V1352 AFW rotation packet armed backend=%s ordinal=%llu "
-        "present=%llu pair=%llu eye=%u submission=%llu projection=%u "
-        "inputs_complete=%u cb10=%u streamline=%u",
-        dump.backend, static_cast<unsigned long long>(ordinal),
-        static_cast<unsigned long long>(present_count),
-        static_cast<unsigned long long>(captured.pair_id), captured.eye,
-        static_cast<unsigned long long>(submission_serial),
-        static_cast<unsigned>(captured.pixel_projection),
-        dump.input_capture_complete ? 1u : 0u,
-        dump.taau_cb10_valid ? 1u : 0u,
-        dump.streamline_constants_valid ? 1u : 0u);
-    return true;
-}
-
-void finish_puredark_afw_packet_dump(
-    bool armed,
-    bool evaluate_succeeded,
-    const w3vr::puredark_afw::TextureDesc* output) {
-    if (!armed) {
-        return;
-    }
-    std::scoped_lock lock{g_puredark_afw_packet_dump_mutex};
-    auto& dump = g_puredark_afw_packet_dump;
-    if (dump.state != PuredarkAfwPacketDumpState::Recording) {
-        return;
-    }
-    dump.evaluate_succeeded = evaluate_succeeded;
-    dump.output_capture_complete = evaluate_succeeded && output != nullptr &&
-        prepare_puredark_afw_packet_texture_locked(
-            *output, dump.textures[kPuredarkAfwPacketOutput]);
-    dump.state = PuredarkAfwPacketDumpState::Scheduled;
-}
-
-void release_unsubmitted_puredark_afw_packet_locked(
-    PuredarkAfwPacketDump& dump) {
-    for (auto& texture : dump.textures) {
-        texture.source = nullptr;
-        if (texture.readback != nullptr) {
-            texture.readback->Release();
-            texture.readback = nullptr;
-        }
-    }
-    if (dump.copy_command_list != nullptr) {
-        dump.copy_command_list->Release();
-        dump.copy_command_list = nullptr;
-    }
-    if (dump.copy_allocator != nullptr) {
-        dump.copy_allocator->Release();
-        dump.copy_allocator = nullptr;
-    }
-    if (dump.fence != nullptr) {
-        dump.fence->Release();
-        dump.fence = nullptr;
-    }
-}
-
-void submit_puredark_afw_packet_dump_after_xr() {
-    std::scoped_lock lock{g_puredark_afw_packet_dump_mutex};
-    auto& dump = g_puredark_afw_packet_dump;
-    if (dump.state != PuredarkAfwPacketDumpState::Scheduled ||
-        dump.command_list != g_xr_command_list ||
-        g_d3d12_device == nullptr || g_command_queue == nullptr ||
-        g_execute_command_lists == nullptr) {
-        return;
-    }
-
-    if (FAILED(g_d3d12_device->CreateFence(
-            0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&dump.fence)))) {
-        release_unsubmitted_puredark_afw_packet_locked(dump);
-        dump.state = PuredarkAfwPacketDumpState::Failed;
-        return;
-    }
-    bool allocation_complete = true;
-    for (auto& texture : dump.textures) {
-        if (texture.scheduled &&
-            !allocate_puredark_afw_packet_readback_locked(texture)) {
-            allocation_complete = false;
-        }
-    }
-    dump.input_capture_complete = dump.input_capture_complete &&
-        dump.textures[kPuredarkAfwPacketColor].readback != nullptr &&
-        dump.textures[kPuredarkAfwPacketDepth].readback != nullptr &&
-        dump.textures[kPuredarkAfwPacketMotion].readback != nullptr;
-    dump.output_capture_complete = dump.output_capture_complete &&
-        dump.textures[kPuredarkAfwPacketOutput].readback != nullptr;
-    if (!allocation_complete) {
-        release_unsubmitted_puredark_afw_packet_locked(dump);
-        dump.state = PuredarkAfwPacketDumpState::Failed;
-        return;
-    }
-    HRESULT result = g_d3d12_device->CreateCommandAllocator(
-        D3D12_COMMAND_LIST_TYPE_DIRECT,
-        IID_PPV_ARGS(&dump.copy_allocator));
-    if (SUCCEEDED(result)) {
-        result = g_d3d12_device->CreateCommandList(
-            0, D3D12_COMMAND_LIST_TYPE_DIRECT, dump.copy_allocator, nullptr,
-            IID_PPV_ARGS(&dump.copy_command_list));
-    }
-    if (FAILED(result) || dump.copy_command_list == nullptr) {
-        release_unsubmitted_puredark_afw_packet_locked(dump);
-        dump.state = PuredarkAfwPacketDumpState::Failed;
-        return;
-    }
-    for (const auto& texture : dump.textures) {
-        record_puredark_afw_packet_texture_copy(
-            dump.copy_command_list, texture);
-    }
-    result = dump.copy_command_list->Close();
-    if (FAILED(result)) {
-        release_unsubmitted_puredark_afw_packet_locked(dump);
-        dump.state = PuredarkAfwPacketDumpState::Failed;
-        return;
-    }
-    ID3D12CommandList* lists[]{dump.copy_command_list};
-    g_execute_command_lists(g_command_queue, 1, lists);
-    const HRESULT signal_result = g_command_queue->Signal(dump.fence, 1);
-    dump.state = SUCCEEDED(signal_result)
-        ? PuredarkAfwPacketDumpState::Submitted
-        : PuredarkAfwPacketDumpState::Failed;
-    log_line(
-        "V1352 AFW rotation packet readback submitted signal=0x%08X",
-        static_cast<unsigned>(signal_result));
-}
-
-void write_puredark_afw_packet_matrix(
-    FILE* file,
-    const char* name,
-    const w3vr::puredark_afw::Matrix4x4& matrix,
-    bool trailing_comma) {
-    fprintf(file, "    \"%s\": [", name);
-    for (size_t index = 0; index < std::size(matrix.values); ++index) {
-        const float value = matrix.values[index];
-        if (std::isfinite(value)) {
-            fprintf(file, "%.9g", value);
-        } else {
-            fprintf(file, "null");
-        }
-        fprintf(file, index + 1 == std::size(matrix.values) ? "]" : ", ");
-    }
-    fprintf(file, trailing_comma ? ",\n" : "\n");
-}
-
-void try_write_puredark_afw_packet_dump() {
-    std::scoped_lock lock{g_puredark_afw_packet_dump_mutex};
-    auto& dump = g_puredark_afw_packet_dump;
-    if (dump.state != PuredarkAfwPacketDumpState::Submitted ||
-        dump.fence == nullptr || dump.fence->GetCompletedValue() < 1) {
-        return;
-    }
-    dump.state = PuredarkAfwPacketDumpState::Writing;
-
-    char directory[MAX_PATH]{};
-    GetModuleFileNameA(nullptr, directory, sizeof(directory));
-    char* slash = strrchr(directory, '\\');
-    if (slash == nullptr) {
-        dump.state = PuredarkAfwPacketDumpState::Failed;
-        return;
-    }
-    slash[1] = '\0';
-    strcat_s(directory, "witcher3vr_afw_packets");
-    CreateDirectoryA(directory, nullptr);
-    char stem[160]{};
-    sprintf_s(stem, "v1352_%s_pid_%lu_present_%llu_pair_%llu_eye_%u",
-        dump.backend, static_cast<unsigned long>(GetCurrentProcessId()),
-        static_cast<unsigned long long>(dump.present),
-        static_cast<unsigned long long>(dump.pair_id), dump.eye);
-    static constexpr const char* kTextureNames[]{
-        "color", "depth", "motion", "output"};
-
-    size_t scheduled_texture_count{};
-    size_t written_texture_count{};
-    for (size_t index = 0; index < dump.textures.size(); ++index) {
-        auto& texture = dump.textures[index];
-        if (!texture.scheduled || texture.readback == nullptr) {
-            continue;
-        }
-        ++scheduled_texture_count;
-        uint8_t* mapped{};
-        const D3D12_RANGE read_range{
-            0, static_cast<SIZE_T>(texture.total_bytes)};
-        if (FAILED(texture.readback->Map(
-                0, &read_range, reinterpret_cast<void**>(&mapped))) ||
-            mapped == nullptr) {
-            continue;
-        }
-        char path[MAX_PATH]{};
-        sprintf_s(path, "%s\\%s_%s.bin", directory, stem,
-            kTextureNames[index]);
-        FILE* file{};
-        if (fopen_s(&file, path, "wb") == 0 && file != nullptr) {
-            const size_t written = fwrite(
-                mapped, 1, static_cast<size_t>(texture.total_bytes), file);
-            fclose(file);
-            if (written == static_cast<size_t>(texture.total_bytes)) {
-                ++written_texture_count;
-            }
-        }
-        const D3D12_RANGE written_range{0, 0};
-        texture.readback->Unmap(0, &written_range);
-    }
-
-    bool taau_cb10_ok = !dump.taau_cb10_valid;
-    if (dump.taau_cb10_valid) {
-        char path[MAX_PATH]{};
-        sprintf_s(path, "%s\\%s_taau_cb10.bin", directory, stem);
-        FILE* file{};
-        if (fopen_s(&file, path, "wb") == 0 && file != nullptr) {
-            taau_cb10_ok = fwrite(
-                dump.taau_cb10.data(), 1, dump.taau_cb10.size(), file) ==
-                dump.taau_cb10.size();
-            fclose(file);
-        }
-    }
-    bool streamline_ok = !dump.streamline_constants_valid;
-    if (dump.streamline_constants_valid) {
-        char path[MAX_PATH]{};
-        sprintf_s(path, "%s\\%s_streamline_constants.bin", directory, stem);
-        FILE* file{};
-        if (fopen_s(&file, path, "wb") == 0 && file != nullptr) {
-            streamline_ok = fwrite(
-                dump.streamline_constants.data(), 1,
-                sizeof(dump.streamline_constants), file) ==
-                sizeof(dump.streamline_constants);
-            fclose(file);
-        }
-    }
-
-    bool manifest_ok{};
-    char manifest_path[MAX_PATH]{};
-    sprintf_s(manifest_path, "%s\\%s_manifest.json", directory, stem);
-    FILE* manifest{};
-    if (fopen_s(&manifest, manifest_path, "w") == 0 && manifest != nullptr) {
-        fprintf(manifest, "{\n");
-        fprintf(manifest, "  \"build\": \"V1352\",\n");
-        fprintf(manifest, "  \"backend\": \"%s\",\n", dump.backend);
-        fprintf(manifest,
-            "  \"evaluate_ordinal\": %llu,\n  \"present\": %llu,\n  \"pair_id\": %llu,\n  \"submission_serial\": %llu,\n  \"generation\": %u,\n  \"eye\": %u,\n  \"pixel_projection\": %u,\n  \"evaluate_succeeded\": %s,\n  \"input_capture_complete\": %s,\n  \"output_capture_complete\": %s,\n",
-            static_cast<unsigned long long>(dump.evaluate_ordinal),
-            static_cast<unsigned long long>(dump.present),
-            static_cast<unsigned long long>(dump.pair_id),
-            static_cast<unsigned long long>(dump.submission_serial),
-            dump.generation, dump.eye,
-            static_cast<unsigned>(dump.pixel_projection),
-            dump.evaluate_succeeded ? "true" : "false",
-            dump.input_capture_complete ? "true" : "false",
-            dump.output_capture_complete ? "true" : "false");
-        fprintf(manifest,
-            "  \"evaluate\": {\"motion_scale\": [%.9g, %.9g], \"mode\": %u, \"eye_index\": %u, \"ignore_motion_threshold\": %.9g, \"motion_vectors_type\": %u, \"clear_before_warping\": %s, \"is_hudless_color\": %s, \"debug\": %s, \"use_uint64\": %s},\n",
-            dump.motion_scale[0], dump.motion_scale[1], dump.mode, dump.eye,
-            dump.ignore_motion_threshold, dump.motion_vectors_type,
-            dump.clear_before_warping ? "true" : "false",
-            dump.is_hudless_color ? "true" : "false",
-            dump.debug ? "true" : "false",
-            dump.use_uint64 ? "true" : "false");
-        fprintf(manifest, "  \"textures\": {\n");
-        for (size_t index = 0; index < dump.textures.size(); ++index) {
-            const auto& texture = dump.textures[index];
-            fprintf(manifest,
-                "    \"%s\": {\"scheduled\": %s, \"resource\": \"0x%llX\", \"width\": %llu, \"height\": %u, \"format\": %u, \"mip_levels\": %u, \"array_size\": %u, \"sample_count\": %u, \"flags\": %u, \"initial_state\": %u, \"footprint_offset\": %llu, \"row_pitch\": %u, \"footprint_width\": %u, \"footprint_height\": %u, \"total_bytes\": %llu, \"file\": \"%s_%s.bin\"}%s\n",
-                kTextureNames[index], texture.scheduled ? "true" : "false",
-                static_cast<unsigned long long>(texture.source_address),
-                static_cast<unsigned long long>(texture.source_desc.Width),
-                texture.source_desc.Height,
-                static_cast<unsigned>(texture.source_desc.Format),
-                texture.source_desc.MipLevels,
-                texture.source_desc.DepthOrArraySize,
-                texture.source_desc.SampleDesc.Count,
-                static_cast<unsigned>(texture.source_desc.Flags),
-                static_cast<unsigned>(texture.source_state),
-                static_cast<unsigned long long>(texture.footprint.Offset),
-                texture.footprint.Footprint.RowPitch,
-                texture.footprint.Footprint.Width,
-                texture.footprint.Footprint.Height,
-                static_cast<unsigned long long>(texture.total_bytes), stem,
-                kTextureNames[index],
-                index + 1 == dump.textures.size() ? "" : ",");
-        }
-        fprintf(manifest, "  },\n");
-        fprintf(manifest, "  \"render_views_valid\": %s,\n",
-            dump.render_views_valid ? "true" : "false");
-        fprintf(manifest, "  \"render_views\": [\n");
-        for (size_t eye = 0; eye < dump.render_views.size(); ++eye) {
-            const auto& view = dump.render_views[eye];
-            fprintf(manifest,
-                "    {\"position\": [%.9g, %.9g, %.9g], \"orientation\": [%.9g, %.9g, %.9g, %.9g], \"fov\": [%.9g, %.9g, %.9g, %.9g]}%s\n",
-                view.pose.position.x, view.pose.position.y,
-                view.pose.position.z, view.pose.orientation.x,
-                view.pose.orientation.y, view.pose.orientation.z,
-                view.pose.orientation.w, view.fov.angleLeft,
-                view.fov.angleRight, view.fov.angleUp, view.fov.angleDown,
-                eye + 1 == dump.render_views.size() ? "" : ",");
-        }
-        fprintf(manifest, "  ],\n  \"camera\": {\n");
-        write_puredark_afw_packet_matrix(manifest,
-            "destination_world_to_view", dump.camera.destination_world_to_view,
-            true);
-        write_puredark_afw_packet_matrix(manifest,
-            "destination_view_to_world", dump.camera.destination_view_to_world,
-            true);
-        write_puredark_afw_packet_matrix(manifest,
-            "destination_view_to_clip", dump.camera.destination_view_to_clip,
-            true);
-        write_puredark_afw_packet_matrix(manifest,
-            "destination_clip_to_view", dump.camera.destination_clip_to_view,
-            true);
-        write_puredark_afw_packet_matrix(manifest,
-            "source_world_to_view", dump.camera.source_world_to_view, true);
-        write_puredark_afw_packet_matrix(manifest,
-            "source_view_to_world", dump.camera.source_view_to_world, true);
-        write_puredark_afw_packet_matrix(manifest,
-            "source_view_to_clip", dump.camera.source_view_to_clip, true);
-        write_puredark_afw_packet_matrix(manifest,
-            "source_clip_to_view", dump.camera.source_clip_to_view, true);
-        write_puredark_afw_packet_matrix(manifest,
-            "camera_world_to_view", dump.camera.camera_world_to_view, true);
-        write_puredark_afw_packet_matrix(manifest,
-            "camera_view_to_world", dump.camera.camera_view_to_world, true);
-        write_puredark_afw_packet_matrix(manifest,
-            "camera_view_to_clip", dump.camera.camera_view_to_clip, true);
-        write_puredark_afw_packet_matrix(manifest,
-            "camera_clip_to_view", dump.camera.camera_clip_to_view, false);
-        fprintf(manifest, "  }\n}\n");
-        manifest_ok = fclose(manifest) == 0;
-    }
-
-    const bool write_ok = taau_cb10_ok && streamline_ok && manifest_ok &&
-        scheduled_texture_count == written_texture_count &&
-        dump.input_capture_complete &&
-        (!dump.evaluate_succeeded || dump.output_capture_complete);
-    release_unsubmitted_puredark_afw_packet_locked(dump);
-    dump.state = write_ok
-        ? PuredarkAfwPacketDumpState::Complete
-        : PuredarkAfwPacketDumpState::Failed;
-    log_line(
-        "V1352 AFW rotation packet written backend=%s present=%llu pair=%llu "
-        "eye=%u success=%u textures=%zu/%zu cb10=%u streamline=%u "
-        "directory=%s",
-        dump.backend, static_cast<unsigned long long>(dump.present),
-        static_cast<unsigned long long>(dump.pair_id), dump.eye,
-        write_ok ? 1u : 0u, written_texture_count,
-        scheduled_texture_count, taau_cb10_ok ? 1u : 0u,
-        streamline_ok ? 1u : 0u, directory);
-}
-
 // [REFACTOR:PUREDARK-AFW-COMMON-TRANSPORT V12104 3/8] DLSS and TAAU use the
 // same transaction after their producer freezes an exact immutable bundle:
 // color copy, EvaluateFrameWarp and peer publication remain on the XR list.
@@ -12320,13 +11746,6 @@ bool evaluate_puredark_afw_mode3_common(
     result.bundle_slot = bundle_slot;
     result.submission_serial = slot.submission_serial;
     result.valid = true;
-
-    const bool packet_dump_armed =
-        begin_puredark_afw_packet_dump(
-            command_list, input, evaluate, captured,
-            slot.submission_serial, present_count);
-    finish_puredark_afw_packet_dump(
-        packet_dump_armed, true, &synthesized);
 
     g_puredark_afw_consumed_candidates.fetch_add(
         1, std::memory_order_relaxed);
@@ -14955,7 +14374,8 @@ bool copy_hud_pso_shader_bytecode(
     return true;
 }
 
-bool capture_hud_composite_pso_recipe(
+bool capture_graphics_pso_recipe(
+    HudCompositePsoRecipe& recipe,
     ID3D12Device* device,
     const D3D12_GRAPHICS_PIPELINE_STATE_DESC& source,
     const PipelineInfo& pipeline_info) {
@@ -14963,12 +14383,11 @@ bool capture_hud_composite_pso_recipe(
         return false;
     }
 
-    auto& recipe = g_hud_composite_pso_recipe;
     recipe = {};
     recipe.desc = source;
-    recipe.desc.PS = {};
     recipe.desc.CachedPSO = {};
     if (!copy_hud_pso_shader_bytecode(source.VS, recipe.vs, recipe.desc.VS) ||
+        !copy_hud_pso_shader_bytecode(source.PS, recipe.ps, recipe.desc.PS) ||
         !copy_hud_pso_shader_bytecode(source.DS, recipe.ds, recipe.desc.DS) ||
         !copy_hud_pso_shader_bytecode(source.HS, recipe.hs, recipe.desc.HS) ||
         !copy_hud_pso_shader_bytecode(source.GS, recipe.gs, recipe.desc.GS)) {
@@ -15044,6 +14463,14 @@ bool capture_hud_composite_pso_recipe(
     recipe.device = device;
     recipe.valid = true;
     return true;
+}
+
+bool capture_hud_composite_pso_recipe(
+    ID3D12Device* device,
+    const D3D12_GRAPHICS_PIPELINE_STATE_DESC& source,
+    const PipelineInfo& pipeline_info) {
+    return capture_graphics_pso_recipe(
+        g_hud_composite_pso_recipe, device, source, pipeline_info);
 }
 
 bool ensure_asymmetric_bootstrap_hud_psos() {
@@ -15708,6 +15135,154 @@ void main(triangle VertexData input[3], inout TriangleStream<VertexData> output)
     object->Release();
     result->Release();
     return !shader_out.empty();
+}
+
+// The real-smoke PSO can be created before OpenXR has published valid views.
+// Preserve its immutable recipe and finish the two eye variants as soon as the
+// runtime FOV exists. This is producer preparation, independent of the current
+// SYM/ASYM selection, so an F2 transition never depends on startup ordering.
+bool ensure_real_smoke_projection_psos() {
+    if (!real_smoke_world_up_route_active()) {
+        return false;
+    }
+    if (g_real_smoke_center_pipelines[0].load(
+            std::memory_order_acquire) != nullptr &&
+        g_real_smoke_center_pipelines[1].load(
+            std::memory_order_acquire) != nullptr &&
+        g_real_smoke_center_pipelines[2].load(
+            std::memory_order_acquire) != nullptr) {
+        return true;
+    }
+
+    std::scoped_lock creation_lock{g_real_smoke_pso_creation_mutex};
+    auto& recipe = g_real_smoke_pso_recipe;
+    if (!recipe.valid || recipe.device == nullptr ||
+        g_create_graphics_pipeline_state == nullptr) {
+        return false;
+    }
+
+    constexpr XrViewStateFlags kRequiredRuntimeViewFlags =
+        XR_VIEW_STATE_ORIENTATION_VALID_BIT |
+        XR_VIEW_STATE_POSITION_VALID_BIT;
+    const XrViewStateFlags runtime_view_flags =
+        g_xr_render_view_state_flags.load(std::memory_order_acquire);
+    const bool runtime_views_ready =
+        (runtime_view_flags & kRequiredRuntimeViewFlags) ==
+            kRequiredRuntimeViewFlags &&
+        g_xr_views.size() >= 2;
+
+    std::array<w3vr::openxr_eye_geometry::AsymmetricProjectionDescriptor, 3>
+        projections{};
+    std::array<std::vector<uint8_t>, 3> geometry_shaders{};
+    std::array<ID3D12PipelineState*, 3> variants{};
+    std::array<ID3D12PipelineState*, 3> clip_probes{};
+    bool created_any{};
+    for (uint32_t variant_index = 0;
+         variant_index < variants.size(); ++variant_index) {
+        const bool need_variant =
+            g_real_smoke_center_pipelines[variant_index].load(
+                std::memory_order_acquire) == nullptr;
+        const bool need_probe =
+            g_real_smoke_clip_probe_pipelines[variant_index].load(
+                std::memory_order_acquire) == nullptr;
+        if ((!need_variant && !need_probe) ||
+            !w3vr::mode3_transport::real_smoke_variant_bootstrap_allowed(
+                variant_index, runtime_views_ready)) {
+            continue;
+        }
+
+        bool variant_ready = true;
+        if (variant_index < 2) {
+            variant_ready = w3vr::openxr_eye_geometry::
+                derive_asymmetric_projection_descriptor(
+                    g_xr_views[variant_index].fov, 1, 1,
+                    projections[variant_index]);
+        }
+        variant_ready = variant_ready &&
+            compile_real_smoke_center_geometry_shader(
+                projections[variant_index].center_ndc_x,
+                projections[variant_index].center_ndc_y,
+                geometry_shaders[variant_index]);
+        if (!variant_ready) {
+            continue;
+        }
+
+        auto variant_desc = recipe.desc;
+        variant_desc.GS = D3D12_SHADER_BYTECODE{
+            geometry_shaders[variant_index].data(),
+            geometry_shaders[variant_index].size()};
+        if (need_variant && FAILED(g_create_graphics_pipeline_state(
+                recipe.device, &variant_desc,
+                IID_PPV_ARGS(&variants[variant_index])))) {
+            variants[variant_index] = nullptr;
+        }
+        if (need_probe) {
+            auto probe_desc = variant_desc;
+            for (UINT target = 0; target < probe_desc.NumRenderTargets;
+                 ++target) {
+                probe_desc.BlendState.RenderTarget[target].
+                    RenderTargetWriteMask = 0;
+            }
+            probe_desc.DepthStencilState.DepthWriteMask =
+                D3D12_DEPTH_WRITE_MASK_ZERO;
+            probe_desc.DepthStencilState.StencilWriteMask = 0;
+            if (FAILED(g_create_graphics_pipeline_state(
+                    recipe.device, &probe_desc,
+                    IID_PPV_ARGS(&clip_probes[variant_index])))) {
+                clip_probes[variant_index] = nullptr;
+            }
+        }
+    }
+
+    {
+        std::scoped_lock reverse_lock{g_reverse_mutex};
+        for (uint32_t variant_index = 0;
+             variant_index < variants.size(); ++variant_index) {
+            if (variants[variant_index] != nullptr &&
+                g_real_smoke_center_pipelines[variant_index].load(
+                    std::memory_order_relaxed) == nullptr) {
+                g_pipeline_infos[variants[variant_index]] =
+                    recipe.pipeline_info;
+                g_real_smoke_center_pipelines[variant_index].store(
+                    variants[variant_index], std::memory_order_release);
+                variants[variant_index] = nullptr;
+                created_any = true;
+            }
+            if (clip_probes[variant_index] != nullptr &&
+                g_real_smoke_clip_probe_pipelines[variant_index].load(
+                    std::memory_order_relaxed) == nullptr) {
+                g_pipeline_infos[clip_probes[variant_index]] =
+                    recipe.pipeline_info;
+                g_real_smoke_clip_probe_pipelines[variant_index].store(
+                    clip_probes[variant_index], std::memory_order_release);
+                clip_probes[variant_index] = nullptr;
+            }
+        }
+    }
+    for (auto* variant : variants) {
+        if (variant != nullptr) variant->Release();
+    }
+    for (auto* probe : clip_probes) {
+        if (probe != nullptr) probe->Release();
+    }
+    if (created_any) {
+        log_line(
+            "V1355 real-smoke projection PSOs completed runtime_views=%d "
+            "pso=%p,%p,%p",
+            runtime_views_ready ? 1 : 0,
+            g_real_smoke_center_pipelines[0].load(
+                std::memory_order_relaxed),
+            g_real_smoke_center_pipelines[1].load(
+                std::memory_order_relaxed),
+            g_real_smoke_center_pipelines[2].load(
+                std::memory_order_relaxed));
+    }
+    return g_real_smoke_center_pipelines[0].load(
+            std::memory_order_acquire) != nullptr &&
+        g_real_smoke_center_pipelines[1].load(
+            std::memory_order_acquire) != nullptr &&
+        g_real_smoke_center_pipelines[2].load(
+            std::memory_order_acquire) != nullptr;
 }
 
 // [FIX:ASYMMETRIC-FOCUS-GS V1081 2/5] Generate an immutable passthrough
@@ -19489,78 +19064,16 @@ HRESULT STDMETHODCALLTYPE hook_create_graphics_pipeline_state(
         if (desc->GS.pShaderBytecode == nullptr &&
             desc->GS.BytecodeLength == 0 &&
             real_smoke_world_up_route_active()) {
-            // [FIX:DETERMINISTIC-SMOKE-PSO-BOOTSTRAP V1239 1/1] OpenXR's
-            // located views are published well before the first gameplay
-            // camera, and they are the actual source used for the two optical
-            // centres below. Depending on g_hmd_render_fov_valid made variant
-            // creation a one-shot race against REDengine's smoke PSO. The
-            // zero-centre world-up PSO is independent of FOV and is therefore
-            // always created as the immutable V1157 fail-open.
-            constexpr XrViewStateFlags kRequiredRuntimeViewFlags =
-                XR_VIEW_STATE_ORIENTATION_VALID_BIT |
-                XR_VIEW_STATE_POSITION_VALID_BIT;
-            const XrViewStateFlags runtime_view_flags =
-                g_xr_render_view_state_flags.load(std::memory_order_acquire);
-            const bool runtime_views_ready =
-                (runtime_view_flags & kRequiredRuntimeViewFlags) ==
-                    kRequiredRuntimeViewFlags;
-            std::array<w3vr::openxr_eye_geometry::
-                AsymmetricProjectionDescriptor, 3> projections{};
-            std::array<std::vector<uint8_t>, 3> geometry_shaders{};
-            std::array<ID3D12PipelineState*, 3> variants{};
-            for (uint32_t variant_index = 0;
-                 variant_index < variants.size();
-                 ++variant_index) {
-                if (g_real_smoke_center_pipelines[variant_index].load(
-                        std::memory_order_acquire) != nullptr ||
-                    !w3vr::mode3_transport::
-                        real_smoke_variant_bootstrap_allowed(
-                            variant_index, runtime_views_ready)) {
-                    continue;
-                }
-                bool variant_ready = true;
-                if (variant_index < 2) {
-                    variant_ready = w3vr::openxr_eye_geometry::
-                        derive_asymmetric_projection_descriptor(
-                            g_xr_views[variant_index].fov, 1, 1,
-                            projections[variant_index]);
-                }
-                variant_ready = variant_ready &&
-                    compile_real_smoke_center_geometry_shader(
-                        projections[variant_index].center_ndc_x,
-                        projections[variant_index].center_ndc_y,
-                        geometry_shaders[variant_index]);
-                if (!variant_ready) {
-                    continue;
-                }
-                auto variant_desc = *desc;
-                variant_desc.GS = D3D12_SHADER_BYTECODE{
-                    geometry_shaders[variant_index].data(),
-                    geometry_shaders[variant_index].size()};
-                if (FAILED(g_create_graphics_pipeline_state(
-                        device, &variant_desc,
-                        IID_PPV_ARGS(&variants[variant_index])))) {
-                    variants[variant_index] = nullptr;
-                }
-            }
             {
-                std::scoped_lock lock{g_reverse_mutex};
-                for (uint32_t variant_index = 0;
-                     variant_index < variants.size();
-                     ++variant_index) {
-                    if (variants[variant_index] != nullptr &&
-                        g_real_smoke_center_pipelines[variant_index].load(
-                            std::memory_order_relaxed) == nullptr) {
-                        g_real_smoke_center_pipelines[variant_index].store(
-                            variants[variant_index],
-                            std::memory_order_release);
-                        variants[variant_index] = nullptr;
-                    }
+                std::scoped_lock creation_lock{
+                    g_real_smoke_pso_creation_mutex};
+                if (!capture_graphics_pso_recipe(
+                        g_real_smoke_pso_recipe, device, *desc, info)) {
+                    log_line(
+                        "V1355 real-smoke PSO recipe capture failed");
                 }
             }
-            for (auto* variant : variants) {
-                if (variant != nullptr) variant->Release();
-            }
+            ensure_real_smoke_projection_psos();
         }
     }
     if (info.vs_hash == 0x9503CB0CCE8D37AFull &&
@@ -21716,6 +21229,7 @@ bool capture_real_smoke_visibility_metadata(
     ID3D12GraphicsCommandList* command_list,
     ID3D12PipelineState* original_pipeline,
     ID3D12PipelineState* selected_pipeline,
+    uint64_t draw_group,
     int32_t variant_index,
     uint32_t draw_flags,
     UINT index_count_per_instance,
@@ -21726,6 +21240,7 @@ bool capture_real_smoke_visibility_metadata(
     w3vr::smoke_visibility::DrawMetadata& metadata) {
     metadata = {};
     metadata.present = g_present_count.load(std::memory_order_relaxed);
+    metadata.draw_group = draw_group;
     metadata.generation = g_streamline_capture_generation.load(
         std::memory_order_acquire);
     metadata.flags = draw_flags |
@@ -21765,6 +21280,38 @@ bool capture_real_smoke_visibility_metadata(
         metadata.authority_route = authority.route;
     }
 
+    // [DIAG:SMOKE-CLIP-AB V1353] Freeze the producer transaction separately
+    // from the late draw selector.  V1352 proved that those two authorities
+    // can become visible at different points in one Present; the A/B probes
+    // must therefore retain both identities instead of inferring one from the
+    // other or from the runtime SYM/ASYM request.
+    EngineFrameTag producer{};
+    uint32_t producer_route{};
+    if (current_exact_engine_render_tag(producer)) {
+        producer_route = 1;
+    } else if (lookup_taau_recording_producer(command_list, producer)) {
+        producer_route = 2;
+    } else if (lookup_dlss_recording_producer(command_list, producer)) {
+        producer_route = 3;
+    } else if (lookup_streamline_command_list_route(
+            command_list, producer)) {
+        producer_route = 4;
+    }
+    const uint32_t current_generation =
+        g_streamline_capture_generation.load(std::memory_order_acquire);
+    if (producer_route != 0 && producer.task_provenance_valid &&
+        producer.eye <= 1 && producer.pair_id != 0 &&
+        producer.pair_id != UINT64_MAX &&
+        producer.generation == current_generation) {
+        metadata.flags |= w3vr::smoke_visibility::DrawProducerTransaction;
+        metadata.producer_authority_route = producer_route;
+        metadata.producer_eye = static_cast<int32_t>(producer.eye);
+        metadata.producer_pair_id = producer.pair_id;
+        metadata.producer_generation = producer.generation;
+        metadata.producer_pixel_projection =
+            static_cast<uint32_t>(producer.pixel_projection);
+    }
+
     const auto pipeline = lookup_pipeline_info(original_pipeline);
     metadata.cull_mode = static_cast<uint32_t>(pipeline.cull_mode);
     metadata.front_counter_clockwise =
@@ -21799,6 +21346,20 @@ bool capture_real_smoke_visibility_metadata(
         std::copy_n(b1.begin(), metadata.clip_matrix.size(),
             metadata.clip_matrix.begin());
         metadata.camera_position = {b1[144], b1[145], b1[146]};
+        NativeFocusDrawEyeAuthority fresh_authority{};
+        if (match_native_focus_draw_eye(
+                metadata.camera_position, metadata.present,
+                fresh_authority)) {
+            metadata.flags |=
+                w3vr::smoke_visibility::DrawFreshEyeAuthority;
+            metadata.fresh_authority_route = fresh_authority.route;
+            metadata.fresh_eye = static_cast<int32_t>(fresh_authority.eye);
+            metadata.fresh_pair_id = fresh_authority.pair_id;
+            metadata.fresh_selected_distance =
+                fresh_authority.selected_distance;
+            metadata.fresh_separation_margin =
+                fresh_authority.separation_margin;
+        }
     }
     return true;
 }
@@ -21818,16 +21379,20 @@ void STDMETHODCALLTYPE hook_draw_indexed_instanced(
         real_smoke_pipeline != nullptr &&
         real_smoke_pipeline ==
             g_real_smoke_pipeline.load(std::memory_order_acquire);
+    const uint64_t smoke_draw_group = real_smoke_candidate
+        ? g_real_smoke_draw_group.fetch_add(
+            1, std::memory_order_relaxed) + 1
+        : 0;
     uint32_t smoke_attempt_flags{};
     const auto issue_draw = [&](ID3D12PipelineState* selected_pipeline,
                                 int32_t variant_index,
                                 uint32_t flags) {
         w3vr::smoke_visibility::DrawToken token{};
+        w3vr::smoke_visibility::DrawMetadata metadata{};
         if (real_smoke_candidate) {
-            w3vr::smoke_visibility::DrawMetadata metadata{};
             capture_real_smoke_visibility_metadata(
                 command_list, real_smoke_pipeline, selected_pipeline,
-                variant_index, flags,
+                smoke_draw_group, variant_index, flags,
                 index_count_per_instance, instance_count,
                 start_index_location, base_vertex_location,
                 start_instance_location, metadata);
@@ -21841,6 +21406,44 @@ void STDMETHODCALLTYPE hook_draw_indexed_instanced(
         if (token.valid()) {
             w3vr::smoke_visibility::end_draw(command_list, token);
         }
+        if (!token.valid() || variant_index < 0 ||
+            g_set_pipeline_state == nullptr) {
+            return;
+        }
+
+        // Execute three hidden reference projections over the exact same
+        // geometry/root state.  Their PSOs cannot write color, depth or
+        // stencil; only the pipeline-statistics queries survive.  Comparing
+        // CPrimitives inside one draw_group tells us deterministically which
+        // projection clips a disappearing smoke draw.
+        for (int32_t probe_variant = 0; probe_variant < 3;
+             ++probe_variant) {
+            auto* probe_pipeline =
+                g_real_smoke_clip_probe_pipelines[probe_variant].load(
+                    std::memory_order_acquire);
+            if (probe_pipeline == nullptr) {
+                continue;
+            }
+            auto probe_metadata = metadata;
+            probe_metadata.flags |=
+                w3vr::smoke_visibility::DrawReferenceProbe;
+            probe_metadata.variant_index = probe_variant;
+            probe_metadata.selected_pipeline =
+                reinterpret_cast<uintptr_t>(probe_pipeline);
+            const auto probe_token = w3vr::smoke_visibility::begin_draw(
+                command_list, probe_metadata);
+            if (!probe_token.valid()) {
+                continue;
+            }
+            g_set_pipeline_state(command_list, probe_pipeline);
+            g_draw_indexed_instanced(
+                command_list, index_count_per_instance, instance_count,
+                start_index_location, base_vertex_location,
+                start_instance_location);
+            w3vr::smoke_visibility::end_draw(
+                command_list, probe_token);
+        }
+        g_set_pipeline_state(command_list, selected_pipeline);
     };
 
     if (real_smoke_world_up_route_active() &&
@@ -40598,7 +40201,7 @@ void ensure_initialized() {
                 "focus_fire_b1=stereo_and_aer_centered_draw_proven "
                 "aer_taau_hud=scene_and_retained_pair_fail_open");
             log_line(
-                "witcher3vr dxgi proxy initialized build=V1352 base=V1351_afw_rotation_packet_diagnostic "
+                "witcher3vr dxgi proxy initialized build=V1355 base=V1354_smoke_eye_authority_ab_diagnostic "
                 "anchor_smoothing_ini=%d anchor_smoothing_seconds=%.4f "
                 "first_person_strafe_ini=%d mode3_aer_presentation=%d raytracing_enabled=%d raytracing_history_buffers=%d "
                 "aer_afw_enabled=%d persistent_registry=%d dlss_public_streamline=%d "
@@ -40661,7 +40264,7 @@ void ensure_initialized() {
             log_line(
                 "V1350 AER AFW native projection=exact_frozen_per_eye_scale_and_center source_and_peer=full_tangent_geometry imageRect=full identity_copy=1 fallback=none smoke=unchanged_V1348");
             log_line(
-                "V1352 AFW rotation packet diagnostic=F3_next_exact_eye0 color_depth_motion_camera_output native_motion_normalization=1");
+                "V1355 smoke projection PSO preparation=deferred_exact_runtime_fov smoke_clip_diagnostic=exact_draw_actual_plus_three_no_write_projection_variants full_b1=1 fresh_camera_ledger_eye_match=diagnostic_only");
             log_line(
                 "V1279 DLSS compatibility=public_streamline_aer_private_history_ngx_stereo legacy_module_agnostic_discovery=disabled_by_V1288");
             log_line(
@@ -40701,7 +40304,7 @@ void capture_d3d12_objects(IUnknown* dxgi_device_parameter) {
     log_line("Captured D3D12 queue=%p device=%p", g_command_queue, g_d3d12_device);
     const bool smoke_visibility_ready =
         w3vr::smoke_visibility::initialize(g_d3d12_device);
-    log_line("V1348 smoke visibility recorder initialized=%u capacity=65536 window=15s trigger=F3",
+    log_line("V1355 smoke eye-authority A/B recorder initialized=%u capacity=65536 window=15s trigger=F3 probes=eye0_eye1_zero_center fresh_camera_match=1 no_write=1",
         smoke_visibility_ready ? 1u : 0u);
     install_reverse_hooks();
     // [FIX:AER-AFW-HUD-BARRIER-HOOK V12014 1/1] AER deliberately never
@@ -48071,7 +47674,6 @@ void render_openxr_test_frame(
             if (SUCCEEDED(close_result)) {
                 ID3D12CommandList* lists[] = {g_xr_command_list};
                 g_command_queue->ExecuteCommandLists(1, lists);
-                submit_puredark_afw_packet_dump_after_xr();
                 // [FIX:AER-FULL-VR-COMPLETED-FRAME-AUTHORITY V1209 4/5]
                 // Retire the completed-frame serial only after the command
                 // list containing its final-backbuffer copy has reached the
@@ -48624,6 +48226,10 @@ void apply_present_boundary_requests() {
                 g_present_count.load(std::memory_order_relaxed)),
             projection_toggle_requests);
     }
+
+    // Complete producer-independent smoke variants after OpenXR view discovery,
+    // even when the process started in SYM and no F2 transition has occurred.
+    ensure_real_smoke_projection_psos();
 }
 
 void handle_f3_capture_hotkey(IDXGISwapChain* swapchain) {
@@ -48639,20 +48245,8 @@ void handle_f3_capture_hotkey(IDXGISwapChain* swapchain) {
     if (w3vr::pipeline_flight::enabled()) {
         w3vr::pipeline_flight::dump_last_ten_seconds();
     }
-    if (g_config.runtime_diagnostics &&
-        puredark_afw_mode3_aer_common_transport_configured()) {
-        g_puredark_afw_packet_dump_requested.store(
-            true, std::memory_order_release);
-        log_line(
-            "V1352 AFW rotation packet requested hotkey=F3 backend=%s "
-            "projection=%s present=%llu",
-            temporal_backend_name(),
-            native_stereo_runtime_enabled() ? "asymmetric" : "symmetric",
-            static_cast<unsigned long long>(
-                g_present_count.load(std::memory_order_relaxed)));
-    }
-    w3vr::smoke_visibility::dump_last_seconds("V1352", 15);
-    w3vr::route_flight::dump_last_seconds("V1352", 15);
+    w3vr::smoke_visibility::dump_last_seconds("V1355", 15);
+    w3vr::route_flight::dump_last_seconds("V1355", 15);
     trigger_renderdoc_capture(
         g_game_swapchain != nullptr ? g_game_swapchain : swapchain);
 }
@@ -48735,7 +48329,6 @@ HRESULT STDMETHODCALLTYPE hook_present(IDXGISwapChain* swapchain, UINT sync_inte
     if (w3vr::pipeline_flight::enabled()) {
         w3vr::pipeline_flight::process_gpu();
     }
-    try_write_puredark_afw_packet_dump();
     handle_runtime_mode3_projection_hotkey();
     handle_f3_capture_hotkey(swapchain);
     // Toggle only the ABI debug bit. This does not enable AFW, alter
@@ -49474,7 +49067,6 @@ HRESULT STDMETHODCALLTYPE hook_present1(
     if (w3vr::pipeline_flight::enabled()) {
         w3vr::pipeline_flight::process_gpu();
     }
-    try_write_puredark_afw_packet_dump();
     handle_runtime_mode3_projection_hotkey();
     handle_f3_capture_hotkey(swapchain);
     handle_puredark_afw_visual_debug_hotkey();

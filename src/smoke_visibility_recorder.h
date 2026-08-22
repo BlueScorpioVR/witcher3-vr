@@ -24,15 +24,28 @@ enum DrawFlags : uint32_t {
     DrawB1Captured = 1u << 12,
     DrawCinemaExcluded = 1u << 13,
     DrawFullVrExcluded = 1u << 14,
+    DrawReferenceProbe = 1u << 15,
+    DrawFreshEyeAuthority = 1u << 16,
 };
 
 struct DrawMetadata {
     uint64_t present{};
+    uint64_t draw_group{};
     uint64_t pair_id{};
     uint32_t generation{UINT32_MAX};
     int32_t eye{-1};
     uint32_t pixel_projection{};
     uint32_t authority_route{};
+    uint32_t producer_authority_route{};
+    int32_t producer_eye{-1};
+    uint64_t producer_pair_id{};
+    uint32_t producer_generation{UINT32_MAX};
+    uint32_t producer_pixel_projection{};
+    uint32_t fresh_authority_route{};
+    int32_t fresh_eye{-1};
+    uint64_t fresh_pair_id{};
+    float fresh_selected_distance{};
+    float fresh_separation_margin{};
     int32_t variant_index{-1};
     uint32_t flags{};
     uint32_t index_count{};
@@ -66,9 +79,10 @@ struct DrawToken {
     }
 };
 
-// V1347 introduced this diagnostic recorder; V1348 retains it unchanged.
-// Recording is always enabled, restricted to
-// the exact canonical smoke PSO, and writes no files until the shared F3 edge.
+// V1354 retains V1353's rendered draw plus three no-write projection probes
+// and adds a diagnostic-only fresh camera/temporal-ledger eye decision beside
+// the mutable command-list cache decision. Recording remains restricted to the
+// exact smoke PSO and writes no files until the shared F3 edge.
 bool initialize(ID3D12Device* device) noexcept;
 void update_present_clock(uint64_t present) noexcept;
 DrawToken begin_draw(

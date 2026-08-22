@@ -403,7 +403,7 @@ bool dump_last_seconds(
         build_identity != nullptr ? build_identity : "unknown",
         window_seconds);
     fprintf(file,
-        "# exact canonical smoke draws only; rendering inputs are observed but never changed by this recorder\n");
+        "# exact canonical smoke draws: one rendered sample plus three no-write projection probes sharing the same draw group\n");
     fprintf(file,
         "# rows=%zu claimed=%u capacity=%u dropped_capacity=%llu dropped_paused=%llu queues_waited=%u queues_failed=%u submission_cutoff=%llu\n",
         rows.size(), g_next_sample.load(std::memory_order_relaxed), kCapacity,
@@ -416,23 +416,63 @@ bool dump_last_seconds(
     fprintf(file,
         "# diagnosis: visible=PS ran; clip_or_cull_zero=GS emitted but clipper produced zero; pixel_zero=clipper survived but PS ran zero times\n");
 
-    std::array<uint64_t, 7> diagnosis_counts{};
+    std::array<std::array<uint64_t, 7>, 2> diagnosis_counts{};
     for (const auto& row : rows) {
         const bool geometry_shader_expected =
             row.sample.metadata.variant_index >= 0;
         const auto diagnosis = diagnose_visibility(
             counters_from(row.statistics), row.gpu_ready,
             geometry_shader_expected);
-        ++diagnosis_counts[static_cast<size_t>(diagnosis)];
+        const size_t sample_class =
+            (row.sample.metadata.flags & DrawReferenceProbe) != 0 ? 1u : 0u;
+        ++diagnosis_counts[sample_class][static_cast<size_t>(diagnosis)];
     }
-    fprintf(file, "# summary");
-    for (size_t index = 0; index < diagnosis_counts.size(); ++index) {
-        fprintf(file, " %s=%llu",
-            visibility_diagnosis_name(
-                static_cast<VisibilityDiagnosis>(index)),
-            static_cast<unsigned long long>(diagnosis_counts[index]));
+    for (size_t sample_class = 0; sample_class < diagnosis_counts.size();
+         ++sample_class) {
+        fprintf(file, "# summary sample=%s",
+            sample_class == 0 ? "actual" : "probe");
+        for (size_t index = 0; index < diagnosis_counts[sample_class].size();
+             ++index) {
+            fprintf(file, " %s=%llu",
+                visibility_diagnosis_name(
+                    static_cast<VisibilityDiagnosis>(index)),
+                static_cast<unsigned long long>(
+                    diagnosis_counts[sample_class][index]));
+        }
+        fprintf(file, "\n");
     }
-    fprintf(file, "\n");
+
+    uint64_t actual_cache_authority{};
+    uint64_t actual_fresh_authority{};
+    uint64_t actual_cache_fresh_agree{};
+    uint64_t actual_cache_fresh_mismatch{};
+    for (const auto& row : rows) {
+        const auto& metadata = row.sample.metadata;
+        if ((metadata.flags & DrawReferenceProbe) != 0) {
+            continue;
+        }
+        const bool cache_valid =
+            (metadata.flags & DrawAuthorityPresent) != 0 &&
+            metadata.eye >= 0 && metadata.eye <= 1;
+        const bool fresh_valid =
+            (metadata.flags & DrawFreshEyeAuthority) != 0 &&
+            metadata.fresh_eye >= 0 && metadata.fresh_eye <= 1;
+        actual_cache_authority += cache_valid ? 1u : 0u;
+        actual_fresh_authority += fresh_valid ? 1u : 0u;
+        if (cache_valid && fresh_valid) {
+            if (metadata.eye == metadata.fresh_eye) {
+                ++actual_cache_fresh_agree;
+            } else {
+                ++actual_cache_fresh_mismatch;
+            }
+        }
+    }
+    fprintf(file,
+        "# eye_authority actual_cache=%llu fresh_match=%llu agree=%llu mismatch=%llu\n",
+        static_cast<unsigned long long>(actual_cache_authority),
+        static_cast<unsigned long long>(actual_fresh_authority),
+        static_cast<unsigned long long>(actual_cache_fresh_agree),
+        static_cast<unsigned long long>(actual_cache_fresh_mismatch));
 
     for (const auto& row : rows) {
         const auto& metadata = row.sample.metadata;
@@ -443,14 +483,26 @@ bool dump_last_seconds(
             row.sample.qpc - now.QuadPart) * 1000.0 /
             static_cast<double>(frequency.QuadPart);
         fprintf(file,
-            "%10.3f seq=%llu p=%llu route=%s backend=%s projection=%s eye=%d pair=%llu gen=%u authority=%u variant=%d flags=0x%08X diagnosis=%s gpu=%u tid=%u cmd=%p pso=%p->%p draw=%u,%u,%u,%d,%u raster=%u,%u,%u viewport=%u:%.3f,%.3f,%.3f,%.3f,%.3f,%.3f scissor=%u:%ld,%ld,%ld,%ld tables=0x%llX,0x%llX b1=%u:0x%llX camera=%.6f,%.6f,%.6f clip=%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f stats=%llu,%llu,%llu,%llu,%llu,%llu,%llu\n",
+            "%10.3f seq=%llu group=%llu sample=%s p=%llu route=%s backend=%s projection=%s eye=%d pair=%llu gen=%u authority=%u producer=%u:%s:%d:%llu:%u fresh=%u:%d:%llu:%.9g:%.9g variant=%d flags=0x%08X diagnosis=%s gpu=%u tid=%u cmd=%p pso=%p->%p draw=%u,%u,%u,%d,%u raster=%u,%u,%u viewport=%u:%.3f,%.3f,%.3f,%.3f,%.3f,%.3f scissor=%u:%ld,%ld,%ld,%ld tables=0x%llX,0x%llX b1=%u:0x%llX camera=%.6f,%.6f,%.6f clip=%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g stats=%llu,%llu,%llu,%llu,%llu,%llu,%llu\n",
             milliseconds,
             static_cast<unsigned long long>(row.sample.sequence),
+            static_cast<unsigned long long>(metadata.draw_group),
+            (metadata.flags & DrawReferenceProbe) != 0 ? "probe" : "actual",
             static_cast<unsigned long long>(metadata.present),
             route_name(metadata.flags), backend_name(metadata.flags),
             projection_name(metadata.pixel_projection), metadata.eye,
             static_cast<unsigned long long>(metadata.pair_id),
             metadata.generation, metadata.authority_route,
+            metadata.producer_authority_route,
+            projection_name(metadata.producer_pixel_projection),
+            metadata.producer_eye,
+            static_cast<unsigned long long>(metadata.producer_pair_id),
+            metadata.producer_generation,
+            metadata.fresh_authority_route,
+            metadata.fresh_eye,
+            static_cast<unsigned long long>(metadata.fresh_pair_id),
+            metadata.fresh_selected_distance,
+            metadata.fresh_separation_margin,
             metadata.variant_index, metadata.flags,
             visibility_diagnosis_name(diagnosis), row.gpu_ready ? 1u : 0u,
             row.sample.thread_id,
@@ -475,9 +527,13 @@ bool dump_last_seconds(
             metadata.camera_position[0], metadata.camera_position[1],
             metadata.camera_position[2],
             metadata.clip_matrix[0], metadata.clip_matrix[1],
+            metadata.clip_matrix[2], metadata.clip_matrix[3],
             metadata.clip_matrix[4], metadata.clip_matrix[5],
+            metadata.clip_matrix[6], metadata.clip_matrix[7],
             metadata.clip_matrix[8], metadata.clip_matrix[9],
+            metadata.clip_matrix[10], metadata.clip_matrix[11],
             metadata.clip_matrix[12], metadata.clip_matrix[13],
+            metadata.clip_matrix[14], metadata.clip_matrix[15],
             static_cast<unsigned long long>(counters.input_primitives),
             static_cast<unsigned long long>(counters.vertex_invocations),
             static_cast<unsigned long long>(counters.geometry_invocations),
