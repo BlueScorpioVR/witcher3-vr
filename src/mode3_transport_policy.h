@@ -63,37 +63,35 @@ constexpr uint32_t select_swapchain_dimension(
     return requested < maximum ? requested : maximum;
 }
 
-// A centered symmetric camera must contain the union of the two displaced
-// runtime-eye frusta. This is fixed producer geometry, not Presentation Size:
-// the latter is applied exactly once by decide_final_submit(). The runtime
-// cover fraction is bounded identically to its calibrated source so malformed
-// or unavailable geometry cannot expand the producer beyond 2x.
-constexpr float symmetric_producer_envelope_scale(
-    float runtime_cover_fraction) noexcept {
+// A centered symmetric camera starts from the union of the two displaced
+// runtime-eye frusta, then applies the same tangent-space Presentation Size as
+// a native asymmetric producer. The completed pixels therefore already own
+// the exact FOV submitted to OpenXR: no crop, remap or second final scale.
+constexpr float symmetric_producer_fov_scale(
+    float runtime_cover_fraction,
+    float requested_scale) noexcept {
     const float cover = runtime_cover_fraction < 0.5f
         ? 0.5f
         : (runtime_cover_fraction > 1.0f
             ? 1.0f
             : runtime_cover_fraction);
-    return 1.0f / cover;
+    const float scale = requested_scale < 0.01f
+        ? 0.01f : (requested_scale > 1.0f ? 1.0f : requested_scale);
+    return scale / cover;
 }
 
 // Route, backend and projection encoding are deliberately absent. Once the
 // completed eye pair is selected, every non-panel Mode-3 route uses this same
-// full-image handoff. Presentation Size is a direct final angular scale: 1.0
-// preserves the source-owned FOV exactly and lower values reduce it without
-// inheriting the removed V985/V986 crop/eye-shift compensation.
+// full-image handoff. Presentation Size already belongs to the producer FOV,
+// so final submit forwards that exact source-owned geometry at scale 1.
 constexpr FinalSubmitDecision decide_final_submit(
-    const FinalSubmitInput& input,
-    float requested_scale) noexcept {
+    const FinalSubmitInput& input) noexcept {
     if (!input.active) return {};
-    const float scale = requested_scale < 0.01f
-        ? 0.01f : (requested_scale > 1.0f ? 1.0f : requested_scale);
     FinalSubmitDecision result{
         FinalTransport::Unavailable,
         input.swapchain_width,
         input.swapchain_height,
-        scale};
+        1.0f};
     if (!input.source_pair_ready || input.source_width == 0 ||
         input.source_height == 0 ||
         input.source_width != input.swapchain_width ||

@@ -29,7 +29,7 @@ int main() {
     using w3vr::mode3_transport::submitted_hud_join_route_active;
     using w3vr::mode3_transport::submitted_hud_join_window_matches;
     using w3vr::mode3_transport::strict_stereo_retained_hud_pair_fresh;
-    using w3vr::mode3_transport::symmetric_producer_envelope_scale;
+    using w3vr::mode3_transport::symmetric_producer_fov_scale;
 
     // The public owner is intentionally narrow. Only Mode-3 OpenXR DLSS can
     // enter it. Projection is not an input, so AER and strict Stereo receive
@@ -96,24 +96,16 @@ int main() {
         TemporalAdapter::None);
 
     const auto final_submit = decide_final_submit({
-        true, true, 3072, 3264, 3072, 3264, true, true},
-        0.8f);
+        true, true, 3072, 3264, 3072, 3264, true, true});
     assert(final_submit.transport == FinalTransport::DirectCopy);
     assert(final_submit.width == 3072 && final_submit.height == 3264);
-    assert(final_submit.fov_scale == 0.8f);
+    assert(final_submit.fov_scale == 1.0f);
     const auto identity_submit = decide_final_submit({
-        true, true, 3072, 3264, 3072, 3264, true, true},
-        1.0f);
+        true, true, 3072, 3264, 3072, 3264, true, true});
     assert(identity_submit.transport == FinalTransport::DirectCopy);
     assert(identity_submit.fov_scale == 1.0f);
     assert(decide_final_submit({
-        true, true, 3072, 3264, 3072, 3264, true, true}, 1.5f)
-        .fov_scale == 1.0f);
-    assert(decide_final_submit({
-        true, true, 3072, 3264, 3072, 3264, true, true}, 0.0f)
-        .fov_scale == 0.01f);
-    assert(decide_final_submit({
-        true, true, 2458, 2611, 3072, 3264, true, true}, 0.8f)
+        true, true, 2458, 2611, 3072, 3264, true, true})
         .transport == FinalTransport::Unavailable);
 
     // Mode 3 presents the complete selected-resolution image into a matching
@@ -131,16 +123,20 @@ int main() {
     assert(select_swapchain_dimension(
         true, 20000, 3072, 20000, 16384) == 16384);
 
-    // Symmetric producer geometry covers both displaced runtime eyes and is
-    // independent of Presentation Size. The final-submit tests above own the
-    // only user scale. The calibrated Quest 3 cover is about 0.804821.
+    // Symmetric producer geometry covers both displaced runtime eyes and then
+    // applies Presentation Size once. Final submit forwards the result at
+    // identity. The calibrated Quest 3 cover is about 0.804821.
     const float symmetric_envelope =
-        symmetric_producer_envelope_scale(0.804821f);
+        symmetric_producer_fov_scale(0.804821f, 1.0f);
     assert(symmetric_envelope > 1.24250f);
     assert(symmetric_envelope < 1.24253f);
-    assert(symmetric_producer_envelope_scale(1.0f) == 1.0f);
-    assert(symmetric_producer_envelope_scale(0.0f) == 2.0f);
-    assert(symmetric_producer_envelope_scale(2.0f) == 1.0f);
+    const float symmetric_at_point_eight =
+        symmetric_producer_fov_scale(0.804821f, 0.8f);
+    assert(symmetric_at_point_eight > 0.99400f);
+    assert(symmetric_at_point_eight < 0.99402f);
+    assert(symmetric_producer_fov_scale(1.0f, 1.0f) == 1.0f);
+    assert(symmetric_producer_fov_scale(0.0f, 1.0f) == 2.0f);
+    assert(symmetric_producer_fov_scale(2.0f, 1.0f) == 1.0f);
 
     // An exact command-list publication must be observable on either queue.
     assert(submission_queue_eligible(true, true));

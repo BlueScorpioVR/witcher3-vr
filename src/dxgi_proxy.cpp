@@ -1543,8 +1543,8 @@ float runtime_presentation_cover_fraction(UINT source_width = 0) {
 float presentation_render_fov_scale() {
     const float cover_fraction = runtime_presentation_cover_fraction();
     if (mode3_stereo_transport_active()) {
-        return w3vr::mode3_transport::symmetric_producer_envelope_scale(
-            cover_fraction);
+        return w3vr::mode3_transport::symmetric_producer_fov_scale(
+            cover_fraction, g_config.presentation_scale);
     }
     return std::clamp(
         g_config.presentation_scale / cover_fraction, 0.01f, 2.0f);
@@ -1626,9 +1626,8 @@ bool derive_pixel_exact_fov(
 // unavailable, conservatively cover the complete rectangular runtime FOV.
 PresentationProjectionScales presentation_projection_scales(
     float left, float right, float down, float up) {
-    const float selected_scale = mode3_stereo_transport_active()
-        ? 1.0f
-        : std::clamp(g_config.presentation_scale, 0.01f, 1.0f);
+    const float selected_scale = std::clamp(
+        g_config.presentation_scale, 0.01f, 1.0f);
     const float horizontal_span = right - left;
     const float vertical_span = up - down;
     if (g_config.fullscreen_projection &&
@@ -2619,13 +2618,18 @@ bool initialize_native_asymmetric_pair(uint64_t pair_id) {
         g_xr_views.size() < 2 || pair_id == 0 || pair_id == UINT64_MAX) {
         return false;
     }
-    // Freeze the raw runtime FOV into the native producer. Presentation Size
-    // is applied only after the completed source pair has been selected.
+    // Freeze the exact tangent-scaled runtime FOV into the native producer.
+    // Final submit forwards this same source-owned geometry without a second
+    // scale, so rendered pixels and submitted rays remain reciprocal-exact.
+    const float presentation_scale = std::clamp(
+        g_config.presentation_scale, 0.01f, 1.0f);
     std::array<XrFovf, 2> presentation_fovs{};
     for (uint32_t eye = 0; eye < 2; ++eye) {
         w3vr::openxr_eye_geometry::AsymmetricProjectionDescriptor descriptor{};
-        presentation_fovs[eye] = g_xr_views[eye].fov;
-        if (!w3vr::openxr_eye_geometry::
+        if (!w3vr::openxr_eye_geometry::scale_asymmetric_projection_fov(
+                g_xr_views[eye].fov, presentation_scale,
+                presentation_fovs[eye]) ||
+            !w3vr::openxr_eye_geometry::
                 derive_asymmetric_projection_descriptor(
                     presentation_fovs[eye], 1, 1, descriptor)) {
             return false;
@@ -38657,7 +38661,7 @@ void ensure_initialized() {
             log_line(
                 "V1310 route flight recorder=ini_opt_in default_off f3_dump=15s renderdoc_f3_preserved=1 qpc=present_only gpu_readback=0 descriptor_scan=0 text_hotpath=0");
             log_line(
-                "V1327 Mode3 final submit=one_full_source_path symmetric_producer=runtime_envelope presentation_scale=direct_unit_anchored_final_fov image_rect=full crop=0 fit=0 shift=0");
+                "V1328 Mode3 FOV=producer_owned base_times_presentation_scale final_submit=exact_source_fov image_rect=full crop=0 remap=0 fit=0 shift=0");
             log_line(
                 "V1279 DLSS compatibility=public_streamline_aer_private_history_ngx_stereo legacy_module_agnostic_discovery=disabled_by_V1288");
             log_line(
@@ -44982,8 +44986,7 @@ void render_openxr_test_frame(
                             swapchain.width,
                             swapchain.height,
                             full_source_copy_compatible,
-                            identity_shader_ready},
-                            requested_scale);
+                            identity_shader_ready});
                     mode3_unified_direct_copy = decision.transport ==
                         w3vr::mode3_transport::FinalTransport::DirectCopy;
                     mode3_unified_identity_shader = decision.transport ==
@@ -45026,11 +45029,12 @@ void render_openxr_test_frame(
                             1, std::memory_order_relaxed);
                         if (log_index < 16) {
                             log_line(
-                                "V1323 final Mode3 OpenXR submit sample=%u "
+                                "V1328 final Mode3 OpenXR submit sample=%u "
                                 "route=%s backend=%s dlaa=%u projection=%s "
                                 "source=%ux%u swapchain=%ux%u rect=0,0 %ux%u "
                                 "transport=%s crop=0 fit=0 shift=0 "
-                                "producer_fov_scale=1 final_xr_fov_scale=%.6f",
+                                "presentation_scale=%.6f "
+                                "final_fov_passthrough=%.6f",
                                 log_index,
                                 mode3_aer_presentation_active()
                                     ? "aer" : "stereo",
@@ -45046,6 +45050,7 @@ void render_openxr_test_frame(
                                     ? "direct"
                                     : (mode3_unified_identity_shader
                                         ? "identity_shader" : "black"),
+                                requested_scale,
                                 mode3_final_fov_scale);
                         }
                     }
