@@ -24,6 +24,7 @@ int main() {
     using w3vr::mode3_transport::late_hud_composite_source_ready;
     using w3vr::mode3_transport::native_hud_source_bootstrap_active;
     using w3vr::mode3_transport::real_smoke_variant_bootstrap_allowed;
+    using w3vr::mode3_transport::select_swapchain_dimension;
     using w3vr::mode3_transport::submission_queue_eligible;
     using w3vr::mode3_transport::streamline_dlss_evaluate_callback_active;
     using w3vr::mode3_transport::submitted_hud_join_route_active;
@@ -104,6 +105,21 @@ int main() {
     assert(decide_final_submit({
         true, true, 2458, 2611, 3072, 3264, true, true}, 0.8f, 0.8f)
         .transport == FinalTransport::Unavailable);
+
+    // Mode 3 presents the complete selected-resolution image into a matching
+    // OpenXR destination. The runtime recommendation must not silently enlarge
+    // that destination, because an extent mismatch cannot be fixed without a
+    // crop, stretch or padded bands at final submit.
+    assert(select_swapchain_dimension(
+        true, 2496, 3072, 2496, 16384) == 2496);
+    assert(select_swapchain_dimension(
+        true, 2592, 3264, 2592, 16384) == 2592);
+    assert(select_swapchain_dimension(
+        true, 3072, 3072, 3072, 16384) == 3072);
+    assert(select_swapchain_dimension(
+        false, 2496, 3072, 3900, 16384) == 3900);
+    assert(select_swapchain_dimension(
+        true, 20000, 3072, 20000, 16384) == 16384);
 
     // An exact command-list publication must be observable on either queue.
     assert(submission_queue_eligible(true, true));

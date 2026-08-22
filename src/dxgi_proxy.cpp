@@ -40209,10 +40209,10 @@ bool create_openxr_swapchains() {
         ? requested_height
         : scaled_height;
     const bool mode3_fixed_resolution = mode3_stereo_transport_active();
-    // [FIX:MODE3-FIXED-RESOLUTION-PRESENTATION V1296 1/3] Every Mode-3
-    // backend already produced the selected-resolution eye texture. Never
-    // divide swapchain extent by Presentation Size; the slider is only an
-    // angular zoom-out control for AER/Stereo No AA, TAAU and DLSS.
+    // Every Mode-3 backend already produced the selected-resolution eye
+    // texture. Presentation Size remains an angular OpenXR correction only;
+    // the swapchain takes the exact full-frame producer extent so final submit
+    // is an identity handoff with no crop, stretch or padding.
     const uint32_t presentation_width = mode3_fixed_resolution
         ? source_width
         : static_cast<uint32_t>(ceilf(
@@ -40221,10 +40221,12 @@ bool create_openxr_swapchains() {
         ? source_height
         : static_cast<uint32_t>(ceilf(
             static_cast<float>(source_height) / presentation_scale));
-    swapchain.width = std::min(
-        std::max(scaled_width, presentation_width), config.maxImageRectWidth);
-    swapchain.height = std::min(
-        std::max(scaled_height, presentation_height), config.maxImageRectHeight);
+    swapchain.width = w3vr::mode3_transport::select_swapchain_dimension(
+        mode3_fixed_resolution, source_width, scaled_width,
+        presentation_width, config.maxImageRectWidth);
+    swapchain.height = w3vr::mode3_transport::select_swapchain_dimension(
+        mode3_fixed_resolution, source_height, scaled_height,
+        presentation_height, config.maxImageRectHeight);
     swapchain.format = selected_format;
     swapchain.stereo_array = true;
 

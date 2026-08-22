@@ -47,6 +47,22 @@ struct FinalSubmitDecision {
     float fov_scale{1.0f};
 };
 
+// A Mode-3 producer already owns the selected full-frame resolution. Give
+// OpenXR that exact destination extent so the final handoff remains an
+// identity operation: no crop, stretch, padding or presentation-scale resize.
+// Legacy modes retain their existing runtime/presentation extent selection.
+constexpr uint32_t select_swapchain_dimension(
+    bool mode3_transport,
+    uint32_t selected_source,
+    uint32_t scaled_runtime,
+    uint32_t presentation,
+    uint32_t maximum) noexcept {
+    const uint32_t requested = mode3_transport
+        ? selected_source
+        : (scaled_runtime > presentation ? scaled_runtime : presentation);
+    return requested < maximum ? requested : maximum;
+}
+
 // Route, backend and projection encoding are deliberately absent. Once the
 // completed eye pair is selected, every non-panel Mode-3 route uses this same
 // full-image handoff and cover-normalized final FOV correction.
