@@ -24,6 +24,10 @@ set(required_fragments
     "native_asymmetric_source_views_valid"
     "mode3_common_afw_sequenced_available"
     "stereo_cached &&"
+    "bool apply_puredark_afw_native_projection_pair("
+    "aer_reference_views, routed_eye, captured.camera,"
+    "recovered = apply_puredark_afw_native_projection_pair("
+    "exact_render_views, eye, recovered_camera.camera,"
 )
 
 foreach(fragment IN LISTS required_fragments)
@@ -44,7 +48,8 @@ endif()
 
 foreach(forbidden_fragment IN ITEMS
         "pair_centered_afw_camera_with_centered_fov"
-        "fov_has_off_axis_center")
+        "fov_has_off_axis_center"
+        "final_source_already_compensated")
     string(FIND "${dxgi_proxy}" "${forbidden_fragment}" position)
     if(NOT position EQUAL -1)
         message(FATAL_ERROR
@@ -59,6 +64,29 @@ string(FIND "${dxgi_proxy}"
 if(capture_begin EQUAL -1 OR capture_end EQUAL -1 OR
         NOT capture_begin LESS capture_end)
     message(FATAL_ERROR "Could not isolate the direct AFW camera capture")
+endif()
+
+string(FIND "${dxgi_proxy}"
+    "bool capture_puredark_afw_mode3_taau_inputs(" taau_capture_begin)
+string(FIND "${dxgi_proxy}"
+    "HMODULE module_owning_address(" taau_capture_end)
+if(taau_capture_begin EQUAL -1 OR taau_capture_end EQUAL -1 OR
+        NOT taau_capture_begin LESS taau_capture_end)
+    message(FATAL_ERROR "Could not isolate the TAAU AFW camera capture")
+endif()
+math(EXPR taau_capture_length
+    "${taau_capture_end} - ${taau_capture_begin}")
+string(SUBSTRING "${dxgi_proxy}" ${taau_capture_begin}
+    ${taau_capture_length} taau_capture_body)
+string(FIND "${taau_capture_body}"
+    "pixel_projection ==\n            w3vr::mode3_transport::AfwPixelProjection::NativeAsymmetric"
+    taau_native_gate)
+string(FIND "${taau_capture_body}"
+    "apply_puredark_afw_native_projection_pair(" taau_absolute_projection)
+if(taau_native_gate EQUAL -1 OR taau_absolute_projection EQUAL -1 OR
+        NOT taau_native_gate LESS taau_absolute_projection)
+    message(FATAL_ERROR
+        "Native TAAU AFW must apply the frozen absolute projection pair")
 endif()
 math(EXPR capture_length "${capture_end} - ${capture_begin}")
 string(SUBSTRING "${dxgi_proxy}" ${capture_begin} ${capture_length}

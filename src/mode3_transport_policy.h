@@ -65,25 +65,26 @@ struct ProjectionPairDecision {
     bool native_asymmetric{};
 };
 
-// Strict Stereo must prepare every structurally enrolled transparent-effect
-// variant before F2 can request the native per-eye producer. Preparation is a
-// static route property; selecting a variant remains frame-dynamic and is
-// allowed only while the actual producer is native asymmetric. AER owns its
-// upstream projection and must never receive this supplementary transform.
-constexpr bool strict_stereo_asymmetric_effect_preparation_configured(
+// Every Mode-3 route must prepare the structurally enrolled transparent-effect
+// variants before F2 can request the native per-eye producer. Preparation is a
+// static route property. Selection is frame-dynamic and requires both an
+// actual native producer and a draw that has not already consumed the optical
+// centre. The same contract is used by strict Stereo and AER.
+constexpr bool native_asymmetric_effect_preparation_configured(
     bool trial_enabled,
     bool mode3,
     bool supported_backend,
-    bool hmd_freelook,
-    bool aer_presentation) noexcept {
-    return trial_enabled && mode3 && supported_backend && hmd_freelook &&
-        !aer_presentation;
+    bool hmd_freelook) noexcept {
+    return trial_enabled && mode3 && supported_backend && hmd_freelook;
 }
 
-constexpr bool strict_stereo_asymmetric_effect_application_active(
+constexpr bool native_asymmetric_effect_center_application_active(
     bool preparation_configured,
-    bool actual_native_asymmetric) noexcept {
-    return preparation_configured && actual_native_asymmetric;
+    bool actual_native_asymmetric,
+    bool cinema_panel,
+    bool full_vr_scene) noexcept {
+    return preparation_configured && actual_native_asymmetric &&
+        !cinema_panel && !full_vr_scene;
 }
 
 // Validate the producer-owned projection at the exact AFW transaction. Native

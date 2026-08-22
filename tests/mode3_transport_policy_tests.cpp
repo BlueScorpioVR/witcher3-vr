@@ -36,36 +36,34 @@ int main() {
     using w3vr::mode3_transport::mode3_symmetric_subimage_active;
     using w3vr::mode3_transport::submitted_hud_join_route_active;
     using w3vr::mode3_transport::submitted_hud_join_window_matches;
-    using w3vr::mode3_transport::strict_stereo_asymmetric_effect_application_active;
-    using w3vr::mode3_transport::strict_stereo_asymmetric_effect_preparation_configured;
+    using w3vr::mode3_transport::native_asymmetric_effect_center_application_active;
+    using w3vr::mode3_transport::native_asymmetric_effect_preparation_configured;
     using w3vr::mode3_transport::strict_stereo_retained_hud_pair_fresh;
     using w3vr::mode3_transport::symmetric_producer_fov_scale;
 
     // Effect variants and their functional metadata are prepared before F2,
-    // including a SYM startup. Draw substitution is still native-ASym-only;
-    // AER neither prepares nor applies the supplementary geometry shader.
-    const bool stereo_effect_preparation =
-        strict_stereo_asymmetric_effect_preparation_configured(
-            true, true, true, true, false);
-    assert(stereo_effect_preparation);
-    assert(!strict_stereo_asymmetric_effect_application_active(
-        stereo_effect_preparation, false));
-    assert(strict_stereo_asymmetric_effect_application_active(
-        stereo_effect_preparation, true));
-    const bool aer_effect_preparation =
-        strict_stereo_asymmetric_effect_preparation_configured(
-            true, true, true, true, true);
-    assert(!aer_effect_preparation);
-    assert(!strict_stereo_asymmetric_effect_application_active(
-        aer_effect_preparation, true));
-    assert(!strict_stereo_asymmetric_effect_preparation_configured(
-        false, true, true, true, false));
-    assert(!strict_stereo_asymmetric_effect_preparation_configured(
-        true, false, true, true, false));
-    assert(!strict_stereo_asymmetric_effect_preparation_configured(
-        true, true, false, true, false));
-    assert(!strict_stereo_asymmetric_effect_preparation_configured(
-        true, true, true, false, false));
+    // including a SYM startup, for both Stereo and AER. Draw substitution is
+    // native-ASym-only and is suppressed for Cinema panels and Full VR scenes.
+    const bool effect_preparation =
+        native_asymmetric_effect_preparation_configured(
+            true, true, true, true);
+    assert(effect_preparation);
+    assert(!native_asymmetric_effect_center_application_active(
+        effect_preparation, false, false, false));
+    assert(native_asymmetric_effect_center_application_active(
+        effect_preparation, true, false, false));
+    assert(!native_asymmetric_effect_center_application_active(
+        effect_preparation, true, true, false));
+    assert(!native_asymmetric_effect_center_application_active(
+        effect_preparation, true, false, true));
+    assert(!native_asymmetric_effect_preparation_configured(
+        false, true, true, true));
+    assert(!native_asymmetric_effect_preparation_configured(
+        true, false, true, true));
+    assert(!native_asymmetric_effect_preparation_configured(
+        true, true, false, true));
+    assert(!native_asymmetric_effect_preparation_configured(
+        true, true, true, false));
 
     // The public owner is intentionally narrow. Only Mode-3 OpenXR DLSS can
     // enter it. Projection is not an input, so AER and strict Stereo receive

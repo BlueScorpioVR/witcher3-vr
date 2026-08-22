@@ -29,13 +29,11 @@
 #include "shadow_cascade_authority_policy.h"
 #include "taau_submission_policy.h"
 
-// V1338 retains V1337's AER native preflight and V1336's validated
-// strict-Stereo transparent-effect fix, then makes the retained-HUD ring a
-// generation-drained command-list transaction across live F2 switches.
-// V1334's generation-atomic HUD lifecycle. It completes V1335's AER+AFW
-// pixel-projection ownership by preflighting the final source actually selected
-// for OpenXR: strict packed pairs and sequential AFW pairs can both establish
-// native ASYM. No symmetric full-height trial is present.
+// V1341 retains V1340's DLSS scene-boundary reset, V1339's validated native
+// AER AFW projection and V1338's strict-Stereo HUD generation drain. The
+// existing transparent-effect variants now follow the same actual-ASym draw
+// contract in Stereo and AER. SYM, Cinema panels and Full VR remain untouched.
+// No symmetric full-height trial is present.
 // V1299 applies the same gameplay/cinema/loading admission policy at both ends
 // of V1298's strict AER TAAU AFW camera FIFO. The producer had accidentally
 // inverted automatic Full VR, leaving normal gameplay with no raw cameras.
@@ -824,18 +822,6 @@ bool reverse_diagnostic_hooks_requested() {
 bool native_asymmetric_noaa_route_active();
 bool automatic_focus_projection_route_configured();
 
-// [FIX:AER-UPSTREAM-TRANSPARENT-CENTER-OWNER V1187 1/3] Strict Stereo keeps
-// the validated structural GS correction. Mode-3 AER already applies its
-// asymmetric projection through the alternating geometry producer, so the
-// supplementary GS would be a second center operation for every enrolled
-// transparent shader. This is a route policy, never a shader whitelist.
-bool automatic_focus_projection_route_active() {
-    return w3vr::mode3_transport::
-        strict_stereo_asymmetric_effect_application_active(
-            automatic_focus_projection_route_configured(),
-            native_stereo_runtime_enabled());
-}
-
 // The tiled-light correction is release behavior for the validated native
 // asymmetric No-AA route. It is deliberately independent of diagnostics.
 bool asymmetric_tiled_culling_fix_needed() {
@@ -860,9 +846,8 @@ bool focus_projection_shader_registry_enabled() {
 // metadata authority alive for the native asymmetric route even when the
 // launcher disables Diagnostic Logging. V1124 extends this authority to TAAU;
 // V1136 adds only sequential Stereo DLSS and still excludes Packed DLSS.
-bool real_smoke_center_fix_route_active() {
+bool real_smoke_center_fix_route_configured() {
     return g_config.openxr_enabled &&
-        native_stereo_runtime_enabled() &&
         g_config.openxr_mode == 3 &&
         (g_config.temporal_backend == TemporalBackend::None ||
             g_config.temporal_backend == TemporalBackend::Taau ||
@@ -881,7 +866,7 @@ bool real_smoke_world_up_binding_route_active() {
     // replacement consumes heap/root-table/CBV state independently from the
     // older V1065 off-axis centering correction. Keep that state for every
     // supported sequential Mode-3 backend, including symmetric No AA where
-    // real_smoke_center_fix_route_active() is intentionally false. Packed DLSS
+    // the optical-centre selector may be inactive. Packed DLSS
     // remains excluded exactly as in the historical smoke route.
     return real_smoke_world_up_route_active() &&
         (g_config.temporal_backend == TemporalBackend::None ||
@@ -2544,12 +2529,11 @@ bool automatic_focus_projection_route_configured() {
         g_config.temporal_backend == TemporalBackend::Taau ||
         g_config.temporal_backend == TemporalBackend::Dlss;
     return w3vr::mode3_transport::
-        strict_stereo_asymmetric_effect_preparation_configured(
+        native_asymmetric_effect_preparation_configured(
             kNativeAsymmetricNoAaTrialBuild,
             g_config.openxr_mode == 3,
             supported_backend,
-            g_config.hmd_freelook,
-            mode3_aer_presentation_active());
+            g_config.hmd_freelook);
 }
 
 // [FIX:CINEMA-EFFECT-CENTER-GUARD V1135] A normal Cinema presentation renders
@@ -2567,9 +2551,12 @@ bool native_asymmetric_cinema_panel_active() {
 bool native_asymmetric_full_vr_scene_active();
 
 bool native_asymmetric_transparent_center_route_active() {
-    return automatic_focus_projection_route_active() &&
-        !native_asymmetric_cinema_panel_active() &&
-        !native_asymmetric_full_vr_scene_active();
+    return w3vr::mode3_transport::
+        native_asymmetric_effect_center_application_active(
+            automatic_focus_projection_route_configured(),
+            native_stereo_runtime_enabled(),
+            native_asymmetric_cinema_panel_active(),
+            native_asymmetric_full_vr_scene_active());
 }
 
 NativeAsymmetricPairSlot* native_asymmetric_pair_slot(uint64_t pair_id) {
@@ -4817,6 +4804,14 @@ std::atomic<uint8_t> g_stereo_taau_history_reset_mask{};
 std::atomic<uint32_t> g_mode3_projection_reset_generation{};
 std::atomic<uint8_t> g_mode3_taau_projection_reset_mask{};
 std::atomic<uint8_t> g_mode3_dlss_projection_reset_mask{};
+// Loading/Cinema boundaries do not necessarily change the producer
+// generation. Keep their DLSS reset transaction separate from the F2 reset
+// and bind it to the first exact post-boundary pair.
+std::atomic<bool> g_mode3_dlss_scene_reset_requested{};
+std::atomic<uint32_t> g_mode3_dlss_scene_reset_generation{};
+std::atomic<uint64_t> g_mode3_dlss_scene_reset_pair_floor{};
+std::atomic<uint64_t> g_mode3_dlss_scene_reset_pair_ceiling{};
+std::atomic<uint8_t> g_mode3_dlss_scene_reset_mask{};
 // Loading can leave a delayed pre-boundary TAAU command list in flight. Keep a
 // separate reset request pending until each eye sees a strictly newer pair.
 std::atomic<uint8_t> g_loading_taau_history_reset_mask{};
@@ -9054,6 +9049,58 @@ bool prepare_streamline_dlss_callback_constants(
     return false;
 }
 
+// [FIX:AER-AFW-NATIVE-ABSOLUTE-PROJECTION V1339 1/4] Full-frame native pixels
+// and AFW must use the same two frozen tangent spaces. Streamline exposes a
+// centered source matrix at this boundary; apply the real eye's absolute
+// center first, then derive the peer from that corrected source. This is camera
+// metadata only: no color resize, crop, shader or additional image pass.
+bool apply_puredark_afw_native_projection_pair(
+    const std::array<XrView, 2>& render_views,
+    uint32_t source_eye,
+    w3vr::puredark_afw::CameraData& camera,
+    w3vr::openxr_eye_geometry::AsymmetricProjectionDescriptor&
+        source_projection,
+    w3vr::openxr_eye_geometry::AsymmetricProjectionDescriptor&
+        destination_projection,
+    std::wstring& error) {
+    if (source_eye > 1) {
+        error = L"AFW native source eye is invalid";
+        return false;
+    }
+    const uint32_t destination_eye = 1u - source_eye;
+    if (!w3vr::openxr_eye_geometry::derive_asymmetric_projection_descriptor(
+            render_views[source_eye].fov, 1, 1, source_projection) ||
+        !w3vr::openxr_eye_geometry::derive_asymmetric_projection_descriptor(
+            render_views[destination_eye].fov, 1, 1,
+            destination_projection) ||
+        !w3vr::puredark_afw::apply_source_eye_projection_center(
+            {
+                source_projection.horizontal_tangent_span,
+                source_projection.vertical_tangent_span,
+                source_projection.center_ndc_x,
+                source_projection.center_ndc_y},
+            camera, error) ||
+        !w3vr::puredark_afw::retarget_destination_eye_projection(
+            {
+                source_projection.horizontal_tangent_span,
+                source_projection.vertical_tangent_span,
+                source_projection.center_ndc_x,
+                source_projection.center_ndc_y},
+            {
+                destination_projection.horizontal_tangent_span,
+                destination_projection.vertical_tangent_span,
+                destination_projection.center_ndc_x,
+                destination_projection.center_ndc_y},
+            camera, error)) {
+        if (error.empty()) {
+            error = L"AFW native pair projection is invalid";
+        }
+        return false;
+    }
+    error.clear();
+    return true;
+}
+
 void capture_puredark_afw_camera(
     const void* constants,
     uint32_t routed_eye) {
@@ -9102,8 +9149,6 @@ void capture_puredark_afw_camera(
     if (puredark_afw_mode3_aer_dlss_route_configured() &&
         projection_authority.encoding ==
             w3vr::mode3_transport::AfwPixelProjection::NativeAsymmetric) {
-        const bool final_source_already_compensated =
-            puredark_afw_mode3_aer_dlss_final_source_active();
         const uint32_t destination_eye = 1u - routed_eye;
         const XrFovf source_fov = projection_authority.fovs[routed_eye];
         const XrFovf destination_fov =
@@ -9128,30 +9173,10 @@ void capture_puredark_afw_camera(
         w3vr::openxr_eye_geometry::AsymmetricProjectionDescriptor
             destination_projection{};
         const bool raw_asymmetric_projection_valid =
-            final_source_already_compensated ||
-            (w3vr::openxr_eye_geometry::derive_asymmetric_projection_descriptor(
-                    source_fov, 1, 1, source_projection) &&
-                w3vr::openxr_eye_geometry::derive_asymmetric_projection_descriptor(
-                    destination_fov, 1, 1, destination_projection) &&
-                w3vr::puredark_afw::apply_source_eye_projection_center(
-                    {
-                        source_projection.horizontal_tangent_span,
-                        source_projection.vertical_tangent_span,
-                        source_projection.center_ndc_x,
-                        source_projection.center_ndc_y},
-                    captured.camera, error) &&
-                w3vr::puredark_afw::retarget_destination_eye_projection(
-                    {
-                        source_projection.horizontal_tangent_span,
-                        source_projection.vertical_tangent_span,
-                        source_projection.center_ndc_x,
-                        source_projection.center_ndc_y},
-                    {
-                        destination_projection.horizontal_tangent_span,
-                        destination_projection.vertical_tangent_span,
-                        destination_projection.center_ndc_x,
-                        destination_projection.center_ndc_y},
-                    captured.camera, error));
+            aer_reference_views_valid &&
+            apply_puredark_afw_native_projection_pair(
+                aer_reference_views, routed_eye, captured.camera,
+                source_projection, destination_projection, error);
         if (!aer_reference_views_valid ||
             !raw_asymmetric_projection_valid) {
             log_puredark_afw_failure(
@@ -9163,47 +9188,19 @@ void capture_puredark_afw_camera(
         if (g_config.runtime_diagnostics) {
             static std::atomic<uint32_t> projection_logs{};
             if (take_bounded_log_slot(projection_logs, 32)) {
-                if (final_source_already_compensated) {
-                    // [FIX:PUREDARK-AFW-FINAL-SOURCE-CENTERED-CAMERA V1159
-                    // 1/1] The validated sequential final source has already
-                    // converted native off-axis pixels into its presentation
-                    // convention. Keep Streamline's centered source and peer
-                    // projections; applying V12081's raw packed centers here
-                    // would compensate the generated eye a second time.
-                    log_line(
-                        "V1159 AFW compensated final camera pair=%llu source_eye=%u destination_eye=%u source_matrix=%.9g,%.9g destination_matrix=%.9g,%.9g baseline=%.9g authority=final_backbuffer_centered_projection",
-                        static_cast<unsigned long long>(route_tag.pair_id),
-                        routed_eye, destination_eye,
-                        captured.camera.source_view_to_clip.values[8],
-                        captured.camera.source_view_to_clip.values[9],
-                        captured.camera.destination_view_to_clip.values[8],
-                        captured.camera.destination_view_to_clip.values[9],
-                        baseline);
-                } else {
-                    log_line(
-                        "V12081 AFW absolute asymmetric camera pair=%llu source_eye=%u destination_eye=%u source_center=%.9g,%.9g source_matrix=%.9g,%.9g destination_center=%.9g,%.9g destination_matrix=%.9g,%.9g source_span=%.9g,%.9g destination_span=%.9g,%.9g source_position=%.9g,%.9g,%.9g destination_position=%.9g,%.9g,%.9g baseline=%.9g authority=route_source_recentered_peer",
-                        static_cast<unsigned long long>(route_tag.pair_id),
-                        routed_eye, destination_eye,
-                        source_projection.center_ndc_x,
-                        source_projection.center_ndc_y,
-                        captured.camera.source_view_to_clip.values[8],
-                        captured.camera.source_view_to_clip.values[9],
-                        destination_projection.center_ndc_x,
-                        destination_projection.center_ndc_y,
-                        captured.camera.destination_view_to_clip.values[8],
-                        captured.camera.destination_view_to_clip.values[9],
-                        source_projection.horizontal_tangent_span,
-                        source_projection.vertical_tangent_span,
-                        destination_projection.horizontal_tangent_span,
-                        destination_projection.vertical_tangent_span,
-                        captured.camera.source_view_to_world.values[12],
-                        captured.camera.source_view_to_world.values[13],
-                        captured.camera.source_view_to_world.values[14],
-                        captured.camera.destination_view_to_world.values[12],
-                        captured.camera.destination_view_to_world.values[13],
-                        captured.camera.destination_view_to_world.values[14],
-                        baseline);
-                }
+                log_line(
+                    "V1339 AFW DLSS native absolute camera pair=%llu source_eye=%u destination_eye=%u source_center=%.9g,%.9g source_matrix=%.9g,%.9g destination_center=%.9g,%.9g destination_matrix=%.9g,%.9g baseline=%.9g authority=full_frame_frozen_pair",
+                    static_cast<unsigned long long>(route_tag.pair_id),
+                    routed_eye, destination_eye,
+                    source_projection.center_ndc_x,
+                    source_projection.center_ndc_y,
+                    captured.camera.source_view_to_clip.values[8],
+                    captured.camera.source_view_to_clip.values[9],
+                    destination_projection.center_ndc_x,
+                    destination_projection.center_ndc_y,
+                    captured.camera.destination_view_to_clip.values[8],
+                    captured.camera.destination_view_to_clip.values[9],
+                    baseline);
             }
         }
     }
@@ -10044,10 +10041,42 @@ bool capture_puredark_afw_mode3_taau_inputs(
         baseline > 0.10f) {
         baseline = std::fabs(g_config.engine_factory_stereo_offset);
     }
-    const bool recovered = fifo_identity_valid && exact_render_views_valid &&
+    bool recovered = fifo_identity_valid && exact_render_views_valid &&
         w3vr::puredark_afw::build_camera_data_from_streamline(
             raw_camera.constants.data(), raw_camera.constants.size(), eye,
             baseline, recovered_camera.camera, recovery_error);
+    w3vr::openxr_eye_geometry::AsymmetricProjectionDescriptor
+        source_projection{};
+    w3vr::openxr_eye_geometry::AsymmetricProjectionDescriptor
+        destination_projection{};
+    if (recovered && pixel_projection ==
+            w3vr::mode3_transport::AfwPixelProjection::NativeAsymmetric) {
+        // [FIX:AER-AFW-NATIVE-ABSOLUTE-PROJECTION V1339 2/4] TAAU's strict
+        // raw-camera FIFO carries the same centered Streamline projection as
+        // DLSS. Its exact resolve join already owns both frozen native FOVs,
+        // so correct the evaluator camera before the immutable bundle is
+        // published. Symmetric producers remain byte-for-byte unchanged.
+        recovered = apply_puredark_afw_native_projection_pair(
+            exact_render_views, eye, recovered_camera.camera,
+            source_projection, destination_projection, recovery_error);
+        if (recovered && g_config.runtime_diagnostics) {
+            static std::atomic<uint32_t> projection_logs{};
+            if (take_bounded_log_slot(projection_logs, 32)) {
+                log_line(
+                    "V1339 AFW TAAU native absolute camera pair=%llu source_eye=%u destination_eye=%u source_center=%.9g,%.9g source_matrix=%.9g,%.9g destination_center=%.9g,%.9g destination_matrix=%.9g,%.9g baseline=%.9g authority=full_frame_frozen_pair",
+                    static_cast<unsigned long long>(pair_id), eye, 1u - eye,
+                    source_projection.center_ndc_x,
+                    source_projection.center_ndc_y,
+                    recovered_camera.camera.source_view_to_clip.values[8],
+                    recovered_camera.camera.source_view_to_clip.values[9],
+                    destination_projection.center_ndc_x,
+                    destination_projection.center_ndc_y,
+                    recovered_camera.camera.destination_view_to_clip.values[8],
+                    recovered_camera.camera.destination_view_to_clip.values[9],
+                    baseline);
+            }
+        }
+    }
     route_flight.set_previous(raw_camera.capture_present);
     route_flight.advance(
         4, (raw_available ? 0x02u : 0u) |
@@ -15512,10 +15541,10 @@ void create_focus_fire_horizontal_psos(
     const D3D12_GRAPHICS_PIPELINE_STATE_DESC* desc,
     ID3D12PipelineState* original,
     const PipelineInfo& info) {
-    // V1336 prepares the immutable variants while strict Stereo is configured,
-    // even when the current producer is SYM. Draw-time selection remains under
-    // automatic_focus_projection_route_active(), so SYM is never modified.
-    // AER owns the upstream projection and is excluded from preparation.
+    // V1341 prepares the immutable variants for both Mode-3 presentation
+    // routes, even when the current producer is SYM. Draw-time selection still
+    // requires a proven centered draw under the actual ASYM producer, so SYM
+    // and already-corrected inputs are never modified.
     if (!automatic_focus_projection_route_configured() ||
         device == nullptr || desc == nullptr || original == nullptr ||
         desc->GS.pShaderBytecode != nullptr ||
@@ -20807,31 +20836,18 @@ void STDMETHODCALLTYPE hook_draw_indexed_instanced(
         g_set_pipeline_state != nullptr &&
         g_set_graphics_root_descriptor_table != nullptr) {
         ID3D12PipelineState* variant_pipeline{};
-        // [FIX:TAAU-AFW-SMOKE-SINGLE-OWNER V1217 1/1] V1156 proved that a
-        // final-postprocessed native DLSS AER frame already owns its off-axis
-        // centre upstream, so this specialized draw applies only V1080's
-        // zero-centre world-up rotation. Native TAAU AFW now uses the same
-        // exact final-backbuffer/source-view contract. Applying the historical
-        // off-axis smoke variant there adds the centre a second time; its
-        // deferred eye resolver can also alternate, making the displaced
-        // duplicate move. Treat both final native temporal AER routes alike:
-        // upstream projection owns centring and this draw owns world-up only.
-        // Strict Stereo and native No-AA retain their existing selector plus
-        // V1157's immutable zero-centre fail-open fallback.
-        const bool final_native_temporal_aer =
-            (g_config.temporal_backend == TemporalBackend::Dlss &&
-                mode3_aer_final_present_source_active()) ||
-            (g_config.temporal_backend == TemporalBackend::Taau &&
-                native_stereo_runtime_enabled() &&
-                mode3_taau_afw_final_source_active());
-        const bool asymmetric_center =
-            real_smoke_center_fix_route_active() &&
-            !final_native_temporal_aer &&
-            !native_asymmetric_cinema_panel_active() &&
-            // [FIX:FULL-VR-TRANSPARENT-SINGLE-OWNER V1199 2/2] Preserve the
-            // zero-centre world-up PSO, but leave Full VR optical centring to
-            // its upstream asymmetric camera instead of applying it twice.
-            !native_asymmetric_full_vr_scene_active();
+        // V1341 replaces V1217's route-wide AER exclusion. That exclusion was
+        // tied to the old centered/cropped AFW contract; V1339 now presents a
+        // proven full-frame absolute native pair. Use the same actual-producer
+        // gate as the automatic transparent family and retain the exact
+        // command-list eye selector below. Missing eye authority still falls
+        // closed to V1157's immutable zero-centre world-up variant.
+        const bool asymmetric_center = w3vr::mode3_transport::
+            native_asymmetric_effect_center_application_active(
+                real_smoke_center_fix_route_configured(),
+                native_stereo_runtime_enabled(),
+                native_asymmetric_cinema_panel_active(),
+                native_asymmetric_full_vr_scene_active());
         bool variant_selected{};
         if (asymmetric_center) {
             variant_selected = select_real_smoke_offaxis_pipeline(
@@ -21223,6 +21239,70 @@ void service_mode3_hud_generation_drain() {
             g_present_count.load(std::memory_order_relaxed)));
 }
 
+void clear_mode3_dlss_scene_history_reset() {
+    g_mode3_dlss_scene_reset_requested.store(
+        false, std::memory_order_release);
+    g_mode3_dlss_scene_reset_generation.store(
+        0, std::memory_order_release);
+    g_mode3_dlss_scene_reset_pair_floor.store(
+        0, std::memory_order_release);
+    g_mode3_dlss_scene_reset_pair_ceiling.store(
+        0, std::memory_order_release);
+    g_mode3_dlss_scene_reset_mask.store(
+        0, std::memory_order_release);
+}
+
+void clear_mode3_dlss_engine_camera_history() {
+    // The native 0xB0 previous-camera record is upstream of Streamline. A
+    // reset pulse alone cannot repair an eye seeded from the preceding scene.
+    {
+        std::scoped_lock lock{g_engine_per_eye_temporal_camera_mutex};
+        g_engine_per_eye_temporal_camera_history = {};
+    }
+    g_full_vr_frame_camera_last_pair[0].store(
+        0, std::memory_order_release);
+    g_full_vr_frame_camera_last_pair[1].store(
+        0, std::memory_order_release);
+}
+
+void arm_mode3_dlss_scene_history_reset(
+    uint64_t present,
+    const char* reason) {
+    if (!mode3_stereo_transport_active() ||
+        !temporal_backend_is_dlss()) {
+        return;
+    }
+
+    // Native Full VR and the presentation detector can observe the same
+    // boundary a few Presents apart. Do not move an unconsumed reset forward.
+    if (g_mode3_dlss_scene_reset_requested.load(
+            std::memory_order_acquire) ||
+        g_mode3_dlss_scene_reset_mask.load(
+            std::memory_order_acquire) != 0) {
+        return;
+    }
+
+    const uint64_t pair_floor =
+        g_engine_pair_sequence.load(std::memory_order_acquire) + 1;
+    clear_mode3_dlss_engine_camera_history();
+    g_mode3_dlss_scene_reset_generation.store(
+        0, std::memory_order_release);
+    g_mode3_dlss_scene_reset_pair_floor.store(
+        pair_floor, std::memory_order_release);
+    g_mode3_dlss_scene_reset_pair_ceiling.store(
+        0, std::memory_order_release);
+    g_mode3_dlss_scene_reset_mask.store(
+        0, std::memory_order_release);
+    g_mode3_dlss_scene_reset_requested.store(
+        true, std::memory_order_release);
+    log_line(
+        "V1340 DLSS scene history reset armed reason=%s present=%llu "
+        "pair_floor=%llu",
+        reason != nullptr ? reason : "unknown",
+        static_cast<unsigned long long>(present),
+        static_cast<unsigned long long>(pair_floor));
+}
+
 void reset_loading_video_presentation_state(uint64_t present) {
     // [FIX:POST-LOADING-INIT-TRANSACTION 2/8] Loading video is a hard content
     // boundary. Mono HUD replays and completed Mode-3 pairs belong to the
@@ -21235,6 +21315,10 @@ void reset_loading_video_presentation_state(uint64_t present) {
         g_engine_pair_sequence.load(std::memory_order_acquire) + 1;
     g_loading_video_scene_pair_floor.store(
         pair_floor, std::memory_order_release);
+    clear_mode3_dlss_scene_history_reset();
+    if (temporal_backend_is_dlss()) {
+        clear_mode3_dlss_engine_camera_history();
+    }
 
     g_mono_hud_outputs_valid.store(false, std::memory_order_release);
     g_streamline_capture_latest_slot[0].store(
@@ -33147,9 +33231,11 @@ void __fastcall hook_engine_view_rebuild(float* view) {
         const bool native_camera_changed = automatic_full_vr_cutscene &&
             previous_native_camera != 0 && current_native_camera != 0 &&
             previous_native_camera != current_native_camera;
+        const bool full_vr_camera_boundary =
+            previous_full_vr != automatic_full_vr_cutscene ||
+            native_camera_changed;
         if (taau_stereo_route_active() &&
-            (previous_full_vr != automatic_full_vr_cutscene ||
-                native_camera_changed)) {
+            full_vr_camera_boundary) {
             g_full_vr_frame_camera_last_pair[0].store(
                 0, std::memory_order_release);
             g_full_vr_frame_camera_last_pair[1].store(
@@ -33167,6 +33253,15 @@ void __fastcall hook_engine_view_rebuild(float* view) {
                 native_camera_changed ? "native_camera_change" :
                     (automatic_full_vr_cutscene ? "full_vr_entry" :
                         "full_vr_exit"));
+        }
+        if (dlss_sequential_mode_active() &&
+            full_vr_camera_boundary) {
+            arm_mode3_dlss_scene_history_reset(
+                present,
+                native_camera_changed ? "full_vr_camera_change" :
+                    (automatic_full_vr_cutscene
+                        ? "full_vr_entry"
+                        : "full_vr_exit"));
         }
     }
     const bool hmd_scene_camera = !native_loading_video &&
@@ -35027,6 +35122,7 @@ void __fastcall hook_engine_is_loading_screen_video_playing(
             0, std::memory_order_release);
     } else if (!active && previous) {
         arm_post_loading_taau_history_reset(present);
+        arm_mode3_dlss_scene_history_reset(present, "post_loading");
         g_post_loading_auto_recenter_deadline_ms.store(
             GetTickCount64() + kPostLoadingAutoRecenterDelayMs,
             std::memory_order_release);
@@ -35116,8 +35212,10 @@ bool poll_engine_loading_screen_video_state() {
         g_post_loading_auto_recenter_deadline_ms.store(
             0, std::memory_order_release);
     } else if (!active && previous) {
-        arm_post_loading_taau_history_reset(
-            g_present_count.load(std::memory_order_relaxed));
+        const uint64_t present =
+            g_present_count.load(std::memory_order_relaxed);
+        arm_post_loading_taau_history_reset(present);
+        arm_mode3_dlss_scene_history_reset(present, "post_loading_poll");
         g_post_loading_auto_recenter_deadline_ms.store(
             GetTickCount64() + kPostLoadingAutoRecenterDelayMs,
             std::memory_order_release);
@@ -36219,6 +36317,11 @@ void apply_engine_dual_render_transition(
             false, std::memory_order_release);
         g_automatic_full_vr_native_camera.store(0, std::memory_order_release);
     }
+    if (force_generation_reset) {
+        // F2 owns the new generation and its existing projection-reset pulse;
+        // do not carry an older scene-boundary transaction across it.
+        clear_mode3_dlss_scene_history_reset();
+    }
     g_mode3_projection_reset_generation.store(
         force_generation_reset ? generation : 0,
         std::memory_order_release);
@@ -36976,34 +37079,96 @@ void __fastcall hook_sl_set_constants(void* constants, uint32_t frame_token, uin
     const uint32_t source_viewport = viewport;
     if (constants != nullptr && eye <= 1 &&
         mode3_stereo_transport_active()) {
-        const uint32_t reset_generation =
-            g_mode3_projection_reset_generation.load(
-                std::memory_order_acquire);
+        const uint8_t eye_mask = static_cast<uint8_t>(1u << eye);
         EngineFrameTag reset_tag{};
-        if (reset_generation != 0 &&
-            current_puredark_afw_direct_route_tag(eye, reset_tag) &&
-            reset_tag.generation == reset_generation) {
-            const uint8_t eye_mask = static_cast<uint8_t>(1u << eye);
-            uint8_t pending_reset =
-                g_mode3_dlss_projection_reset_mask.load(
-                    std::memory_order_acquire);
-            bool claimed_reset{};
+        const bool reset_tag_valid =
+            current_puredark_afw_direct_route_tag(eye, reset_tag);
+        auto claim_eye_reset = [eye_mask](
+            std::atomic<uint8_t>& reset_mask) {
+            uint8_t pending_reset = reset_mask.load(
+                std::memory_order_acquire);
             while ((pending_reset & eye_mask) != 0) {
                 const uint8_t remaining = static_cast<uint8_t>(
                     pending_reset & static_cast<uint8_t>(~eye_mask));
-                if (g_mode3_dlss_projection_reset_mask.compare_exchange_weak(
+                if (reset_mask.compare_exchange_weak(
                         pending_reset, remaining,
                         std::memory_order_acq_rel,
                         std::memory_order_acquire)) {
-                    claimed_reset = true;
-                    break;
+                    return true;
                 }
             }
-            if (claimed_reset) {
-                // Streamline 1.5 sl::Constants::reset. This mutation occurs
-                // before both the callback cache and the original API call,
-                // so the exact new-generation evaluation sees one pulse.
-                static_cast<uint8_t*>(constants)[0x19F] = 1;
+            return false;
+        };
+
+        // A loading exit can be observed before strict Stereo auto-start bumps
+        // the generation. Freeze the reset generation only when the first
+        // exact post-boundary producer tag reaches Streamline.
+        const uint64_t scene_pair_floor =
+            g_mode3_dlss_scene_reset_pair_floor.load(
+                std::memory_order_acquire);
+        if (reset_tag_valid && reset_tag.pair_id >= scene_pair_floor &&
+            scene_pair_floor != 0 &&
+            g_mode3_dlss_scene_reset_requested.load(
+                std::memory_order_acquire)) {
+            bool requested = true;
+            if (g_mode3_dlss_scene_reset_requested.compare_exchange_strong(
+                    requested, false,
+                    std::memory_order_acq_rel,
+                    std::memory_order_acquire)) {
+                constexpr uint64_t kSceneResetPairWindow = 8;
+                g_mode3_dlss_scene_reset_generation.store(
+                    reset_tag.generation, std::memory_order_release);
+                g_mode3_dlss_scene_reset_pair_ceiling.store(
+                    reset_tag.pair_id + kSceneResetPairWindow,
+                    std::memory_order_release);
+                g_mode3_dlss_scene_reset_mask.store(
+                    0x3u, std::memory_order_release);
+                log_line(
+                    "V1340 DLSS scene history reset activated eye=%u "
+                    "pair=%llu generation=%u floor=%llu present=%llu",
+                    eye,
+                    static_cast<unsigned long long>(reset_tag.pair_id),
+                    reset_tag.generation,
+                    static_cast<unsigned long long>(scene_pair_floor),
+                    static_cast<unsigned long long>(
+                        g_present_count.load(std::memory_order_relaxed)));
+            }
+        }
+
+        bool claimed_scene_reset{};
+        const uint32_t scene_reset_generation =
+            g_mode3_dlss_scene_reset_generation.load(
+                std::memory_order_acquire);
+        const uint64_t scene_reset_ceiling =
+            g_mode3_dlss_scene_reset_pair_ceiling.load(
+                std::memory_order_acquire);
+        if (reset_tag_valid && scene_reset_generation != 0 &&
+            reset_tag.generation == scene_reset_generation) {
+            if (reset_tag.pair_id <= scene_reset_ceiling) {
+                claimed_scene_reset = claim_eye_reset(
+                    g_mode3_dlss_scene_reset_mask);
+            } else {
+                // This runtime may expose constants for only one public
+                // viewport. Retire an unclaimable peer bit instead of letting
+                // it reset an unrelated scene hundreds of pairs later.
+                g_mode3_dlss_scene_reset_mask.store(
+                    0, std::memory_order_release);
+                g_mode3_dlss_scene_reset_generation.store(
+                    0, std::memory_order_release);
+                g_mode3_dlss_scene_reset_pair_ceiling.store(
+                    0, std::memory_order_release);
+            }
+        }
+
+        const uint32_t reset_generation =
+            g_mode3_projection_reset_generation.load(
+                std::memory_order_acquire);
+        bool claimed_projection_reset{};
+        if (reset_generation != 0 && reset_tag_valid &&
+            reset_tag.generation == reset_generation) {
+            claimed_projection_reset = claim_eye_reset(
+                g_mode3_dlss_projection_reset_mask);
+            if (claimed_projection_reset) {
                 log_line(
                     "V1331 DLSS projection history reset applied eye=%u "
                     "pair=%llu generation=%u present=%llu",
@@ -37013,6 +37178,21 @@ void __fastcall hook_sl_set_constants(void* constants, uint32_t frame_token, uin
                     static_cast<unsigned long long>(
                         g_present_count.load(std::memory_order_relaxed)));
             }
+        }
+        if (claimed_scene_reset || claimed_projection_reset) {
+            // Streamline 1.5 sl::Constants::reset. Apply it before both the
+            // callback cache and the original API call.
+            static_cast<uint8_t*>(constants)[0x19F] = 1;
+        }
+        if (claimed_scene_reset) {
+            log_line(
+                "V1340 DLSS scene history reset applied eye=%u pair=%llu "
+                "generation=%u present=%llu",
+                eye,
+                static_cast<unsigned long long>(reset_tag.pair_id),
+                reset_tag.generation,
+                static_cast<unsigned long long>(
+                    g_present_count.load(std::memory_order_relaxed)));
         }
     }
     if (constants != nullptr &&
@@ -39269,10 +39449,10 @@ void ensure_initialized() {
                 "aer_final_source_cinema=strict_sequential_pair "
                 "aer_cinema_eye_phase=final_backbuffer_opposite_command_list "
                 "aer_cinema_hud_phase=dlss_taau_exact_command_list "
-                "focus_fire_b1=stereo_structural_aer_upstream_owner "
+                "focus_fire_b1=stereo_and_aer_centered_draw_proven "
                 "aer_taau_hud=scene_and_retained_pair_fail_open");
             log_line(
-                "witcher3vr dxgi proxy initialized build=V1338 base=V1337_aer_afw_native_preflight "
+                "witcher3vr dxgi proxy initialized build=V1341 base=V1340_dlss_scene_history_boundary "
                 "anchor_smoothing_ini=%d anchor_smoothing_seconds=%.4f "
                 "first_person_strafe_ini=%d mode3_aer_presentation=%d raytracing_enabled=%d raytracing_history_buffers=%d "
                 "aer_afw_enabled=%d persistent_registry=%d dlss_public_streamline=%d "
@@ -39331,7 +39511,7 @@ void ensure_initialized() {
             log_line(
                 "V1310 route flight recorder=ini_opt_in default_off f3_dump=15s renderdoc_f3_preserved=1 qpc=present_only gpu_readback=0 descriptor_scan=0 text_hotpath=0");
             log_line(
-                "V1338 mode3_projection=V1331_runtime_SYM_ASYM stereo_hud_generation_reset=drain_then_rebuild asymmetric_hud_pso=deferred_openxr_geometry aer_afw_projection=producer_owned_sequential_preflight native_asym_submit=full_frame strict_asym_effects=prewarm_then_active_only flight_recorders=F3");
+                "V1341 mode3_projection=V1331_runtime_SYM_ASYM stereo_hud_generation_reset=drain_then_rebuild dlss_scene_history=exact_post_boundary_reset aer_afw_projection=full_frame_absolute_native_pair native_asym_submit=full_frame asym_effects=stereo_and_aer_centered_draw_only flight_recorders=F3");
             log_line(
                 "V1279 DLSS compatibility=public_streamline_aer_private_history_ngx_stereo legacy_module_agnostic_discovery=disabled_by_V1288");
             log_line(
@@ -43581,6 +43761,10 @@ void render_openxr_test_frame(
         g_cinema_capture_diagnostic_logs.store(0, std::memory_order_relaxed);
         g_cinema_pair_diagnostic_logs.store(0, std::memory_order_relaxed);
         g_cinema_mode_active.store(cinema_mode, std::memory_order_relaxed);
+        if (previous_cinema && !cinema_mode) {
+            arm_mode3_dlss_scene_history_reset(
+                current_present, "cinema_exit");
+        }
         if (cinema_mode && g_config.runtime_diagnostics) {
             // The startup sample is not evidence for the cinema path. Rearm
             // the same bounded readback on entry so the two cached eye images
@@ -45902,7 +46086,7 @@ void render_openxr_test_frame(
                                 1, std::memory_order_relaxed);
                         if (log_index < 16) {
                             log_line(
-                                "V1338 final Mode3 OpenXR submit sample=%u "
+                                "V1341 final Mode3 OpenXR submit sample=%u "
                                 "route=%s backend=%s dlaa=%u projection=%s "
                                 "source=%ux%u swapchain=%ux%u "
                                 "rect0=%d,%d %dx%d rect1=%d,%d %dx%d "
@@ -47187,7 +47371,7 @@ void handle_runtime_mode3_projection_hotkey() {
     }
     if (!mode3_stereo_transport_active()) {
         log_line(
-            "V1338 runtime projection hotkey=F2 ignored route=non_mode3 "
+            "V1341 runtime projection hotkey=F2 ignored route=non_mode3 "
             "present=%llu",
             static_cast<unsigned long long>(
                 g_present_count.load(std::memory_order_relaxed)));
@@ -47197,7 +47381,7 @@ void handle_runtime_mode3_projection_hotkey() {
     g_runtime_mode3_projection_toggle_requests.fetch_add(
         1, std::memory_order_release);
     log_line(
-        "V1338 Mode3 runtime projection toggle queued hotkey=F2 "
+        "V1341 Mode3 runtime projection toggle queued hotkey=F2 "
         "route=%s present=%llu",
         mode3_aer_presentation_active() ? "aer" : "stereo",
         static_cast<unsigned long long>(
@@ -47253,7 +47437,7 @@ void apply_present_boundary_requests() {
             native_asymmetric, std::memory_order_release);
         g_mode3_final_submit_logs.store(0, std::memory_order_release);
         log_line(
-            "V1338 Mode3 runtime projection=%s hotkey=F2 route=%s "
+            "V1341 Mode3 runtime projection=%s hotkey=F2 route=%s "
             "boundary=post_submit present=%llu requests=%u",
             native_asymmetric ? "asymmetric" : "symmetric",
             mode3_aer_presentation_active() ? "aer" : "stereo",
@@ -47276,7 +47460,7 @@ void handle_f3_capture_hotkey(IDXGISwapChain* swapchain) {
     if (w3vr::pipeline_flight::enabled()) {
         w3vr::pipeline_flight::dump_last_ten_seconds();
     }
-    w3vr::route_flight::dump_last_seconds("V1338", 15);
+    w3vr::route_flight::dump_last_seconds("V1341", 15);
     trigger_renderdoc_capture(
         g_game_swapchain != nullptr ? g_game_swapchain : swapchain);
 }
