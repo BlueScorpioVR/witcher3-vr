@@ -33,7 +33,11 @@
 #include "shadow_cascade_authority_policy.h"
 #include "taau_submission_policy.h"
 
-// V1361 is the clean V1359 smoke fix: it combines V1358's diagnostic-free
+// V1362 makes the exact producer record behind TAAU CB10 the sole owner of a
+// strict-Stereo resolve identity. The completed-task queue and committed eye
+// history can no longer substitute an old pair while the producer task is
+// still in flight. V1361 is the clean V1359 smoke fix: it combines V1358's
+// diagnostic-free
 // renderer with V1359's full-handle CBV cache hash. No smoke GPU queries,
 // hidden probe draws or smoke-specific F3 recorder remain in this source.
 // V1358 combines V1357's passive smoke baseline with V1356's validated
@@ -15234,7 +15238,7 @@ bool ensure_real_smoke_projection_psos() {
     }
     if (created_any) {
         log_line(
-            "V1361 real-smoke projection PSOs completed runtime_views=%d "
+            "V1362 real-smoke projection PSOs completed runtime_views=%d "
             "pso=%p,%p,%p",
             runtime_views_ready ? 1 : 0,
             g_real_smoke_center_pipelines[0].load(
@@ -19031,7 +19035,7 @@ HRESULT STDMETHODCALLTYPE hook_create_graphics_pipeline_state(
                 if (!capture_graphics_pso_recipe(
                         g_real_smoke_pso_recipe, device, *desc, info)) {
                     log_line(
-                        "V1361 real-smoke PSO recipe capture failed");
+                        "V1362 real-smoke PSO recipe capture failed");
                 }
             }
             ensure_real_smoke_projection_psos();
@@ -23845,7 +23849,6 @@ bool dispatch_taau_inplace_marker(
     uint64_t expected_pair_id = tls_render_pair_id;
     uint32_t expected_generation = tls_render_generation;
     bool identity_recovered = false;
-    bool completed_tag_authority = false;
     if (g_config.openxr_mode == 2) {
         // A mono resolve always belongs to eye 0, including callbacks recorded
         // immediately after the producer TLS lifetime has ended. Keep that eye
@@ -23855,12 +23858,15 @@ bool dispatch_taau_inplace_marker(
         expected_pair_id = g_engine_producer_pair_id;
     }
 
-    // Stereo TAAU can be recorded immediately after the producer TLS lifetime.
-    // AER therefore recovers authority from the exact CB10 matrix consumed
-    // by this resolve. AER keeps its established completed-tag ordering.
-    if (taau_stereo_route_active() &&
-        (taau_submitted_resolve_route_active() ||
-            expected_eye < 0 || expected_eye > 1 || expected_pair_id == 0)) {
+    // TAAU CB10 already contains the exact corrected camera produced for this
+    // resolve. Its immutable temporal-matrix record owns eye/pair/generation
+    // before engine_task_end runs. Use that producer authority for every Stereo
+    // resolve; the completed-task queue is a later presentation transaction and
+    // the committed history is only the temporal predecessor.
+    if (taau_stereo_route_active()) {
+        expected_eye = -1;
+        expected_pair_id = 0;
+        expected_generation = 0;
         TaauHmdMotionParameters matrix_identity{};
         const bool matrix_identity_valid = find_taau_hmd_motion_parameters(
                 reinterpret_cast<const float*>(cb_data.data() + 6 * 16),
@@ -23868,153 +23874,35 @@ bool dispatch_taau_inplace_marker(
                 current_capture_generation) &&
             matrix_identity.matched_eye >= 0 &&
             matrix_identity.matched_eye <= 1;
-        uint64_t history_floors[2]{};
-        {
-            std::scoped_lock lock{g_taau_eye_history_mutex};
-            for (size_t eye = 0; eye < 2; ++eye) {
-                const auto& history = g_taau_eye_histories[eye];
-                if (history.initialized) {
-                    history_floors[eye] = history.last_pair_id;
-                }
-            }
-        }
-
-        uint64_t history_floor{};
-        uint64_t equal_candidate{};
-        uint64_t forward_candidate{};
-        if (taau_submitted_resolve_route_active()) {
-            // [FIX:AER-TAAU-SUBMITTED-RESOLVE-AUTHORITY V12023 4/9]
-            // V12020 proved the task-completion queue can trail this native
-            // resolve by 15-16 pairs. The CB10 matrix match names the producer
-            // that actually owns the resolve and is therefore authoritative.
-            expected_eye = -1;
-            expected_pair_id = 0;
-            expected_generation = 0;
-            if (matrix_identity_valid &&
-                matrix_identity.matched_pair_id != 0 &&
-                matrix_identity.matched_pair_id != UINT64_MAX) {
-                expected_eye = matrix_identity.matched_eye;
-                expected_pair_id = matrix_identity.matched_pair_id;
-                expected_generation = matrix_identity.matched_generation;
-                history_floor = history_floors[
-                    static_cast<size_t>(expected_eye)];
-                static std::atomic<uint32_t>
-                    aer_taau_matrix_authority_logs{};
-                if (taau_resolve_runtime_diagnostics_active() &&
-                    take_bounded_log_slot(
-                        aer_taau_matrix_authority_logs, 32)) {
-                    log_taau_trace_line(
-                        "AER TAAU matrix authority present=%llu eye=%d "
-                        "pair=%llu previous=%llu error=%.7f cmd=%p",
-                        static_cast<unsigned long long>(
-                            g_present_count.load(std::memory_order_relaxed)),
-                        expected_eye,
-                        static_cast<unsigned long long>(expected_pair_id),
-                        static_cast<unsigned long long>(history_floor),
-                        matrix_identity.matrix_error, command_list);
-                }
-            }
-        } else {
-            EngineFrameTag forward_queue_tag{};
-            bool forward_queue_eye_authority{};
-            size_t forward_queue_depth{};
-            {
-                const uint32_t generation =
-                    g_streamline_capture_generation.load(
-                        std::memory_order_acquire);
-                std::scoped_lock lock{g_engine_completed_tag_queue_mutex};
-                forward_queue_depth = g_engine_completed_tag_queue.size();
-                if (!g_engine_completed_tag_queue.empty()) {
-                    const auto& tag = g_engine_completed_tag_queue.front();
-                    if (tag.eye <= 1 && tag.pair_id != 0 &&
-                        tag.pair_id != UINT64_MAX &&
-                        tag.generation == generation &&
-                        tag.pair_id > history_floors[tag.eye]) {
-                        forward_queue_tag = tag;
-                        forward_queue_eye_authority = true;
-                    }
-                }
-            }
-            if (forward_queue_eye_authority) {
-            // [FIX:TAAU-FORWARD-TAG-EYE-AUTHORITY 1/1] A forward front tag is
-            // newer than the committed history of the eye it names. It is the
-            // exact output identity; a stale or invalid CB10 must not redirect
-            // this resolve to the other eye and leave a visible history gap.
-            expected_eye = static_cast<int>(forward_queue_tag.eye);
-            expected_pair_id = forward_queue_tag.pair_id;
-            expected_generation = forward_queue_tag.generation;
-            history_floor = history_floors[forward_queue_tag.eye];
-            forward_candidate = forward_queue_tag.pair_id;
-            completed_tag_authority = true;
-            static std::atomic<uint64_t> forward_queue_eye_authority_count{};
-            const uint64_t count = forward_queue_eye_authority_count.fetch_add(
+        const auto producer_identity =
+            w3vr::taau_submission::decide_cb10_producer_identity(
+                matrix_identity_valid,
+                matrix_identity.matched_eye,
+                matrix_identity.matched_pair_id,
+                matrix_identity.matched_generation,
+                current_capture_generation,
+                matrix_identity.matrix_error);
+        if (producer_identity.valid) {
+            expected_eye = producer_identity.eye;
+            expected_pair_id = producer_identity.pair;
+            expected_generation = producer_identity.generation;
+            static std::atomic<uint64_t> cb10_producer_authority_count{};
+            const uint64_t count = cb10_producer_authority_count.fetch_add(
                 1, std::memory_order_relaxed) + 1;
             if (count <= 64 || count % 240 == 0) {
                 log_taau_trace_line(
-                    "TAAU forward completed-tag eye authority count=%llu present=%llu eye=%d pair=%llu history_floor=%llu matrix_valid=%u matrix_eye=%d matrix_pair=%llu queue_depth=%zu cmd=%p",
+                    "TAAU CB10 producer authority count=%llu route=%s present=%llu eye=%d pair=%llu generation=%u previous=%llu error=%.7f cmd=%p",
                     static_cast<unsigned long long>(count),
+                    taau_submitted_resolve_route_active() ? "aer" : "stereo",
                     static_cast<unsigned long long>(
                         g_present_count.load(std::memory_order_relaxed)),
                     expected_eye,
                     static_cast<unsigned long long>(expected_pair_id),
-                    static_cast<unsigned long long>(history_floor),
-                    matrix_identity_valid ? 1u : 0u,
-                    matrix_identity.matched_eye,
+                    expected_generation,
                     static_cast<unsigned long long>(
-                        matrix_identity.matched_pair_id),
-                    forward_queue_depth,
+                        matrix_identity.previous_matched_pair_id),
+                    matrix_identity.matrix_error,
                     command_list);
-            }
-            } else {
-                if (matrix_identity_valid) {
-                    expected_eye = matrix_identity.matched_eye;
-                    expected_generation =
-                        matrix_identity.matched_generation;
-                    history_floor = history_floors[
-                        static_cast<size_t>(expected_eye)];
-                }
-
-            {
-                std::scoped_lock lock{g_engine_completed_tag_queue_mutex};
-                for (const auto& tag : g_engine_completed_tag_queue) {
-                    if (tag.eye <= 1 &&
-                        static_cast<int>(tag.eye) == expected_eye &&
-                        tag.pair_id != 0 &&
-                        tag.pair_id != UINT64_MAX &&
-                        tag.generation == g_streamline_capture_generation.load(
-                            std::memory_order_acquire)) {
-                        if (history_floor != 0 && tag.pair_id == history_floor &&
-                            equal_candidate == 0) {
-                            equal_candidate = tag.pair_id;
-                        } else if (tag.pair_id > history_floor &&
-                            forward_candidate == 0) {
-                            forward_candidate = tag.pair_id;
-                        }
-                    }
-                }
-            }
-
-            // An equal tag denotes a second resolve of the current output and is
-            // intentionally replayed. Otherwise choose the earliest forward tag.
-                if (equal_candidate != 0) {
-                    expected_pair_id = equal_candidate;
-                    expected_generation = current_capture_generation;
-                    completed_tag_authority = true;
-                } else if (forward_candidate != 0) {
-                    expected_pair_id = forward_candidate;
-                    expected_generation = current_capture_generation;
-                    completed_tag_authority = true;
-                } else if (history_floor != 0 && expected_eye >= 0) {
-                    // No newer tag is published yet. Replaying the current eye is safer
-                    // than assigning an older matrix pair and rolling temporal state.
-                    expected_pair_id = history_floor;
-                    expected_generation = 0;
-                    completed_tag_authority = true;
-                } else if (matrix_identity_valid &&
-                    matrix_identity.matched_pair_id != 0) {
-                    expected_pair_id = matrix_identity.matched_pair_id;
-                    expected_generation = matrix_identity.matched_generation;
-                }
             }
         }
         if (expected_eye < 0 || expected_eye > 1 || expected_pair_id == 0 ||
@@ -24039,28 +23927,6 @@ bool dispatch_taau_inplace_marker(
                         }
                     }
                 }
-                size_t queue_depth{};
-                uint32_t queue_eye_mask{};
-                EngineFrameTag queue_front{};
-                EngineFrameTag queue_back{};
-                {
-                    const uint32_t generation =
-                        g_streamline_capture_generation.load(
-                            std::memory_order_acquire);
-                    std::scoped_lock lock{
-                        g_engine_completed_tag_queue_mutex};
-                    queue_depth = g_engine_completed_tag_queue.size();
-                    if (!g_engine_completed_tag_queue.empty()) {
-                        queue_front = g_engine_completed_tag_queue.front();
-                        queue_back = g_engine_completed_tag_queue.back();
-                    }
-                    for (const auto& tag : g_engine_completed_tag_queue) {
-                        if (tag.eye <= 1 &&
-                            tag.generation == generation) {
-                            queue_eye_mask |= 1u << tag.eye;
-                        }
-                    }
-                }
                 log_taau_trace_line(
                     "TAAU stereo identity detail count=%llu present=%llu "
                     "cmd=%p tls_eye=%d tls_pair=%llu producer_pair=%llu "
@@ -24069,8 +23935,7 @@ bool dispatch_taau_inplace_marker(
                     "matrix_present=%llu previous_pair=%llu "
                     "previous_present=%llu matrix_error=%.7f exact=%u "
                     "history_mask=0x%X history0=%llu@%llu "
-                    "history1=%llu@%llu queue_depth=%zu queue_mask=0x%X "
-                    "front=%u/%u/%llu back=%u/%u/%llu",
+                    "history1=%llu@%llu",
                     static_cast<unsigned long long>(health_failure),
                     static_cast<unsigned long long>(
                         g_present_count.load(std::memory_order_relaxed)),
@@ -24097,43 +23962,17 @@ bool dispatch_taau_inplace_marker(
                     static_cast<unsigned long long>(history_pair[0]),
                     static_cast<unsigned long long>(history_present[0]),
                     static_cast<unsigned long long>(history_pair[1]),
-                    static_cast<unsigned long long>(history_present[1]),
-                    queue_depth,
-                    queue_eye_mask,
-                    queue_front.eye,
-                    queue_front.generation,
-                    static_cast<unsigned long long>(queue_front.pair_id),
-                    queue_back.eye,
-                    queue_back.generation,
-                    static_cast<unsigned long long>(queue_back.pair_id));
+                    static_cast<unsigned long long>(history_present[1]));
             }
             return false;
         }
         identity_recovered = true;
-        if (completed_tag_authority) {
-            static std::atomic<uint64_t> completed_tag_taau_count{};
-            const uint64_t count = completed_tag_taau_count.fetch_add(
-                1, std::memory_order_relaxed) + 1;
-            if (count <= 64 || count % 240 == 0) {
-                log_line(
-                    "TAAU completed-tag authority count=%llu present=%llu eye=%d pair=%llu history_floor=%llu equal=%llu forward=%llu cmd=%p",
-                    static_cast<unsigned long long>(count),
-                    static_cast<unsigned long long>(
-                        g_present_count.load(std::memory_order_relaxed)),
-                    expected_eye,
-                    static_cast<unsigned long long>(expected_pair_id),
-                    static_cast<unsigned long long>(history_floor),
-                    static_cast<unsigned long long>(equal_candidate),
-                    static_cast<unsigned long long>(forward_candidate),
-                    command_list);
-            }
-        }
     }
 
     route_flight.set_identity(
         expected_eye, expected_pair_id,
         expected_generation,
-        identity_recovered || completed_tag_authority);
+        identity_recovered);
 
     std::unique_lock<std::mutex> history_transaction_lock{};
     if (g_config.openxr_mode == 2) {
@@ -28721,11 +28560,9 @@ void __fastcall hook_engine_gameplay_frame_entry(void* frame_task) {
                 notify_engine_pair_signal();
             }
         }
-        // Mode 3, AER retained HUD and AER TAAU share one immutable
-        // completed-task identity queue. TAAU peeks it only when a
-        // resolve escapes the producer TLS lifetime, so normal nested resolves
-        // keep their direct AER eye/pair authority.
-        // [FIX:AER-AER-TAAU-HISTORY V12018 2/2]
+        // Preserve the completed-task queue for downstream packed presentation
+        // and retained-HUD ownership. TAAU resolve identity is already owned by
+        // its upstream CB10 producer record and never reads this later queue.
         if (g_config.openxr_mode == 3 &&
             !mode3_aer_final_present_source_active()) {
             EngineFrameTag completed_tag{};
@@ -39920,7 +39757,7 @@ void ensure_initialized() {
                 "focus_fire_b1=stereo_and_aer_centered_draw_proven "
                 "aer_taau_hud=scene_and_retained_pair_fail_open");
             log_line(
-                "witcher3vr dxgi proxy initialized build=V1361 base=V1358_diagnostic_free_plus_V1359_cbv_full_handle_hash "
+                "witcher3vr dxgi proxy initialized build=V1362 base=V1361_cbv_hash_plus_strict_taau_cb10_producer_identity "
                 "anchor_smoothing_ini=%d anchor_smoothing_seconds=%.4f "
                 "first_person_strafe_ini=%d mode3_aer_presentation=%d raytracing_enabled=%d raytracing_history_buffers=%d "
                 "aer_afw_enabled=%d persistent_registry=%d dlss_public_streamline=%d "
@@ -39981,7 +39818,7 @@ void ensure_initialized() {
             log_line(
                 "V1350 AER AFW native projection=exact_frozen_per_eye_scale_and_center source_and_peer=full_tangent_geometry imageRect=full identity_copy=1 fallback=none smoke=unchanged_V1348");
             log_line(
-                "V1361 smoke world-up depth=reprojected_from_new_world_row10 cbv_cache=full_handle_hash_lock_free projection_PSO=deferred_exact_runtime_fov smoke_visibility_diagnostic=removed hidden_draws=0 gpu_queries=0 f3=route_pipeline_renderdoc_only");
+                "V1362 smoke world-up depth=reprojected_from_new_world_row10 cbv_cache=full_handle_hash_lock_free taau_stereo_identity=exact_cb10_producer_no_history_fallback projection_PSO=deferred_exact_runtime_fov smoke_visibility_diagnostic=removed hidden_draws=0 gpu_queries=0 f3=route_pipeline_renderdoc_only");
             log_line(
                 "V1279 DLSS compatibility=public_streamline_aer_private_history_ngx_stereo legacy_module_agnostic_discovery=disabled_by_V1288");
             log_line(
@@ -47958,7 +47795,7 @@ void handle_f3_capture_hotkey(IDXGISwapChain* swapchain) {
     if (w3vr::pipeline_flight::enabled()) {
         w3vr::pipeline_flight::dump_last_ten_seconds();
     }
-    w3vr::route_flight::dump_last_seconds("V1361", 15);
+    w3vr::route_flight::dump_last_seconds("V1362", 15);
     trigger_renderdoc_capture(
         g_game_swapchain != nullptr ? g_game_swapchain : swapchain);
 }

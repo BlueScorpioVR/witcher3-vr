@@ -1,9 +1,13 @@
 #include "taau_submission_policy.h"
 
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
 #include <cassert>
 
 int main() {
     using w3vr::taau_submission::decide_authority;
+    using w3vr::taau_submission::decide_cb10_producer_identity;
     using w3vr::taau_submission::decide_strict_raw_camera_fifo_action;
     using w3vr::taau_submission::StrictRawCameraFifoAction;
     using w3vr::taau_submission::strict_raw_camera_fifo_entry_matches;
@@ -32,6 +36,31 @@ int main() {
     const auto stale_without_authority = decide_authority(0, 1604, true);
     assert(stale_without_authority.preserve_previous);
     assert(stale_without_authority.effective_pair == 0);
+
+    // The exact CB10 producer owns the current pair before engine_task_end.
+    // There is intentionally no history-pair argument and therefore no path
+    // which can replace pair 403 with already-committed pair 402.
+    const auto cb10_current = decide_cb10_producer_identity(
+        true, 0, 403, 9, 9, 0.0f);
+    assert(cb10_current.valid);
+    assert(cb10_current.eye == 0);
+    assert(cb10_current.pair == 403);
+    assert(cb10_current.generation == 9);
+
+    assert(!decide_cb10_producer_identity(
+        false, 0, 403, 9, 9, 0.0f).valid);
+    assert(!decide_cb10_producer_identity(
+        true, -1, 403, 9, 9, 0.0f).valid);
+    assert(!decide_cb10_producer_identity(
+        true, 2, 403, 9, 9, 0.0f).valid);
+    assert(!decide_cb10_producer_identity(
+        true, 0, 0, 9, 9, 0.0f).valid);
+    assert(!decide_cb10_producer_identity(
+        true, 0, UINT64_MAX, 9, 9, 0.0f).valid);
+    assert(!decide_cb10_producer_identity(
+        true, 0, 403, 8, 9, 0.0f).valid);
+    assert(!decide_cb10_producer_identity(
+        true, 0, 403, 9, 9, 0.000001f).valid);
 
     assert(strict_raw_camera_fifo_entry_matches(7, 0, 7, 0, true));
     assert(strict_raw_camera_fifo_entry_matches(7, 1, 7, 1, true));

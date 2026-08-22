@@ -329,6 +329,13 @@ if(BUILD_TESTING)
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/mode3_asymmetric_effect_contract.cmake"
     )
 
+    add_test(
+        NAME renderer_taau_cb10_producer_identity_contract
+        COMMAND "${CMAKE_COMMAND}"
+            "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/taau_cb10_producer_identity_contract.cmake"
+    )
+
 endif()
 
 option(W3VR_BUILD_LAUNCHER "Build the Witcher 3 VR launcher" ON)
