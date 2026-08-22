@@ -65,6 +65,27 @@ struct ProjectionPairDecision {
     bool native_asymmetric{};
 };
 
+// Strict Stereo must prepare every structurally enrolled transparent-effect
+// variant before F2 can request the native per-eye producer. Preparation is a
+// static route property; selecting a variant remains frame-dynamic and is
+// allowed only while the actual producer is native asymmetric. AER owns its
+// upstream projection and must never receive this supplementary transform.
+constexpr bool strict_stereo_asymmetric_effect_preparation_configured(
+    bool trial_enabled,
+    bool mode3,
+    bool supported_backend,
+    bool hmd_freelook,
+    bool aer_presentation) noexcept {
+    return trial_enabled && mode3 && supported_backend && hmd_freelook &&
+        !aer_presentation;
+}
+
+constexpr bool strict_stereo_asymmetric_effect_application_active(
+    bool preparation_configured,
+    bool actual_native_asymmetric) noexcept {
+    return preparation_configured && actual_native_asymmetric;
+}
+
 // Validate the producer-owned projection at the exact AFW transaction. Native
 // pixels require the source eye's post-rebuild factory proof and both immutable
 // pair FOVs. AFW synthesizes the peer, so its factory bit is deliberately not
