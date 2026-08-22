@@ -4,6 +4,8 @@
 
 int main() {
     using w3vr::taau_submission::decide_authority;
+    using w3vr::taau_submission::decide_strict_raw_camera_fifo_action;
+    using w3vr::taau_submission::StrictRawCameraFifoAction;
     using w3vr::taau_submission::strict_raw_camera_fifo_entry_matches;
 
     const auto forward = decide_authority(1603, 1604, false);
@@ -36,6 +38,25 @@ int main() {
     assert(!strict_raw_camera_fifo_entry_matches(7, 0, 7, 1, true));
     assert(!strict_raw_camera_fifo_entry_matches(7, 0, 6, 0, true));
     assert(!strict_raw_camera_fifo_entry_matches(7, 0, 7, 0, false));
+
+    assert(decide_strict_raw_camera_fifo_action(
+        7, 0, true, true, 7, 0, true) ==
+        StrictRawCameraFifoAction::Consume);
+    assert(decide_strict_raw_camera_fifo_action(
+        7, 1, true, true, 7, 0, false) ==
+        StrictRawCameraFifoAction::Wait);
+    assert(decide_strict_raw_camera_fifo_action(
+        7, 0, true, true, 7, 1, false) ==
+        StrictRawCameraFifoAction::Wait);
+    assert(decide_strict_raw_camera_fifo_action(
+        7, 0, true, true, 7, 0, false) ==
+        StrictRawCameraFifoAction::Reject);
+    assert(decide_strict_raw_camera_fifo_action(
+        7, 0, true, true, 6, 1, true) ==
+        StrictRawCameraFifoAction::Reject);
+    assert(decide_strict_raw_camera_fifo_action(
+        7, 0, false, false, 0, UINT32_MAX, false) ==
+        StrictRawCameraFifoAction::Reject);
 
     return 0;
 }

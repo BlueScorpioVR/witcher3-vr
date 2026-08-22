@@ -37,4 +37,34 @@ constexpr bool strict_raw_camera_fifo_entry_matches(
         producer_generation == expected_generation && matrix_valid;
 }
 
+enum class StrictRawCameraFifoAction : uint8_t {
+    Reject,
+    Wait,
+    Consume,
+};
+
+// The consumer must not remove an otherwise-valid front producer merely
+// because the resolve currently names the opposite eye. In an alternating
+// stream that producer belongs to the next resolve; retaining it for one turn
+// is the FIFO barrier which deterministically repairs a one-eye phase offset.
+constexpr StrictRawCameraFifoAction decide_strict_raw_camera_fifo_action(
+    uint32_t expected_generation,
+    uint32_t expected_eye,
+    bool producer_available,
+    bool producer_valid,
+    uint32_t producer_generation,
+    uint32_t producer_eye,
+    bool matrix_valid) noexcept {
+    if (!producer_available || !producer_valid || expected_eye > 1 ||
+        producer_eye > 1 || producer_generation != expected_generation) {
+        return StrictRawCameraFifoAction::Reject;
+    }
+    if (producer_eye != expected_eye) {
+        return StrictRawCameraFifoAction::Wait;
+    }
+    return matrix_valid
+        ? StrictRawCameraFifoAction::Consume
+        : StrictRawCameraFifoAction::Reject;
+}
+
 }  // namespace w3vr::taau_submission
