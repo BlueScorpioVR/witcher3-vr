@@ -35,10 +35,11 @@ bool build_camera_data_from_streamline(
     CameraData& camera_data,
     std::wstring& error);
 
-// Mode-3 native pixels are rendered with an off-axis optical center while the
-// Streamline projection supplied to DLSS remains centered. Add the absolute
-// source-eye center before deriving the peer-eye projection.
-bool apply_source_eye_projection_center(
+// Streamline/PureDark receives the shared-envelope projection even when the
+// selected pixels were rendered with a native per-eye tangent space. Replace
+// both focal scales with the exact native spans and add the native optical
+// centre while preserving depth and subpixel-jitter terms.
+bool apply_exact_source_eye_projection(
     const EyeProjectionGeometry& source_geometry,
     CameraData& camera_data,
     std::wstring& error);

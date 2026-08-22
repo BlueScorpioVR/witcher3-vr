@@ -123,27 +123,33 @@ int main() {
         return 1;
     }
 
-    // V12081: Mode-3 native DLSS exposes a centered Streamline projection
-    // even though its pixels use the per-eye off-axis centers. Apply the
-    // source center first, then derive the peer without doubling the offset.
+    // V1350: the AFW camera arrives with the wider shared-envelope focal scale
+    // even though its pixels use exact per-eye tangent spaces. Replace both
+    // source scales and add the optical centre, then derive the exact peer.
     fill_constants(constants, -baseline * 0.5f);
-    constants[8] = 0.0f;
-    constants[9] = 0.0f;
+    constants[0] = 0.854755759f;
+    constants[5] = 0.791071296f;
+    constants[8] = 0.001f;
+    constants[9] = -0.002f;
     const EyeProjectionGeometry native_left{
-        2.2f, 2.4f, 0.24f, 0.19f};
+        1.88315928f, 2.03476119f, 0.242512688f, 0.193187416f};
     const EyeProjectionGeometry native_right{
-        2.2f, 2.4f, -0.24f, 0.19f};
+        1.88315928f, 2.03476119f, -0.242512688f, 0.193187416f};
     if (!build_camera_data_from_streamline(
             constants, std::size(constants), EyeLeft,
             baseline, camera, error) ||
-        !apply_source_eye_projection_center(
+        !apply_exact_source_eye_projection(
             native_left, camera, error) ||
         !retarget_destination_eye_projection(
             native_left, native_right, camera, error) ||
-        !nearly_equal(camera.source_view_to_clip.values[8], 0.24f) ||
-        !nearly_equal(camera.source_view_to_clip.values[9], 0.19f) ||
-        !nearly_equal(camera.destination_view_to_clip.values[8], -0.24f) ||
-        !nearly_equal(camera.destination_view_to_clip.values[9], 0.19f) ||
+        !nearly_equal(camera.source_view_to_clip.values[0], 1.06204510f) ||
+        !nearly_equal(camera.source_view_to_clip.values[5], 0.98291630f) ||
+        !nearly_equal(camera.source_view_to_clip.values[8], 0.243512690f) ||
+        !nearly_equal(camera.source_view_to_clip.values[9], 0.191187412f) ||
+        !nearly_equal(camera.destination_view_to_clip.values[0], 1.06204510f) ||
+        !nearly_equal(camera.destination_view_to_clip.values[5], 0.98291630f) ||
+        !nearly_equal(camera.destination_view_to_clip.values[8], -0.241512686f) ||
+        !nearly_equal(camera.destination_view_to_clip.values[9], 0.191187412f) ||
         !product_is_identity(
             camera.source_view_to_clip,
             camera.source_clip_to_view) ||

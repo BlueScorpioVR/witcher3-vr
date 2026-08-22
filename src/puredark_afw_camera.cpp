@@ -211,7 +211,7 @@ bool build_camera_data_from_streamline(
     return true;
 }
 
-bool apply_source_eye_projection_center(
+bool apply_exact_source_eye_projection(
     const EyeProjectionGeometry& source_geometry,
     CameraData& camera_data,
     std::wstring& error) {
@@ -223,12 +223,20 @@ bool apply_source_eye_projection_center(
         source_geometry.vertical_tangent_span <= 0.01f ||
         std::fabs(source_geometry.center_ndc_x) > 1.0f ||
         std::fabs(source_geometry.center_ndc_y) > 1.0f ||
-        !finite_values(camera_data.source_view_to_clip.values, 16)) {
-        error = L"PureDark source-eye projection center is invalid";
+        !finite_values(camera_data.source_view_to_clip.values, 16) ||
+        std::fabs(camera_data.source_view_to_clip.values[0]) <= 0.01f ||
+        std::fabs(camera_data.source_view_to_clip.values[5]) <= 0.01f) {
+        error = L"PureDark source-eye projection geometry is invalid";
         return false;
     }
 
     auto source = camera_data.source_view_to_clip;
+    source.values[0] = std::copysign(
+        2.0f / source_geometry.horizontal_tangent_span,
+        source.values[0]);
+    source.values[5] = std::copysign(
+        2.0f / source_geometry.vertical_tangent_span,
+        source.values[5]);
     source.values[8] += source_geometry.center_ndc_x;
     source.values[9] += source_geometry.center_ndc_y;
     Matrix4x4 source_inverse{};

@@ -28,7 +28,7 @@ require_text(DXGI_SOURCE
     "w3vr::smoke_visibility::on_execute("
     "real queue submission owns GPU readiness")
 require_text(DXGI_SOURCE
-    "w3vr::smoke_visibility::dump_last_seconds(\"V1348\", 15)"
+    "w3vr::smoke_visibility::dump_last_seconds(\"V1350\", 15)"
     "shared F3 edge dumps the focused recorder")
 require_text(DXGI_SOURCE
     "resolve_real_smoke_cbv(*state, 1, cbv)"
@@ -59,4 +59,4 @@ require_text(RECORDER
     "wait_for_queue(queue)"
     "F3 waits for submitted query completion")
 
-message(STATUS "V1348 exact smoke visibility recorder contract verified")
+message(STATUS "V1350 inherited exact smoke visibility recorder contract verified")

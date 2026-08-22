@@ -24,9 +24,9 @@ set(required_fragments
     "native_asymmetric_source_views_valid"
     "mode3_common_afw_sequenced_available"
     "stereo_cached &&"
-    "bool apply_puredark_afw_native_projection_pair("
+    "bool rebuild_puredark_afw_native_projection_pair("
     "aer_reference_views, routed_eye, captured.camera,"
-    "recovered = apply_puredark_afw_native_projection_pair("
+    "recovered = rebuild_puredark_afw_native_projection_pair("
     "exact_render_views, eye, recovered_camera.camera,"
 )
 
@@ -82,11 +82,11 @@ string(FIND "${taau_capture_body}"
     "pixel_projection ==\n            w3vr::mode3_transport::AfwPixelProjection::NativeAsymmetric"
     taau_native_gate)
 string(FIND "${taau_capture_body}"
-    "apply_puredark_afw_native_projection_pair(" taau_absolute_projection)
+    "rebuild_puredark_afw_native_projection_pair(" taau_absolute_projection)
 if(taau_native_gate EQUAL -1 OR taau_absolute_projection EQUAL -1 OR
         NOT taau_native_gate LESS taau_absolute_projection)
     message(FATAL_ERROR
-        "Native TAAU AFW must apply the frozen absolute projection pair")
+        "Native TAAU AFW must rebuild the complete frozen projection pair")
 endif()
 math(EXPR capture_length "${capture_end} - ${capture_begin}")
 string(SUBSTRING "${dxgi_proxy}" ${capture_begin} ${capture_length}

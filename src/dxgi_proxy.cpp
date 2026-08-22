@@ -33,6 +33,10 @@
 #include "shadow_cascade_authority_policy.h"
 #include "taau_submission_policy.h"
 
+// V1350 derives directly from V1348 and changes only the AFW evaluator
+// projection for a proven native-ASym producer. The exact frozen per-eye FOV
+// now owns focal scale and optical centre together; full-frame pixels, OpenXR
+// imageRect, poses, temporal joins, effects and smoke diagnostics are unchanged.
 // V1348 retains V1347's exact-smoke CPU/GPU visibility flight recorder and
 // physically removes V1342's deferred actual-producer smoke authority. Smoke
 // and fire selection return to V1341's live ASYM route and command-eye owner;
@@ -9085,12 +9089,12 @@ bool prepare_streamline_dlss_callback_constants(
     return false;
 }
 
-// [FIX:AER-AFW-NATIVE-ABSOLUTE-PROJECTION V1339 1/4] Full-frame native pixels
-// and AFW must use the same two frozen tangent spaces. Streamline exposes a
-// centered source matrix at this boundary; apply the real eye's absolute
-// center first, then derive the peer from that corrected source. This is camera
-// metadata only: no color resize, crop, shader or additional image pass.
-bool apply_puredark_afw_native_projection_pair(
+// [FIX:AER-AFW-EXACT-NATIVE-PROJECTION V1350 1/4] Full-frame native pixels and
+// AFW must use the same two frozen tangent spaces. Streamline exposes the
+// larger shared-envelope projection here. Rebuild the real eye's complete
+// focal scale and optical centre, then derive the peer from that exact source.
+// This is camera metadata only: no color resize, crop, shader or image pass.
+bool rebuild_puredark_afw_native_projection_pair(
     const std::array<XrView, 2>& render_views,
     uint32_t source_eye,
     w3vr::puredark_afw::CameraData& camera,
@@ -9109,7 +9113,7 @@ bool apply_puredark_afw_native_projection_pair(
         !w3vr::openxr_eye_geometry::derive_asymmetric_projection_descriptor(
             render_views[destination_eye].fov, 1, 1,
             destination_projection) ||
-        !w3vr::puredark_afw::apply_source_eye_projection_center(
+        !w3vr::puredark_afw::apply_exact_source_eye_projection(
             {
                 source_projection.horizontal_tangent_span,
                 source_projection.vertical_tangent_span,
@@ -9210,7 +9214,7 @@ void capture_puredark_afw_camera(
             destination_projection{};
         const bool raw_asymmetric_projection_valid =
             aer_reference_views_valid &&
-            apply_puredark_afw_native_projection_pair(
+            rebuild_puredark_afw_native_projection_pair(
                 aer_reference_views, routed_eye, captured.camera,
                 source_projection, destination_projection, error);
         if (!aer_reference_views_valid ||
@@ -9225,17 +9229,21 @@ void capture_puredark_afw_camera(
             static std::atomic<uint32_t> projection_logs{};
             if (take_bounded_log_slot(projection_logs, 32)) {
                 log_line(
-                    "V1339 AFW DLSS native absolute camera pair=%llu source_eye=%u destination_eye=%u source_center=%.9g,%.9g source_matrix=%.9g,%.9g destination_center=%.9g,%.9g destination_matrix=%.9g,%.9g baseline=%.9g authority=full_frame_frozen_pair",
+                    "V1350 AFW DLSS exact native camera pair=%llu source_eye=%u destination_eye=%u source_span=%.9g,%.9g source_scale_center=%.9g,%.9g,%.9g,%.9g destination_span=%.9g,%.9g destination_scale_center=%.9g,%.9g,%.9g,%.9g baseline=%.9g authority=full_frame_frozen_pair",
                     static_cast<unsigned long long>(route_tag.pair_id),
                     routed_eye, destination_eye,
+                    source_projection.horizontal_tangent_span,
+                    source_projection.vertical_tangent_span,
+                    captured.camera.source_view_to_clip.values[0],
+                    captured.camera.source_view_to_clip.values[5],
                     source_projection.center_ndc_x,
                     source_projection.center_ndc_y,
-                    captured.camera.source_view_to_clip.values[8],
-                    captured.camera.source_view_to_clip.values[9],
+                    destination_projection.horizontal_tangent_span,
+                    destination_projection.vertical_tangent_span,
+                    captured.camera.destination_view_to_clip.values[0],
+                    captured.camera.destination_view_to_clip.values[5],
                     destination_projection.center_ndc_x,
                     destination_projection.center_ndc_y,
-                    captured.camera.destination_view_to_clip.values[8],
-                    captured.camera.destination_view_to_clip.values[9],
                     baseline);
             }
         }
@@ -10087,28 +10095,32 @@ bool capture_puredark_afw_mode3_taau_inputs(
         destination_projection{};
     if (recovered && pixel_projection ==
             w3vr::mode3_transport::AfwPixelProjection::NativeAsymmetric) {
-        // [FIX:AER-AFW-NATIVE-ABSOLUTE-PROJECTION V1339 2/4] TAAU's strict
-        // raw-camera FIFO carries the same centered Streamline projection as
-        // DLSS. Its exact resolve join already owns both frozen native FOVs,
-        // so correct the evaluator camera before the immutable bundle is
-        // published. Symmetric producers remain byte-for-byte unchanged.
-        recovered = apply_puredark_afw_native_projection_pair(
+        // [FIX:AER-AFW-EXACT-NATIVE-PROJECTION V1350 2/4] TAAU's strict
+        // raw-camera FIFO carries the shared-envelope Streamline projection.
+        // Its exact resolve join owns both frozen native FOVs, so rebuild the
+        // complete evaluator projection before publishing the immutable
+        // bundle. Symmetric producers remain byte-for-byte unchanged.
+        recovered = rebuild_puredark_afw_native_projection_pair(
             exact_render_views, eye, recovered_camera.camera,
             source_projection, destination_projection, recovery_error);
         if (recovered && g_config.runtime_diagnostics) {
             static std::atomic<uint32_t> projection_logs{};
             if (take_bounded_log_slot(projection_logs, 32)) {
                 log_line(
-                    "V1339 AFW TAAU native absolute camera pair=%llu source_eye=%u destination_eye=%u source_center=%.9g,%.9g source_matrix=%.9g,%.9g destination_center=%.9g,%.9g destination_matrix=%.9g,%.9g baseline=%.9g authority=full_frame_frozen_pair",
+                    "V1350 AFW TAAU exact native camera pair=%llu source_eye=%u destination_eye=%u source_span=%.9g,%.9g source_scale_center=%.9g,%.9g,%.9g,%.9g destination_span=%.9g,%.9g destination_scale_center=%.9g,%.9g,%.9g,%.9g baseline=%.9g authority=full_frame_frozen_pair",
                     static_cast<unsigned long long>(pair_id), eye, 1u - eye,
+                    source_projection.horizontal_tangent_span,
+                    source_projection.vertical_tangent_span,
+                    recovered_camera.camera.source_view_to_clip.values[0],
+                    recovered_camera.camera.source_view_to_clip.values[5],
                     source_projection.center_ndc_x,
                     source_projection.center_ndc_y,
-                    recovered_camera.camera.source_view_to_clip.values[8],
-                    recovered_camera.camera.source_view_to_clip.values[9],
+                    destination_projection.horizontal_tangent_span,
+                    destination_projection.vertical_tangent_span,
+                    recovered_camera.camera.destination_view_to_clip.values[0],
+                    recovered_camera.camera.destination_view_to_clip.values[5],
                     destination_projection.center_ndc_x,
                     destination_projection.center_ndc_y,
-                    recovered_camera.camera.destination_view_to_clip.values[8],
-                    recovered_camera.camera.destination_view_to_clip.values[9],
                     baseline);
             }
         }
@@ -21049,8 +21061,8 @@ void STDMETHODCALLTYPE hook_draw_indexed_instanced(
         g_set_graphics_root_descriptor_table != nullptr) {
         ID3D12PipelineState* variant_pipeline{};
         // V1341 replaces V1217's route-wide AER exclusion. That exclusion was
-        // tied to the old centered/cropped AFW contract; V1339 now presents a
-        // proven full-frame absolute native pair. Use the same actual-producer
+        // tied to the old centered/cropped AFW contract; V1350 presents a
+        // proven full-frame exact native pair. Use the same actual-producer
         // gate as the automatic transparent family and retain the exact
         // command-list eye selector below. Missing eye authority still falls
         // closed to V1157's immutable zero-centre world-up variant.
@@ -39790,7 +39802,7 @@ void ensure_initialized() {
                 "rt_enabled=ini_owned rt_history_buffers=ini_4_to_16_default_8 rt_metadata=release_owned_exact_formats rt_diagnostics=checkbox_only "
                 "afw_native_dlss_source=exact_final_backbuffer_tag_join "
                 "afw_transport=identity_depth_mvec_camera_fence_rt_ledger_nonblocking_final_color_trigger "
-                "afw_native_dlss_camera=final_source_centered "
+                "afw_native_dlss_camera=exact_frozen_fov_scale_and_center "
                 "native_presentation_size=final_openxr_fov_only "
                 "aer_final_source_cinema=strict_sequential_pair "
                 "aer_cinema_eye_phase=final_backbuffer_opposite_command_list "
@@ -39798,7 +39810,7 @@ void ensure_initialized() {
                 "focus_fire_b1=stereo_and_aer_centered_draw_proven "
                 "aer_taau_hud=scene_and_retained_pair_fail_open");
             log_line(
-                "witcher3vr dxgi proxy initialized build=V1348 base=V1347_without_V1342_smoke_authority "
+                "witcher3vr dxgi proxy initialized build=V1350 base=V1348_afw_exact_native_projection "
                 "anchor_smoothing_ini=%d anchor_smoothing_seconds=%.4f "
                 "first_person_strafe_ini=%d mode3_aer_presentation=%d raytracing_enabled=%d raytracing_history_buffers=%d "
                 "aer_afw_enabled=%d persistent_registry=%d dlss_public_streamline=%d "
@@ -39858,6 +39870,8 @@ void ensure_initialized() {
                 "V1310 route flight recorder=ini_opt_in default_off f3_dump=15s renderdoc_f3_preserved=1 qpc=present_only gpu_readback=0 descriptor_scan=0 text_hotpath=0");
             log_line(
                 "V1348 base=V1347 smoke_selection=V1341_live_ASYM_command_eye smoke_visibility=exact_canonical_draw pipeline_statistics=IA_VS_GS_CLIP_PS b1=hash_matrix_camera raster=viewport_scissor_cull always_record=1 file_write=F3_last15s V1342_actual_producer_authority=removed");
+            log_line(
+                "V1350 AER AFW native projection=exact_frozen_per_eye_scale_and_center source_and_peer=full_tangent_geometry imageRect=full identity_copy=1 fallback=none smoke=unchanged_V1348");
             log_line(
                 "V1279 DLSS compatibility=public_streamline_aer_private_history_ngx_stereo legacy_module_agnostic_discovery=disabled_by_V1288");
             log_line(
@@ -46460,7 +46474,7 @@ void render_openxr_test_frame(
                                 1, std::memory_order_relaxed);
                         if (log_index < 16) {
                             log_line(
-                                "V1348 final Mode3 OpenXR submit sample=%u "
+                                "V1350 final Mode3 OpenXR submit sample=%u "
                                 "route=%s backend=%s dlaa=%u projection=%s "
                                 "source=%ux%u swapchain=%ux%u "
                                 "rect0=%d,%d %dx%d rect1=%d,%d %dx%d "
@@ -47745,7 +47759,7 @@ void handle_runtime_mode3_projection_hotkey() {
     }
     if (!mode3_stereo_transport_active()) {
         log_line(
-            "V1348 runtime projection hotkey=F2 ignored route=non_mode3 "
+            "V1350 runtime projection hotkey=F2 ignored route=non_mode3 "
             "present=%llu",
             static_cast<unsigned long long>(
                 g_present_count.load(std::memory_order_relaxed)));
@@ -47755,7 +47769,7 @@ void handle_runtime_mode3_projection_hotkey() {
     g_runtime_mode3_projection_toggle_requests.fetch_add(
         1, std::memory_order_release);
     log_line(
-        "V1348 Mode3 runtime projection toggle queued hotkey=F2 "
+        "V1350 Mode3 runtime projection toggle queued hotkey=F2 "
         "route=%s present=%llu",
         mode3_aer_presentation_active() ? "aer" : "stereo",
         static_cast<unsigned long long>(
@@ -47811,7 +47825,7 @@ void apply_present_boundary_requests() {
             native_asymmetric, std::memory_order_release);
         g_mode3_final_submit_logs.store(0, std::memory_order_release);
         log_line(
-            "V1348 Mode3 runtime projection=%s hotkey=F2 route=%s "
+            "V1350 Mode3 runtime projection=%s hotkey=F2 route=%s "
             "boundary=post_submit present=%llu requests=%u",
             native_asymmetric ? "asymmetric" : "symmetric",
             mode3_aer_presentation_active() ? "aer" : "stereo",
@@ -47834,8 +47848,8 @@ void handle_f3_capture_hotkey(IDXGISwapChain* swapchain) {
     if (w3vr::pipeline_flight::enabled()) {
         w3vr::pipeline_flight::dump_last_ten_seconds();
     }
-    w3vr::smoke_visibility::dump_last_seconds("V1348", 15);
-    w3vr::route_flight::dump_last_seconds("V1348", 15);
+    w3vr::smoke_visibility::dump_last_seconds("V1350", 15);
+    w3vr::route_flight::dump_last_seconds("V1350", 15);
     trigger_renderdoc_capture(
         g_game_swapchain != nullptr ? g_game_swapchain : swapchain);
 }
