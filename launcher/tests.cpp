@@ -181,9 +181,8 @@ void TestAllModes(const w3vr::ConfigPaths& paths) {
         state.presentation_scale = 0.85f;
         state.menu_scale = 0.75f;
         state.cinema_scale = 1.1f;
-        state.cinema_aspect = index % 2 == 0
-            ? w3vr::CinemaAspect::FiveFour
-            : w3vr::CinemaAspect::FourThree;
+        state.cinema_aspect = static_cast<w3vr::CinemaAspect>(index %
+            static_cast<int>(w3vr::CinemaAspect::Count));
         state.cinema_hud_scale = 1.5f;
         state.cinema_hud_convergence_offset = 7;
         state.full_vr_hud_scale = 1.25f;
@@ -313,7 +312,7 @@ void TestAllModes(const w3vr::ConfigPaths& paths) {
         const bool expected_five_four =
             state.cinema_aspect == w3vr::CinemaAspect::FiveFour;
         Require(vr.Get("openxr", "cinema_aspect") ==
-            std::string(expected_five_four ? "5x4" : "4x3") &&
+            std::string(w3vr::CinemaAspectIniValue(state.cinema_aspect)) &&
             vr.Get("openxr", "cinema_5x4") ==
                 std::string(expected_five_four ? "1" : "0"),
             "Cinema aspect and compatibility mirror mismatch");

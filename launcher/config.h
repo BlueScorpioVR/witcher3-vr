@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 
+#include "../src/cinema_aspect.h"
+
 namespace w3vr {
 
 enum class RenderMode {
@@ -14,11 +16,6 @@ enum class RenderMode {
     StereoTaau,
     StereoDlssSequential,
     Count,
-};
-
-enum class CinemaAspect {
-    FiveFour,
-    FourThree,
 };
 
 enum class CameraFollowPolicy {

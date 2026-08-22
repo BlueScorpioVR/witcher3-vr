@@ -16,11 +16,14 @@
 #include <openxr/openxr_platform.h>
 
 #include "aer_scheduler.h"
+#include "cinema_aspect.h"
 #include "openxr_eye_geometry.h"
 #include "puredark_afw_bridge.h"
 #include "puredark_afw_camera.h"
 #include "first_person_combat_lock.h"
 #include "first_person_anchor_smoothing.h"
+#include "first_person_horse_gallop_offset.h"
+#include "hmd_camera_orientation.h"
 #include "mode3_transport_policy.h"
 #include "native_asymmetric_transport_policy.h"
 #include "pipeline_flight_recorder.h"
@@ -29,6 +32,11 @@
 #include "shadow_cascade_authority_policy.h"
 #include "taau_submission_policy.h"
 
+// V1346 merges the complete validated V17000 camera-control line and V17007
+// Cinema aspects into V1343. Boat First Person stays active, gallop receives
+// the validated +0.30 m lift, Vertical Pitch uses complete camera-local HMD
+// rotation with F9 pitch recenter, and Cinema adds 16:10/16:9. V1343 HUD and
+// its existing V1342 smoke behavior remain otherwise byte-for-byte owners.
 // V1343 retains V1342 and makes AER's retained HUD convergence use one
 // coherent xrLocateViews eye pair.  AER scene views intentionally come from
 // sequential render instants; they remain the exact FOV/pose authority for
@@ -1049,6 +1057,9 @@ std::atomic<bool> g_hmd_pose_valid{};
 std::atomic<bool> g_hmd_game_pitch_lock_pending{true};
 bool g_hmd_game_pitch_lock_valid{};
 float g_hmd_game_pitch_lock{};
+std::atomic<bool> g_hmd_vertical_pitch_recenter_pending{};
+std::atomic<bool> g_hmd_vertical_pitch_recenter_valid{};
+std::atomic<float> g_hmd_vertical_pitch_recenter_reference{};
 float g_hmd_yaw_degrees{};
 float g_hmd_pitch_degrees{};
 float g_hmd_roll_degrees{};
@@ -4625,9 +4636,6 @@ std::atomic<bool> g_first_person_bridge_boat{};
 std::atomic<bool> g_first_person_combat_exit_requested{};
 std::atomic<bool> g_first_person_combat_restore_pending{};
 std::atomic<uint64_t> g_first_person_combat_restore_after_ms{UINT64_MAX};
-std::atomic<bool> g_first_person_boat_exit_requested{};
-std::atomic<bool> g_first_person_boat_restore_pending{};
-std::atomic<uint64_t> g_first_person_boat_restore_after_ms{UINT64_MAX};
 std::atomic<uint64_t> g_first_person_bridge_last_present{UINT64_MAX};
 std::atomic<uint32_t> g_first_person_bridge_decode_count{};
 std::mutex g_first_person_bridge_offset_mutex{};
@@ -12616,10 +12624,8 @@ void load_config() {
         const auto cinema_aspect = read_ini_string(
             "openxr", "cinema_aspect",
             legacy_cinema_5x4 ? "5x4" : "4x3");
-        g_config.cinema_aspect_ratio =
-            cinema_aspect == "4x3" || cinema_aspect == "4:3"
-            ? 4.0f / 3.0f
-            : 5.0f / 4.0f;
+        g_config.cinema_aspect_ratio = w3vr::CinemaAspectRatio(
+            w3vr::ParseCinemaAspect(cinema_aspect));
         g_config.cinema_full_vr = read_ini_bool(
             "openxr", "cinema_full_vr", false);
         g_config.steady_icons = read_ini_bool(
@@ -29015,6 +29021,38 @@ bool safe_rebuild_shadow_view(float* shadow_view) {
     }
 }
 
+float resolve_vertical_pitch_recenter(
+    float original_pitch,
+    uint64_t present) {
+    if (g_config.hmd_lock_game_pitch) {
+        return original_pitch;
+    }
+    if (g_hmd_vertical_pitch_recenter_pending.exchange(
+            false, std::memory_order_acq_rel)) {
+        g_hmd_vertical_pitch_recenter_reference.store(
+            original_pitch, std::memory_order_relaxed);
+        g_hmd_vertical_pitch_recenter_valid.store(
+            true, std::memory_order_release);
+        log_line(
+            "V1346 vertical pitch recentered reference=%.4f present=%llu",
+            original_pitch,
+            static_cast<unsigned long long>(present));
+    }
+    if (!g_hmd_vertical_pitch_recenter_valid.load(
+            std::memory_order_acquire)) {
+        return original_pitch;
+    }
+    float recentered{};
+    if (!w3vr::hmd_camera_orientation::recentered_pitch_degrees(
+            original_pitch,
+            g_hmd_vertical_pitch_recenter_reference.load(
+                std::memory_order_relaxed),
+            recentered)) {
+        return original_pitch;
+    }
+    return recentered;
+}
+
 bool capture_asymmetric_temporal_authority(
     void* temporal_data,
     uintptr_t caller_rva,
@@ -30181,14 +30219,33 @@ bool prepare_full_vr_frame_camera(
         corrected[0] += right_x * local_right + forward_x * local_forward;
         corrected[1] += right_y * local_right + forward_y * local_forward;
         corrected[2] += local_up;
-        const float game_pitch = g_config.hmd_lock_game_pitch &&
+        const float raw_game_pitch = g_config.hmd_lock_game_pitch &&
                 g_hmd_game_pitch_lock_valid
             ? g_hmd_game_pitch_lock
             : corrected[5];
-        corrected[5] = game_pitch +
-            hmd_pose.pitch_degrees * g_config.hmd_pitch_scale;
-        corrected[6] += hmd_pose.yaw_degrees * g_config.hmd_yaw_scale;
-        corrected[4] += hmd_pose.roll_degrees * g_config.hmd_roll_scale;
+        const float game_pitch = g_config.hmd_lock_game_pitch
+            ? raw_game_pitch
+            : resolve_vertical_pitch_recenter(raw_game_pitch, present);
+        const w3vr::hmd_camera_orientation::EulerDegrees hmd_rotation{
+            hmd_pose.roll_degrees * g_config.hmd_roll_scale,
+            hmd_pose.pitch_degrees * g_config.hmd_pitch_scale,
+            hmd_pose.yaw_degrees * g_config.hmd_yaw_scale};
+        w3vr::hmd_camera_orientation::EulerDegrees composed_rotation{};
+        const bool vertical_pitch_rotation_composed =
+            !g_config.hmd_lock_game_pitch &&
+            w3vr::hmd_camera_orientation::compose_game_camera_with_local_hmd(
+                {corrected[4], game_pitch, corrected[6]},
+                hmd_rotation,
+                composed_rotation);
+        if (vertical_pitch_rotation_composed) {
+            corrected[4] = composed_rotation.roll;
+            corrected[5] = composed_rotation.pitch;
+            corrected[6] = composed_rotation.yaw;
+        } else if (g_config.hmd_lock_game_pitch) {
+            corrected[5] = game_pitch + hmd_rotation.pitch;
+            corrected[6] += hmd_rotation.yaw;
+            corrected[4] += hmd_rotation.roll;
+        }
         applied_hmd_orientation = quaternion_from_hmd_euler(
             hmd_pose.pitch_degrees * g_config.hmd_pitch_scale,
             hmd_pose.yaw_degrees * g_config.hmd_yaw_scale,
@@ -31014,32 +31071,11 @@ int decode_first_person_bridge_state(float* view, uint64_t present) {
     const bool previous_unsupported =
         g_first_person_bridge_unsupported.exchange(
             unsupported, std::memory_order_relaxed);
-    const bool previous_boat =
-        g_first_person_bridge_boat.exchange(
-            boat, std::memory_order_relaxed);
+    const bool previous_boat = g_first_person_bridge_boat.exchange(
+        boat, std::memory_order_relaxed);
     const bool previous_combat =
         g_first_person_bridge_combat.exchange(
             combat, std::memory_order_relaxed);
-    // Boat control has two native player states (Sailing and SailingPassive),
-    // plus mount/dismount tails where the player root is still attached. Keep
-    // this handoff distinct from combat so diagnostics and its cooldown retain
-    // their original meaning. Present owns the actual camera-mode transition.
-    if (boat != previous_boat) {
-        if (boat) {
-            g_first_person_boat_restore_after_ms.store(
-                UINT64_MAX, std::memory_order_relaxed);
-            if (g_camera_mode.load(std::memory_order_relaxed) == 2) {
-                g_first_person_boat_exit_requested.store(
-                    true, std::memory_order_release);
-            }
-        } else if (g_first_person_boat_restore_pending.load(
-                       std::memory_order_acquire)) {
-            constexpr uint64_t kBoatReturnDelayMs = 750;
-            g_first_person_boat_restore_after_ms.store(
-                GetTickCount64() + kBoatReturnDelayMs,
-                std::memory_order_release);
-        }
-    }
     // [FEATURE:FIRST-PERSON-COMBAT-EXIT 3/5] Keep the camera hook read-only.
     // It publishes combat edges and deadlines; Present owns every camera-mode
     // transition and the normal F11 cleanup.
@@ -32154,6 +32190,13 @@ bool acquire_pair_frozen_native_head_pose(
         calculate_native_head_anatomical_anchor(
             g_native_head_pose_pair_cache.pose,
             g_native_head_pose_pair_cache.anchor);
+        const bool horse_gallop = static_cast<FirstPersonBridgeState>(
+            g_first_person_bridge_state.load(std::memory_order_acquire)) ==
+            FirstPersonBridgeState::HorseGallop;
+        w3vr::first_person::apply_horse_gallop_world_up_offset(
+            horse_gallop,
+            w3vr::first_person::kHorseGallopWorldUpOffsetMeters,
+            g_native_head_pose_pair_cache.anchor[2]);
         smooth_native_head_anchor_lateral_vertical(
             g_native_head_pose_pair_cache.pose,
             g_native_head_pose_pair_cache.camera_clearance_forward,
@@ -32610,6 +32653,10 @@ void update_first_person_bridge_offsets(uint64_t present) {
         case FirstPersonBridgeState::HorseGallop:
             target_forward =
                 g_config.engine_first_person_horse_gallop_forward_offset;
+            w3vr::first_person::apply_horse_gallop_world_up_offset(
+                true,
+                w3vr::first_person::kHorseGallopWorldUpOffsetMeters,
+                target_world_z);
             break;
         default:
             break;
@@ -34034,12 +34081,22 @@ void __fastcall hook_engine_view_rebuild(float* view) {
             // the low-pitch reference affects position only, never the viewing
             // angle. Mouse/pad pitch remains locked by the existing game-pitch
             // lock, then physical HMD pitch is added below one-to-one.
-            const float game_pitch = native_combat_lock_owner
+            const float raw_game_pitch = native_combat_lock_owner
                 ? original_pitch
                 : (g_config.hmd_lock_game_pitch &&
                         g_hmd_game_pitch_lock_valid
                     ? g_hmd_game_pitch_lock
                     : original_pitch);
+            const float game_pitch =
+                !g_config.hmd_lock_game_pitch && !native_combat_lock_owner
+                ? resolve_vertical_pitch_recenter(raw_game_pitch, present)
+                : raw_game_pitch;
+            const float scaled_hmd_pitch =
+                camera_hmd_pitch * g_config.hmd_pitch_scale;
+            const float scaled_hmd_yaw =
+                camera_hmd_yaw * g_config.hmd_yaw_scale;
+            const float scaled_hmd_roll =
+                camera_hmd_roll * g_config.hmd_roll_scale;
             // The scene no longer uses the live mouse pitch when pitch lock is
             // enabled. Runtime bounds show that the marker needs half of the
             // original game-pitch response: the fully live V416 base moved too
@@ -34059,28 +34116,85 @@ void __fastcall hook_engine_view_rebuild(float* view) {
                     world_marker_camera_view[2] += game_pitch_delta *
                         g_config.world_marker_game_pitch_depth_scale;
                 }
-                world_marker_camera_view[5] = game_pitch +
+                const float marker_game_pitch = game_pitch +
                     (g_config.world_marker_game_pitch_depth_enabled
                         ? 0.0f
                         : game_pitch_delta *
-                            g_config.world_marker_game_pitch_gain) +
-                    camera_hmd_pitch * g_config.hmd_pitch_scale *
-                        g_config.world_marker_hmd_vertical_gain;
-                world_marker_camera_view[6] +=
-                    camera_hmd_yaw * g_config.hmd_yaw_scale;
-                world_marker_camera_view[4] +=
-                    camera_hmd_roll * g_config.hmd_roll_scale;
+                            g_config.world_marker_game_pitch_gain);
+                const w3vr::hmd_camera_orientation::EulerDegrees
+                    marker_hmd_rotation{
+                        scaled_hmd_roll,
+                        scaled_hmd_pitch *
+                            g_config.world_marker_hmd_vertical_gain,
+                        scaled_hmd_yaw};
+                w3vr::hmd_camera_orientation::EulerDegrees
+                    composed_marker_rotation{};
+                const bool marker_rotation_composed =
+                    !g_config.hmd_lock_game_pitch &&
+                    w3vr::hmd_camera_orientation::
+                        compose_game_camera_with_local_hmd(
+                            {world_marker_camera_view[4],
+                                marker_game_pitch,
+                                world_marker_camera_view[6]},
+                            marker_hmd_rotation,
+                            composed_marker_rotation);
+                if (marker_rotation_composed) {
+                    world_marker_camera_view[4] =
+                        composed_marker_rotation.roll;
+                    world_marker_camera_view[5] =
+                        composed_marker_rotation.pitch;
+                    world_marker_camera_view[6] =
+                        composed_marker_rotation.yaw;
+                } else if (g_config.hmd_lock_game_pitch) {
+                    world_marker_camera_view[5] = marker_game_pitch +
+                        marker_hmd_rotation.pitch;
+                    world_marker_camera_view[6] += marker_hmd_rotation.yaw;
+                    world_marker_camera_view[4] += marker_hmd_rotation.roll;
+                } else {
+                    world_marker_camera_valid = false;
+                }
             }
-            view[5] = game_pitch +
-                camera_hmd_pitch * g_config.hmd_pitch_scale;
-            view[6] += camera_hmd_yaw * g_config.hmd_yaw_scale;
-            view[4] += camera_hmd_roll * g_config.hmd_roll_scale;
+            const w3vr::hmd_camera_orientation::EulerDegrees hmd_rotation{
+                scaled_hmd_roll,
+                scaled_hmd_pitch,
+                scaled_hmd_yaw};
+            w3vr::hmd_camera_orientation::EulerDegrees composed_rotation{};
+            const bool vertical_pitch_rotation_composed =
+                !g_config.hmd_lock_game_pitch &&
+                w3vr::hmd_camera_orientation::compose_game_camera_with_local_hmd(
+                    {original_roll, game_pitch, original_yaw},
+                    hmd_rotation,
+                    composed_rotation);
+            if (vertical_pitch_rotation_composed) {
+                view[4] = composed_rotation.roll;
+                view[5] = composed_rotation.pitch;
+                view[6] = composed_rotation.yaw;
+                static std::atomic<bool> logged_vertical_pitch_rotation{};
+                if (g_config.runtime_diagnostics &&
+                    !logged_vertical_pitch_rotation.exchange(
+                        true, std::memory_order_relaxed)) {
+                    log_line(
+                        "V1346 vertical-pitch local-HMD composition active "
+                        "present=%llu game=%.4f,%.4f,%.4f "
+                        "hmd=%.4f,%.4f,%.4f final=%.4f,%.4f,%.4f",
+                        static_cast<unsigned long long>(present),
+                        original_roll, game_pitch, original_yaw,
+                        hmd_rotation.roll, hmd_rotation.pitch,
+                        hmd_rotation.yaw,
+                        view[4], view[5], view[6]);
+                }
+            } else if (g_config.hmd_lock_game_pitch) {
+                view[5] = game_pitch + scaled_hmd_pitch;
+                view[6] += scaled_hmd_yaw;
+                view[4] += scaled_hmd_roll;
+            }
             applied_hmd_orientation = quaternion_from_hmd_euler(
                 camera_hmd_pitch * g_config.hmd_pitch_scale,
                 camera_hmd_yaw * g_config.hmd_yaw_scale,
                 camera_hmd_roll * g_config.hmd_roll_scale);
             applied_hmd_position = {local_right, local_up, local_forward};
-            applied_hmd_pose_valid = true;
+            applied_hmd_pose_valid = g_config.hmd_lock_game_pitch ||
+                vertical_pitch_rotation_composed;
         }
         if (g_config.engine_view_probe && present % 30 == 0) {
             log_line("HMD camera apply present=%llu pos=%.4f,%.4f,%.4f roll=%.4f->%.4f pitch=%.4f->%.4f yaw=%.4f->%.4f rotation=%.4f,%.4f,%.4f translation=%.4f,%.4f,%.4f fov=%.4f aspect=%.6f near=%.4f far=%.1f",
@@ -39563,7 +39677,7 @@ void ensure_initialized() {
                 "focus_fire_b1=stereo_and_aer_centered_draw_proven "
                 "aer_taau_hud=scene_and_retained_pair_fail_open");
             log_line(
-                "witcher3vr dxgi proxy initialized build=V1343 base=V1342_actual_producer_smoke_authority "
+                "witcher3vr dxgi proxy initialized build=V1346 base=V1343_hud_plus_V17007_camera_controls "
                 "anchor_smoothing_ini=%d anchor_smoothing_seconds=%.4f "
                 "first_person_strafe_ini=%d mode3_aer_presentation=%d raytracing_enabled=%d raytracing_history_buffers=%d "
                 "aer_afw_enabled=%d persistent_registry=%d dlss_public_streamline=%d "
@@ -39622,7 +39736,7 @@ void ensure_initialized() {
             log_line(
                 "V1310 route flight recorder=ini_opt_in default_off f3_dump=15s renderdoc_f3_preserved=1 qpc=present_only gpu_readback=0 descriptor_scan=0 text_hotpath=0");
             log_line(
-                "V1343 mode3_projection=V1331_runtime_SYM_ASYM stereo_hud_generation_reset=drain_then_rebuild dlss_scene_history=exact_post_boundary_reset aer_afw_projection=full_frame_absolute_native_pair native_asym_submit=full_frame asym_effects=actual_producer_factory_proven smoke_authority=current_generation_native_only aer_hud_geometry=runtime_coherent_eye_pair flight_recorders=F3");
+                "V1346 canonical_merge=V1343_plus_V17007 boat_first_person=unlocked horse_gallop_world_up_m=0.30 vertical_pitch_recenter=F9 vertical_pitch_rotation=complete_camera_local_hmd cinema_aspects=5x4_4x3_16x10_16x9 mode3_projection=V1331_runtime_SYM_ASYM stereo_hud_generation_reset=drain_then_rebuild dlss_scene_history=exact_post_boundary_reset aer_afw_projection=full_frame_absolute_native_pair native_asym_submit=full_frame asym_effects=actual_producer_factory_proven smoke_authority=current_generation_native_only aer_hud_geometry=runtime_coherent_eye_pair flight_recorders=F3");
             log_line(
                 "V1279 DLSS compatibility=public_streamline_aer_private_history_ngx_stereo legacy_module_agnostic_discovery=disabled_by_V1288");
             log_line(
@@ -41709,7 +41823,12 @@ void update_hmd_freelook_pose() {
         (g_xr_views[0].pose.position.x + g_xr_views[1].pose.position.x) * 0.5f,
         (g_xr_views[0].pose.position.y + g_xr_views[1].pose.position.y) * 0.5f,
         (g_xr_views[0].pose.position.z + g_xr_views[1].pose.position.z) * 0.5f};
-    if ((GetAsyncKeyState(VK_F9) & 1) != 0 || !g_hmd_center_valid.load()) {
+    const bool manual_recenter = (GetAsyncKeyState(VK_F9) & 1) != 0;
+    if (manual_recenter && !g_config.hmd_lock_game_pitch) {
+        g_hmd_vertical_pitch_recenter_pending.store(
+            true, std::memory_order_release);
+    }
+    if (manual_recenter || !g_hmd_center_valid.load()) {
         g_hmd_center_orientation = current;
         const float yaw_twist_length = sqrtf(
             current.y * current.y + current.w * current.w);
@@ -46216,7 +46335,7 @@ void render_openxr_test_frame(
                                 1, std::memory_order_relaxed);
                         if (log_index < 16) {
                             log_line(
-                                "V1343 final Mode3 OpenXR submit sample=%u "
+                                "V1346 final Mode3 OpenXR submit sample=%u "
                                 "route=%s backend=%s dlaa=%u projection=%s "
                                 "source=%ux%u swapchain=%ux%u "
                                 "rect0=%d,%d %dx%d rect1=%d,%d %dx%d "
@@ -47501,7 +47620,7 @@ void handle_runtime_mode3_projection_hotkey() {
     }
     if (!mode3_stereo_transport_active()) {
         log_line(
-            "V1343 runtime projection hotkey=F2 ignored route=non_mode3 "
+            "V1346 runtime projection hotkey=F2 ignored route=non_mode3 "
             "present=%llu",
             static_cast<unsigned long long>(
                 g_present_count.load(std::memory_order_relaxed)));
@@ -47511,7 +47630,7 @@ void handle_runtime_mode3_projection_hotkey() {
     g_runtime_mode3_projection_toggle_requests.fetch_add(
         1, std::memory_order_release);
     log_line(
-        "V1343 Mode3 runtime projection toggle queued hotkey=F2 "
+        "V1346 Mode3 runtime projection toggle queued hotkey=F2 "
         "route=%s present=%llu",
         mode3_aer_presentation_active() ? "aer" : "stereo",
         static_cast<unsigned long long>(
@@ -47567,7 +47686,7 @@ void apply_present_boundary_requests() {
             native_asymmetric, std::memory_order_release);
         g_mode3_final_submit_logs.store(0, std::memory_order_release);
         log_line(
-            "V1343 Mode3 runtime projection=%s hotkey=F2 route=%s "
+            "V1346 Mode3 runtime projection=%s hotkey=F2 route=%s "
             "boundary=post_submit present=%llu requests=%u",
             native_asymmetric ? "asymmetric" : "symmetric",
             mode3_aer_presentation_active() ? "aer" : "stereo",
@@ -47590,7 +47709,7 @@ void handle_f3_capture_hotkey(IDXGISwapChain* swapchain) {
     if (w3vr::pipeline_flight::enabled()) {
         w3vr::pipeline_flight::dump_last_ten_seconds();
     }
-    w3vr::route_flight::dump_last_seconds("V1343", 15);
+    w3vr::route_flight::dump_last_seconds("V1346", 15);
     trigger_renderdoc_capture(
         g_game_swapchain != nullptr ? g_game_swapchain : swapchain);
 }
@@ -47854,8 +47973,6 @@ HRESULT STDMETHODCALLTYPE hook_present(IDXGISwapChain* swapchain, UINT sync_inte
         if (camera_mode == 0) {
             changed = leave_first_person_for_standard_camera();
         } else if (camera_mode == 2 &&
-                   !g_first_person_bridge_boat.load(
-                       std::memory_order_relaxed) &&
                    g_camera_mode.load(std::memory_order_acquire) != 2) {
             enter_first_person_from_standard_camera(true);
             changed = true;
@@ -47875,10 +47992,6 @@ HRESULT STDMETHODCALLTYPE hook_present(IDXGISwapChain* swapchain, UINT sync_inte
         g_first_person_combat_restore_pending.store(
             false, std::memory_order_release);
         g_first_person_combat_restore_after_ms.store(
-            UINT64_MAX, std::memory_order_relaxed);
-        g_first_person_boat_restore_pending.store(
-            false, std::memory_order_release);
-        g_first_person_boat_restore_after_ms.store(
             UINT64_MAX, std::memory_order_relaxed);
         const int current_mode =
             g_camera_mode.load(std::memory_order_acquire);
@@ -47901,29 +48014,13 @@ HRESULT STDMETHODCALLTYPE hook_present(IDXGISwapChain* swapchain, UINT sync_inte
             false, std::memory_order_release);
         g_first_person_combat_restore_after_ms.store(
             UINT64_MAX, std::memory_order_relaxed);
-        g_first_person_boat_restore_pending.store(
-            false, std::memory_order_release);
-        g_first_person_boat_restore_after_ms.store(
-            UINT64_MAX, std::memory_order_relaxed);
         const int current_mode =
             g_camera_mode.load(std::memory_order_acquire);
         const int camera_mode = current_mode == 2 ? 0 : 2;
         set_first_person_camera_mode(camera_mode, "F11");
     }
-    // Boat authority uses the same complete Standard-camera transaction as
-    // F11 and combat, but owns a distinct reversible session. A stale edge is
-    // ignored if the bridge has already observed the end of the boat state.
-    if (g_first_person_boat_exit_requested.exchange(
-            false, std::memory_order_acq_rel) &&
-        g_first_person_bridge_boat.load(std::memory_order_relaxed) &&
-        set_first_person_camera_mode(0, "boat")) {
-        g_first_person_boat_restore_pending.store(
-            true, std::memory_order_release);
-        g_first_person_boat_restore_after_ms.store(
-            UINT64_MAX, std::memory_order_relaxed);
-    }
-    // [FIX:FIRST-PERSON-STANDARD-HANDOFF 2/2] Combat, boat authority and the
-    // physical F11 key share the exact Standard-camera transition; none can
+    // [FIX:FIRST-PERSON-STANDARD-HANDOFF 2/2] Combat and the physical F11 key
+    // share the exact Standard-camera transition; neither can
     // leave a Mode-2 offset, preview yaw or native XInput servo alive.
     if (g_first_person_combat_exit_requested.exchange(
             false, std::memory_order_acq_rel) &&
@@ -48114,7 +48211,6 @@ HRESULT STDMETHODCALLTYPE hook_present(IDXGISwapChain* swapchain, UINT sync_inte
     if (g_first_person_combat_restore_pending.load(
             std::memory_order_acquire) &&
         !g_first_person_bridge_combat.load(std::memory_order_relaxed) &&
-        !g_first_person_bridge_boat.load(std::memory_order_relaxed) &&
         restore_after_ms != UINT64_MAX &&
         GetTickCount64() >= restore_after_ms &&
         g_camera_mode.load(std::memory_order_relaxed) == 0 &&
@@ -48126,31 +48222,6 @@ HRESULT STDMETHODCALLTYPE hook_present(IDXGISwapChain* swapchain, UINT sync_inte
         g_first_person_combat_restore_after_ms.store(
             UINT64_MAX, std::memory_order_relaxed);
         announce_camera_mode(2, "combat_end");
-    }
-    // Restore only a first-person session that entering the boat suspended.
-    // The bridge keeps both sailing states and their attachment tails active;
-    // the short release delay prevents a transition-tail camera handoff.
-    const uint64_t boat_restore_after_ms =
-        g_first_person_boat_restore_after_ms.load(
-            std::memory_order_acquire);
-    if (g_first_person_boat_restore_pending.load(
-            std::memory_order_acquire) &&
-        !g_first_person_bridge_boat.load(std::memory_order_relaxed) &&
-        (!g_config.engine_first_person_combat_exit ||
-            !g_first_person_bridge_combat.load(std::memory_order_relaxed)) &&
-        boat_restore_after_ms != UINT64_MAX &&
-        GetTickCount64() >= boat_restore_after_ms &&
-        !engine_aim_active &&
-        aim_gameplay_authority &&
-        g_camera_mode.load(std::memory_order_relaxed) == 0 &&
-        !g_force_mono_cinema.load(std::memory_order_acquire) &&
-        !g_cinema_mode_active.load(std::memory_order_relaxed)) {
-        enter_first_person_from_standard_camera(true);
-        g_first_person_boat_restore_pending.store(
-            false, std::memory_order_release);
-        g_first_person_boat_restore_after_ms.store(
-            UINT64_MAX, std::memory_order_relaxed);
-        announce_camera_mode(2, "boat_end");
     }
     update_taau_auto_activation(frame);
     update_taau_hot_hook_state();

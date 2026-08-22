@@ -167,6 +167,38 @@ if(BUILD_TESTING)
         COMMAND w3vr_first_person_anchor_smoothing_tests
     )
 
+    add_executable(w3vr_first_person_horse_gallop_offset_tests
+        tests/first_person_horse_gallop_offset_tests.cpp
+    )
+    target_include_directories(
+        w3vr_first_person_horse_gallop_offset_tests PRIVATE src)
+    add_test(
+        NAME first_person_horse_gallop_offset
+        COMMAND w3vr_first_person_horse_gallop_offset_tests
+    )
+
+    add_executable(w3vr_hmd_camera_orientation_tests
+        tests/hmd_camera_orientation_tests.cpp
+        src/openxr_eye_geometry.cpp
+    )
+    target_include_directories(w3vr_hmd_camera_orientation_tests PRIVATE
+        src
+        "${W3VR_OPENXR_DIR}/include"
+    )
+    add_test(
+        NAME hmd_camera_orientation
+        COMMAND w3vr_hmd_camera_orientation_tests
+    )
+
+    add_executable(w3vr_cinema_aspect_tests
+        tests/cinema_aspect_tests.cpp
+    )
+    target_include_directories(w3vr_cinema_aspect_tests PRIVATE src)
+    add_test(
+        NAME cinema_aspect
+        COMMAND w3vr_cinema_aspect_tests
+    )
+
     add_executable(w3vr_camera_follow_policy_tests
         tests/camera_follow_policy_tests.cpp
     )

@@ -272,13 +272,7 @@ CinemaAspect ReadCinemaAspect(const IniDocument& ini) {
     const auto value = ReadString(
         ini, "openxr", "cinema_aspect",
         legacy_five_four ? "5x4" : "4x3");
-    return value == "4x3" || value == "4:3"
-        ? CinemaAspect::FourThree
-        : CinemaAspect::FiveFour;
-}
-
-const char* CinemaAspectIniValue(CinemaAspect aspect) {
-    return aspect == CinemaAspect::FourThree ? "4x3" : "5x4";
+    return ParseCinemaAspect(value);
 }
 
 void MigrateConfigurationToV9(IniDocument& ini) {

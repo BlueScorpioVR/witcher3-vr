@@ -406,7 +406,8 @@ bool CaptureState(LauncherState& state, std::wstring& error) {
         Item(IdCinemaScale), TBM_GETPOS, 0, 0)) / 100.0f;
     state.cinema_aspect = static_cast<CinemaAspect>(std::clamp(
         static_cast<int>(SendMessageW(
-            Item(IdCinemaAspect), CB_GETCURSEL, 0, 0)), 0, 1));
+            Item(IdCinemaAspect), CB_GETCURSEL, 0, 0)), 0,
+        static_cast<int>(CinemaAspect::Count) - 1));
     state.cinema_hud_scale = static_cast<float>(SendMessageW(
         Item(IdCinemaHudScale), TBM_GETPOS, 0, 0)) / 100.0f;
     state.cinema_hud_convergence_offset = static_cast<int>(SendMessageW(
@@ -872,6 +873,8 @@ void PopulateControls() {
     HWND cinema_aspect = Item(IdCinemaAspect);
     ComboAdd(cinema_aspect, L"5:4");
     ComboAdd(cinema_aspect, L"4:3");
+    ComboAdd(cinema_aspect, L"16:10");
+    ComboAdd(cinema_aspect, L"16:9");
 
     HWND snap_turn_degrees = Item(IdFirstPersonSnapTurnDegrees);
     ComboAdd(snap_turn_degrees, L"30 degrees");
@@ -1035,7 +1038,7 @@ void CreateInterface(HWND window) {
          AddLabel(L"0.90", 445, 332, 50, 22,
              IdCinemaScaleValue, SS_RIGHT)});
     AddTooltips(
-        L"Select the Cinema3D screen aspect ratio. 5:4 is the recommended default; 4:3 is available for personal preference.",
+        L"Select the Cinema3D aspect ratio for manual F10 and automatic panel cutscenes. Available formats: 5:4, 4:3, 16:10, and 16:9.",
         {AddLabel(L"Aspect", 510, 332, 58, 22),
          AddCombo(575, 324, 104, IdCinemaAspect)});
 
@@ -1082,7 +1085,7 @@ void CreateInterface(HWND window) {
     AddTooltip(AddControl(L"BUTTON",
         L"Enable vertical mouse/pad pitch (Experimental)",
         BS_AUTOCHECKBOX | WS_TABSTOP, 38, 530, 335, 28, IdVerticalPitch),
-        L"Allows mouse or gamepad pitch to tilt the camera vertically. The headset currently moves incorrectly when the view is not level with the horizon; this issue is not fixed yet.");
+        L"Allows mouse or gamepad pitch to tilt the camera vertically while the complete headset rotation remains correctly composed with the pitched camera.");
     AddTooltip(AddControl(L"BUTTON", L"Faster Movement Transitions",
         BS_AUTOCHECKBOX | WS_TABSTOP, 380, 530, 285, 26,
         IdFastMovementTransitions),
