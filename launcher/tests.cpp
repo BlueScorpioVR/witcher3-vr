@@ -605,7 +605,8 @@ void TestEmbeddedLauncherDefaults() {
         defaults->Get("engine", "temporal_backend") == "dlss" &&
         defaults->Get("engine", "first_person_combat_exit") == "0" &&
         defaults->Get("engine", "raytracing_history_buffers") == "8" &&
-        defaults->Get("debug", "pipeline_flight_recorder") == "0",
+        defaults->Get("debug", "pipeline_flight_recorder") == "0" &&
+        defaults->Get("debug", "route_flight_recorder") == "0",
         "embedded launcher defaults do not match schema 14 release policy");
 }
 

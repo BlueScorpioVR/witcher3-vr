@@ -25,6 +25,7 @@
 #include "mode3_transport_policy.h"
 #include "native_asymmetric_transport_policy.h"
 #include "pipeline_flight_recorder.h"
+#include "route_flight_recorder.h"
 #include "rt_ingress_join.h"
 #include "shadow_cascade_authority_policy.h"
 #include "taau_submission_policy.h"
@@ -447,6 +448,9 @@ struct Config {
     // Lightweight ten-second CPU/GPU phase recorder. Independent from broad
     // Diagnostic Logging; F2 is the only operation which writes its file.
     bool pipeline_flight_recorder{false};
+    // Lightweight route-only event recorder. It is independently enabled by
+    // INI and F3 is the only operation which writes its file.
+    bool route_flight_recorder{false};
     // Optional in-process RenderDoc integration. This is deliberately
     // independent from Diagnostic Logging and defaults off so an adjacent
     // renderdoc.dll can remain installed without touching the render path.
@@ -4918,6 +4922,177 @@ void log_line(const char* fmt, ...);
 void log_taau_trace_line(const char* fmt, ...);
 void wait_for_xr_gpu();
 void update_taau_hot_hook_state();
+
+// [DIAG:ROUTE-FLIGHT-F3 V1310] One timestamp per Present. Hot route sites
+// append compact POD events only when the independent INI switch is enabled.
+std::atomic<int64_t> g_route_flight_present_qpc{};
+
+void update_route_flight_present_clock() {
+    if (!w3vr::route_flight::enabled()) {
+        return;
+    }
+    LARGE_INTEGER now{};
+    if (QueryPerformanceCounter(&now)) {
+        g_route_flight_present_qpc.store(
+            now.QuadPart, std::memory_order_relaxed);
+    }
+}
+
+void record_route_flight(
+    w3vr::route_flight::EventCode code,
+    int32_t eye = -1,
+    uint64_t pair_id = 0,
+    uint64_t previous_pair_id = 0,
+    uint32_t generation = UINT32_MAX,
+    uint16_t stage = 0,
+    uint32_t flags = 0,
+    uint32_t detail0 = 0,
+    uint32_t detail1 = 0,
+    uint32_t detail2 = 0,
+    uint32_t detail3 = 0) {
+    if (!w3vr::route_flight::enabled()) {
+        return;
+    }
+    w3vr::route_flight::Event event{};
+    event.qpc = g_route_flight_present_qpc.load(
+        std::memory_order_relaxed);
+    event.present = g_present_count.load(std::memory_order_relaxed);
+    event.pair_id = pair_id;
+    event.previous_pair_id = previous_pair_id;
+    event.generation = generation == UINT32_MAX
+        ? g_streamline_capture_generation.load(std::memory_order_relaxed)
+        : generation;
+    event.eye = eye;
+    event.thread_id = GetCurrentThreadId();
+    event.code = code;
+    event.stage = stage;
+    event.flags = flags;
+    event.detail0 = detail0;
+    event.detail1 = detail1;
+    event.detail2 = detail2;
+    event.detail3 = detail3;
+    w3vr::route_flight::record(event);
+}
+
+class TaauRouteFlightScope {
+public:
+    TaauRouteFlightScope(UINT x, UINT y, UINT z)
+        : x_(x), y_(y), z_(z) {
+        record_route_flight(
+            w3vr::route_flight::EventCode::TaauResolve,
+            -1, 0, 0, UINT32_MAX, 0, 0, x_, y_, z_, 0);
+    }
+
+    ~TaauRouteFlightScope() {
+        record_route_flight(
+            w3vr::route_flight::EventCode::TaauResolve,
+            eye_, pair_id_, previous_pair_id_, generation_, stage_, flags_,
+            x_, y_, detail2_, detail3_);
+    }
+
+    void set_identity(
+        int eye, uint64_t pair_id, uint32_t generation, bool recovered) {
+        eye_ = eye;
+        pair_id_ = pair_id;
+        generation_ = generation;
+        stage_ = std::max<uint16_t>(stage_, 3);
+        if (recovered) {
+            flags_ |= 0x02u;
+        }
+    }
+
+    void set_history(uint64_t previous_pair_id, uint64_t matched_previous) {
+        previous_pair_id_ = previous_pair_id;
+        detail2_ = static_cast<uint32_t>(matched_previous);
+        stage_ = std::max<uint16_t>(stage_, 5);
+    }
+
+    void mark_afw(bool requested, bool captured) {
+        if (requested) flags_ |= 0x04u;
+        if (captured) flags_ |= 0x40u;
+        stage_ = std::max<uint16_t>(stage_, 6);
+    }
+
+    void advance(uint16_t stage, uint32_t flags = 0, uint32_t detail = 0) {
+        stage_ = std::max(stage_, stage);
+        flags_ |= flags;
+        detail3_ = detail;
+    }
+
+    void succeed(uint16_t stage, uint32_t flags = 0) {
+        advance(stage, flags | 0x01u);
+    }
+
+private:
+    UINT x_{};
+    UINT y_{};
+    UINT z_{};
+    int32_t eye_{-1};
+    uint64_t pair_id_{};
+    uint64_t previous_pair_id_{};
+    uint32_t generation_{UINT32_MAX};
+    uint16_t stage_{1};
+    uint32_t flags_{};
+    uint32_t detail2_{};
+    uint32_t detail3_{};
+};
+
+class RouteFlightOutcomeScope {
+public:
+    RouteFlightOutcomeScope(
+        w3vr::route_flight::EventCode code,
+        int32_t eye,
+        uint64_t pair_id,
+        uint32_t generation,
+        uint32_t detail0 = 0)
+        : code_(code), eye_(eye), pair_id_(pair_id),
+          generation_(generation), detail0_(detail0) {
+        record_route_flight(
+            code_, eye_, pair_id_, 0, generation_, 0, 0,
+            detail0_, 0, 0, 0);
+    }
+
+    ~RouteFlightOutcomeScope() {
+        record_route_flight(
+            code_, eye_, pair_id_, previous_pair_id_, generation_,
+            stage_, flags_, detail0_, detail1_, detail2_, detail3_);
+    }
+
+    void advance(
+        uint16_t stage,
+        uint32_t flags = 0,
+        uint32_t detail1 = 0,
+        uint32_t detail2 = 0,
+        uint32_t detail3 = 0) {
+        stage_ = std::max(stage_, stage);
+        flags_ |= flags;
+        detail1_ = detail1;
+        detail2_ = detail2;
+        detail3_ = detail3;
+    }
+
+    void set_previous(uint64_t previous_pair_id) {
+        previous_pair_id_ = previous_pair_id;
+    }
+
+    void succeed(uint16_t stage, uint32_t flags = 0) {
+        advance(stage, flags | 0x01u, detail1_, detail2_, detail3_);
+    }
+
+private:
+    w3vr::route_flight::EventCode code_{};
+    int32_t eye_{-1};
+    uint64_t pair_id_{};
+    uint64_t previous_pair_id_{};
+    uint32_t generation_{UINT32_MAX};
+    uint16_t stage_{1};
+    uint32_t flags_{};
+    uint32_t detail0_{};
+    uint32_t detail1_{};
+    uint32_t detail2_{};
+    uint32_t detail3_{};
+};
+
 bool taau_matrix_warmup_ready(uint64_t present) {
     uint32_t recent_samples[2]{};
     std::scoped_lock lock{g_engine_temporal_matrix_mutex};
@@ -9569,6 +9744,9 @@ bool capture_puredark_afw_mode3_taau_inputs(
     uint64_t pair_id,
     const std::array<XrView, 2>& exact_render_views,
     bool exact_render_views_valid) {
+    RouteFlightOutcomeScope route_flight{
+        w3vr::route_flight::EventCode::AfwCapture,
+        static_cast<int32_t>(eye), pair_id, generation, 1u};
     const bool route_configured =
         puredark_afw_mode3_aer_taau_route_configured();
     const uint32_t current_generation =
@@ -9594,6 +9772,12 @@ bool capture_puredark_afw_mode3_taau_inputs(
         generation != current_generation) {
         return false;
     }
+    route_flight.advance(
+        2, (exact_render_views_valid ? 0x02u : 0u) |
+            (gameplay_capture_allowed ? 0x04u : 0u),
+        current_generation, static_cast<uint32_t>(menu_state),
+        (cinema_active ? 0x01u : 0u) |
+            (loading_active ? 0x02u : 0u));
 
     const auto depth_desc = depth.resource->GetDesc();
     const auto motion_desc = motion_vectors.resource->GetDesc();
@@ -9614,6 +9798,7 @@ bool capture_puredark_afw_mode3_taau_inputs(
             existing.input.valid && existing.input.eye == eye &&
             existing.input.pair_id == pair_id &&
             existing.input.generation == generation) {
+            route_flight.succeed(3, 0x08u);
             return true;
         }
     }
@@ -9658,6 +9843,14 @@ bool capture_puredark_afw_mode3_taau_inputs(
         w3vr::puredark_afw::build_camera_data_from_streamline(
             raw_camera.constants.data(), raw_camera.constants.size(), eye,
             baseline, recovered_camera.camera, recovery_error);
+    route_flight.set_previous(raw_camera.capture_present);
+    route_flight.advance(
+        4, (raw_available ? 0x02u : 0u) |
+            (fifo_identity_valid ? 0x04u : 0u) |
+            (recovered ? 0x08u : 0u),
+        raw_camera.eye, raw_camera.generation,
+        static_cast<uint32_t>(
+            g_puredark_afw_streamline_camera_history.size()));
     if (!recovered) {
         // Once FIFO identity is broken, no remaining entry may be shifted onto
         // a later resolve. Discard the queue and resume from the next producer.
@@ -9751,6 +9944,9 @@ bool capture_puredark_afw_mode3_taau_inputs(
             "taau_producer_ring", L"no retired TAAU producer bundle slot");
         return false;
     }
+    route_flight.advance(
+        5, 0, bundle_slot, static_cast<uint32_t>(completed_fence),
+        static_cast<uint32_t>(g_puredark_afw_bundle_write_cursor));
 
     auto& slot = g_puredark_afw_bundle_ring[bundle_slot];
     auto retained_depth = slot.input.depth;
@@ -9783,6 +9979,9 @@ bool capture_puredark_afw_mode3_taau_inputs(
         log_puredark_afw_failure("taau_producer_resources", error);
         return false;
     }
+    route_flight.advance(
+        6, 0, bundle_slot, static_cast<uint32_t>(depth_desc.Width),
+        depth_desc.Height);
 
     w3vr::puredark_afw::TextureDesc depth_source{};
     depth_source.texture = depth.resource;
@@ -9806,6 +10005,9 @@ bool capture_puredark_afw_mode3_taau_inputs(
             "taau_producer_motion_contract", error);
         return false;
     }
+    route_flight.advance(
+        7, 0, bundle_slot, static_cast<uint32_t>(motion_desc.Width),
+        motion_desc.Height);
 
     captured.camera = camera_authority->camera;
     captured.render_views = camera_authority->render_views;
@@ -9855,6 +10057,7 @@ bool capture_puredark_afw_mode3_taau_inputs(
             static_cast<unsigned long long>(
                 g_present_count.load(std::memory_order_relaxed)));
     }
+    route_flight.succeed(8, 0x40u);
     return true;
 }
 
@@ -10014,6 +10217,14 @@ void finalize_puredark_afw_dlss_submission(
         current_puredark_afw_direct_route_tag(routed_eye, route_tag);
     const uint64_t route_epoch =
         g_puredark_afw_route_epoch.load(std::memory_order_acquire);
+    RouteFlightOutcomeScope route_flight{
+        w3vr::route_flight::EventCode::AfwFinalize,
+        static_cast<int32_t>(routed_eye),
+        exact_identity ? route_tag.pair_id : 0,
+        exact_identity ? route_tag.generation
+                       : g_streamline_capture_generation.load(
+                             std::memory_order_relaxed),
+        static_cast<uint32_t>(bundle_slot)};
     std::scoped_lock lock{g_puredark_afw_mutex};
     PuredarkAfwPendingSubmission submission{};
     submission.exact_identity = exact_identity;
@@ -10049,6 +10260,11 @@ void finalize_puredark_afw_dlss_submission(
             slot.input.valid = false;
         }
     }
+    route_flight.advance(
+        2, (exact_identity ? 0x02u : 0u) |
+            (bundle_matches ? 0x04u : 0u),
+        static_cast<uint32_t>(result), static_cast<uint32_t>(route_epoch),
+        submission.bundle_ready ? 1u : 0u);
 
     if (result != NVSDK_NGX_Result_Success) {
         const uint32_t flags =
@@ -10104,6 +10320,7 @@ void finalize_puredark_afw_dlss_submission(
         flags, 0, 0,
         submission.bundle_slot, static_cast<uint32_t>(result),
         submission.generation, route_epoch);
+    route_flight.succeed(3, 0x40u);
 }
 
 void finalize_dlss_cache_submission(
@@ -10706,6 +10923,10 @@ bool evaluate_puredark_afw_mode3_common(
     w3vr::pipeline_flight::CpuScope flight_cpu{
         w3vr::pipeline_flight::Phase::Afw};
     result = {};
+    RouteFlightOutcomeScope route_flight{
+        w3vr::route_flight::EventCode::AfwEvaluate,
+        static_cast<int32_t>(real_eye), pair_id, generation,
+        static_cast<uint32_t>(source_desc.Width)};
     record_rt_flight(
         w3vr::rt_flight::EventCode::AfwEvaluateBegin,
         real_eye, pair_id, 0, w3vr::rt_flight::RejectReason::None,
@@ -10733,6 +10954,10 @@ bool evaluate_puredark_afw_mode3_common(
             static_cast<uint32_t>(source_desc.Format), 0, generation);
         return false;
     }
+    route_flight.advance(
+        2, 0x02u, source_desc.Height,
+        static_cast<uint32_t>(source_desc.Format),
+        static_cast<uint32_t>(present_count));
     const float cant_degrees =
         g_runtime_eye_cant_degrees.load(std::memory_order_relaxed);
     if (std::isfinite(cant_degrees) && std::fabs(cant_degrees) > 0.25f) {
@@ -10798,6 +11023,11 @@ bool evaluate_puredark_afw_mode3_common(
             captured.eye, captured.generation, generation);
         return false;
     }
+    route_flight.advance(
+        3, 0x04u, bundle_slot,
+        static_cast<uint32_t>(slot.submission_serial),
+        static_cast<uint32_t>(
+            g_puredark_afw_mode3_common_ready_queue.size()));
 
     // V1224: the final DXGI backbuffer is the color authority. The immutable
     // producer ticket supplies identity, depth, motion, camera, and ordering;
@@ -10820,6 +11050,7 @@ bool evaluate_puredark_afw_mode3_common(
             generation);
         return false;
     }
+    route_flight.advance(4, 0x08u, bundle_slot);
 
     const auto queued = std::find(
         g_puredark_afw_mode3_common_ready_queue.begin(),
@@ -10897,6 +11128,11 @@ bool evaluate_puredark_afw_mode3_common(
     g_mode3_afw_selected_bundle_slot = UINT32_MAX;
     slot.state = PuredarkAfwBundleState::Consuming;
     g_puredark_afw_consuming_bundle = bundle_slot;
+    route_flight.advance(
+        5, 0x10u, bundle_slot,
+        static_cast<uint32_t>(
+            g_puredark_afw_mode3_common_ready_queue.size()),
+        static_cast<uint32_t>(present_count - slot.ready_present));
     const uint64_t selected_count = g_mode3_afw_fifo_selected.fetch_add(
         1, std::memory_order_relaxed) + 1;
     if (g_config.runtime_diagnostics &&
@@ -10965,6 +11201,7 @@ bool evaluate_puredark_afw_mode3_common(
             bundle_slot, 0, 0, 0, generation);
         return false;
     }
+    route_flight.advance(6, 0x20u, bundle_slot);
     if (evaluate.output_eye_frame_buffer == nullptr ||
         evaluate.output_eye_frame_buffer->color.texture == nullptr) {
         log_puredark_afw_failure(
@@ -11033,12 +11270,17 @@ bool evaluate_puredark_afw_mode3_common(
             motion_desc.Height, static_cast<unsigned>(motion_desc.Format),
             captured.motion_scale[0], captured.motion_scale[1]);
     }
+    route_flight.succeed(7, 0x40u);
     return true;
 }
 
 bool publish_puredark_afw_mode3_common(
     ID3D12GraphicsCommandList* command_list,
     const PuredarkAfwPresentResult& result) {
+    RouteFlightOutcomeScope route_flight{
+        w3vr::route_flight::EventCode::AfwPublish,
+        static_cast<int32_t>(result.real_eye), result.pair_id,
+        result.generation, result.bundle_slot};
     const bool route_configured =
         puredark_afw_mode3_aer_common_transport_configured();
     const bool real_eye_valid = result.real_eye <= 1;
@@ -11060,6 +11302,10 @@ bool publish_puredark_afw_mode3_common(
         !destination_valid || !output_valid) {
         return false;
     }
+    route_flight.advance(
+        2, 0x02u, result.synthesized_eye,
+        static_cast<uint32_t>(visible_real_pair),
+        static_cast<uint32_t>(g_mode3_aer_presentation_generation));
 
     auto* destination = g_packed_present_cache[result.synthesized_eye];
     auto* synthesized = result.synthesized_color.texture;
@@ -11077,6 +11323,10 @@ bool publish_puredark_afw_mode3_common(
             L"generated output does not match the destination eye cache");
         return false;
     }
+    route_flight.advance(
+        3, 0x04u, static_cast<uint32_t>(destination_desc.Width),
+        destination_desc.Height,
+        static_cast<uint32_t>(destination_desc.Format));
 
     const bool transition_synthesized =
         result.synthesized_color.initial_state !=
@@ -11142,6 +11392,7 @@ bool publish_puredark_afw_mode3_common(
                     g_present_count.load(std::memory_order_relaxed)));
         }
     }
+    route_flight.succeed(4, 0x40u);
     return true;
 }
 
@@ -12400,6 +12651,10 @@ void load_config() {
             "debug", "pipeline_flight_recorder", false);
         w3vr::pipeline_flight::set_enabled(
             g_config.pipeline_flight_recorder);
+        g_config.route_flight_recorder = read_ini_bool(
+            "debug", "route_flight_recorder", false);
+        w3vr::route_flight::set_enabled(
+            g_config.route_flight_recorder);
         g_config.focus_projection_shader_registry = read_ini_bool(
             "focus_projection", "shader_registry_enabled", false);
         g_config.cinema_camera_diagnostics = read_ini_bool(
@@ -17563,17 +17818,32 @@ void STDMETHODCALLTYPE hook_execute_command_lists(
                 previous = last.exchange(
                     submitted.pair_id, std::memory_order_acq_rel);
             }
+            const uint64_t effective_pair = authority.preserve_previous
+                ? last.load(std::memory_order_acquire)
+                : submitted.pair_id;
+            const bool non_forward = previous != 0 &&
+                submitted.pair_id <= previous;
+            record_route_flight(
+                w3vr::route_flight::EventCode::TaauSubmission,
+                submitted.eye, submitted.pair_id, previous,
+                g_streamline_capture_generation.load(
+                    std::memory_order_relaxed),
+                1,
+                0x01u |
+                    (submitted.recovered ? 0x02u : 0u) |
+                    (submitted.replayed_as_stale ? 0x10u : 0u) |
+                    (authority.preserve_previous ? 0x20u : 0u) |
+                    (non_forward ? 0x40u : 0u),
+                static_cast<uint32_t>(effective_pair),
+                static_cast<uint32_t>(submitted.recorded_present),
+                static_cast<uint32_t>(submitted.history_pair_at_record),
+                index);
             if (!taau_resolve_runtime_diagnostics_active() &&
                 !taau_drop_diagnostics_active()) {
                 continue;
             }
-            const uint64_t effective_pair = authority.preserve_previous
-                ? last.load(std::memory_order_acquire)
-                : submitted.pair_id;
             const uint64_t submitted_count = g_taau_submitted_resolve_count.fetch_add(
                 1, std::memory_order_relaxed) + 1;
-            const bool non_forward = previous != 0 &&
-                submitted.pair_id <= previous;
             if (submitted_count <= 128 || non_forward ||
                 submitted.replayed_as_stale || submitted_count % 240 == 0) {
                 log_line(
@@ -22414,6 +22684,7 @@ bool dispatch_taau_inplace_marker(
     if (g_engine_menu_state.load(std::memory_order_relaxed) != 0) {
         return false;
     }
+    TaauRouteFlightScope route_flight{x, y, z};
     w3vr::pipeline_flight::CpuScope flight_cpu{
         w3vr::pipeline_flight::Phase::TemporalTaau};
     w3vr::pipeline_flight::GpuScope flight_gpu{
@@ -22486,6 +22757,14 @@ bool dispatch_taau_inplace_marker(
                 source_uav);
     }
     snapshot.pipeline_state = load_command_list_pipeline(command_list);
+    route_flight.advance(
+        2,
+        (motion_found ? 0x01u : 0u) |
+            (cb10_found ? 0x02u : 0u) |
+            (history_found ? 0x04u : 0u) |
+            (output_found ? 0x08u : 0u) |
+            (source_tables_found ? 0x10u : 0u),
+        static_cast<uint32_t>(cb10.size_in_bytes));
     if (!motion_found || !cb10_found) {
         const auto failure = g_taau_health_descriptor_fail.fetch_add(
             1, std::memory_order_relaxed) + 1;
@@ -22824,6 +23103,11 @@ bool dispatch_taau_inplace_marker(
         }
     }
 
+    route_flight.set_identity(
+        expected_eye, expected_pair_id,
+        g_streamline_capture_generation.load(std::memory_order_relaxed),
+        identity_recovered || completed_tag_authority);
+
     std::unique_lock<std::mutex> history_transaction_lock{};
     if (g_config.openxr_mode == 2) {
         history_transaction_lock = std::unique_lock<std::mutex>{
@@ -23054,6 +23338,9 @@ bool dispatch_taau_inplace_marker(
                     static_cast<unsigned long long>(committed_cb10_hash));
                 }
             }
+            route_flight.set_history(
+                expected_history_pair_id, expected_history_pair_id);
+            route_flight.succeed(4, 0x10u);
             return true;
         }
     }
@@ -23122,15 +23409,20 @@ bool dispatch_taau_inplace_marker(
         }
         return false;
     }
+    route_flight.set_history(
+        expected_history_pair_id, hmd_motion.previous_matched_pair_id);
 
     // [FEATURE:PUREDARK-AFW-MODE3-TAAU V12055 4/8] At this point CB10 has
     // named the exact eye/pair consumed by this resolve. Snapshot the original
     // Depth/MVec now: the custom correction below deliberately overwrites the
     // native motion-vector resource before the TAAU resolve executes.
-    if (puredark_afw_mode3_aer_taau_route_configured()) {
+    bool afw_capture_succeeded{};
+    const bool afw_capture_requested =
+        puredark_afw_mode3_aer_taau_route_configured();
+    if (afw_capture_requested) {
         if (output_found && native_output.resource != nullptr) {
             const auto afw_output_desc = native_output.resource->GetDesc();
-            capture_puredark_afw_mode3_taau_inputs(
+            afw_capture_succeeded = capture_puredark_afw_mode3_taau_inputs(
                 command_list, snapshot, depth, original_mvec, cb_data,
                 afw_output_desc,
                 g_streamline_capture_generation.load(
@@ -23141,6 +23433,8 @@ bool dispatch_taau_inplace_marker(
                 hmd_motion.matched_render_views_valid);
         }
     }
+    route_flight.mark_afw(
+        afw_capture_requested, afw_capture_succeeded);
 
     float private_resolve_jitter[2]{};
     w3vr::openxr_eye_geometry::AsymmetricProjectionDescriptor
@@ -23851,6 +24145,11 @@ bool dispatch_taau_inplace_marker(
                 set_compute_table(root, snapshot.compute_tables[root]);
             }
             isolated_history_dispatch = true;
+            route_flight.advance(
+                7,
+                (history_was_initialized ? 0x100u : 0u) |
+                    (history_created ? 0x200u : 0u),
+                slot_index);
             static std::atomic<uint32_t> isolated_history_logs{};
             if ((taau_resolve_runtime_diagnostics_active() ||
                     taau_drop_diagnostics_active()) &&
@@ -23947,7 +24246,9 @@ bool dispatch_taau_inplace_marker(
             g_taau_pending_submission_ready.store(
                 true, std::memory_order_release);
         }
+        route_flight.advance(8, 0x80u);
     }
+    route_flight.succeed(9);
     return true;
 }
 
@@ -26809,6 +27110,7 @@ void __fastcall hook_engine_dlss_command_emit(
     uint32_t frame_token{};
     EngineFrameTag emitted_tag{};
     bool emitted_tag_valid{};
+    size_t token_depth{};
     if (dlss_sequential_mode_active() && parameters != nullptr &&
         g_engine_render_eye >= 0 && g_engine_render_eye <= 1 &&
         read_engine_dlss_emit_token(parameters, frame_token)) {
@@ -26822,7 +27124,6 @@ void __fastcall hook_engine_dlss_command_emit(
         emitted_tag_valid = emitted_tag.eye <= 1 &&
             emitted_tag.pair_id != 0 &&
             emitted_tag.pair_id != UINT64_MAX;
-        size_t token_depth{};
         {
             std::scoped_lock lock{g_sequential_dlss_command_tag_mutex};
             auto& tags = g_sequential_dlss_command_tags[frame_token];
@@ -26854,6 +27155,22 @@ void __fastcall hook_engine_dlss_command_emit(
     if (g_streamline_dlss_route_tag_valid) {
         g_streamline_dlss_route_tag = emitted_tag;
     }
+    record_route_flight(
+        w3vr::route_flight::EventCode::DlssEmit,
+        emitted_tag_valid ? static_cast<int32_t>(emitted_tag.eye)
+                          : g_engine_render_eye,
+        emitted_tag_valid ? emitted_tag.pair_id : g_engine_render_pair_id,
+        0,
+        emitted_tag_valid ? emitted_tag.generation
+                          : g_engine_render_generation,
+        0,
+        (emitted_tag_valid ? 0x01u : 0u) |
+            (emitted_tag.task_provenance_valid ? 0x02u : 0u) |
+            (emitted_tag.render_view_valid ? 0x04u : 0u),
+        frame_token,
+        static_cast<uint32_t>(token_depth),
+        static_cast<uint32_t>(g_sequential_pipeline_eye),
+        static_cast<uint32_t>(g_streamline_forced_eye));
     g_engine_dlss_command_emit(renderer, parameters);
     g_streamline_dlss_route_tag = previous_route_tag;
     g_streamline_dlss_route_tag_valid = previous_route_tag_valid;
@@ -26967,7 +27284,29 @@ void __fastcall hook_engine_dlss_command(void* context, uint8_t** stream) {
     if (g_streamline_dlss_route_tag_valid) {
         g_streamline_dlss_route_tag = route_tag;
     }
+    const uint32_t route_flags =
+        (route_tag_valid ? 0x01u : 0u) |
+        (route_tag.task_provenance_valid ? 0x02u : 0u) |
+        (route_tag.render_view_valid ? 0x04u : 0u);
+    record_route_flight(
+        w3vr::route_flight::EventCode::DlssCommand,
+        route_eye <= 1 ? static_cast<int32_t>(route_eye) : -1,
+        route_pair != UINT64_MAX ? route_pair : 0,
+        0,
+        route_tag_valid ? route_tag.generation : UINT32_MAX,
+        0, route_flags,
+        command_token, static_cast<uint32_t>(route_depth),
+        static_cast<uint32_t>(g_streamline_forced_eye),
+        static_cast<uint32_t>(g_sequential_pipeline_eye));
     g_engine_dlss_command(context, stream);
+    record_route_flight(
+        w3vr::route_flight::EventCode::DlssCommand,
+        route_eye <= 1 ? static_cast<int32_t>(route_eye) : -1,
+        route_pair != UINT64_MAX ? route_pair : 0,
+        0,
+        route_tag_valid ? route_tag.generation : UINT32_MAX,
+        1, route_flags | 0x08u,
+        command_token, static_cast<uint32_t>(route_depth), 0, 0);
     g_streamline_dlss_route_tag = previous_route_tag;
     g_streamline_dlss_route_tag_valid = previous_route_tag_valid;
     g_streamline_dlss_pair_id = previous_pair;
@@ -27203,6 +27542,23 @@ void __fastcall hook_engine_gameplay_frame_entry(void* frame_task) {
         }
     }
 
+    record_route_flight(
+        w3vr::route_flight::EventCode::EngineTaskBegin,
+        g_engine_render_eye,
+        g_engine_render_pair_id,
+        0,
+        g_engine_render_generation,
+        0,
+        (mono_lookup_hit ? 0x01u : 0u) |
+            (g_engine_render_tag_frame_lookup_exact ? 0x02u : 0u) |
+            (g_engine_render_view_valid ? 0x04u : 0u) |
+            (g_engine_dual_render_active.load(
+                std::memory_order_relaxed) ? 0x08u : 0u),
+        static_cast<uint32_t>(g_config.temporal_backend),
+        static_cast<uint32_t>(g_config.openxr_mode),
+        static_cast<uint32_t>(g_sequential_pipeline_eye),
+        0);
+
     const int64_t flight_original_begin =
         w3vr::pipeline_flight::cpu_begin();
     g_engine_gameplay_frame_entry(frame_task);
@@ -27319,6 +27675,25 @@ void __fastcall hook_engine_gameplay_frame_entry(void* frame_task) {
             g_sync_completed_task_count.fetch_add(1);
         }
     }
+    record_route_flight(
+        w3vr::route_flight::EventCode::EngineTaskEnd,
+        g_engine_render_eye,
+        g_engine_render_pair_id,
+        g_engine_pair_completed_signal.load(std::memory_order_relaxed),
+        g_engine_render_generation,
+        0,
+        (g_engine_render_tag_frame_lookup_exact ? 0x02u : 0u) |
+            (g_engine_render_view_valid ? 0x04u : 0u) |
+            (g_engine_completed_pair_id.load(
+                std::memory_order_relaxed) == g_engine_render_pair_id
+                ? 0x10u : 0u),
+        static_cast<uint32_t>(
+            g_engine_completed_serial.load(std::memory_order_relaxed)),
+        static_cast<uint32_t>(
+            g_engine_pair_completed_signal.load(std::memory_order_relaxed)),
+        static_cast<uint32_t>(g_engine_completed_eye.load(
+            std::memory_order_relaxed)),
+        0);
     g_engine_render_eye = previous_eye;
     g_engine_render_generation = previous_generation;
     g_engine_render_pair_id = previous_pair_id;
@@ -35058,6 +35433,12 @@ void apply_engine_dual_render_transition(bool enabled, const char* source) {
 
     const auto present = g_present_count.load();
     const auto generation = g_streamline_capture_generation.fetch_add(1) + 1;
+    record_route_flight(
+        w3vr::route_flight::EventCode::RouteReset,
+        -1, 0,
+        g_packed_accepted_pair_signal.load(std::memory_order_relaxed),
+        generation, 1, enabled ? 0x01u : 0u,
+        static_cast<uint32_t>(present), 0, 0, 0);
     reset_native_asymmetric_noaa_state();
     g_streamline_capture_latest_slot[0].store(UINT32_MAX);
     g_streamline_capture_latest_slot[1].store(UINT32_MAX);
@@ -36051,6 +36432,36 @@ void __fastcall hook_sl_set_constants(void* constants, uint32_t frame_token, uin
         cached.eye = eye;
         cached.valid = true;
     }
+    if (temporal_backend_is_dlss()) {
+        uint32_t jitter_x_bits{};
+        uint32_t jitter_y_bits{};
+        bool reset{};
+        if (constants != nullptr) {
+            const auto* values = static_cast<const float*>(constants);
+            memcpy(&jitter_x_bits, values + 80, sizeof(jitter_x_bits));
+            memcpy(&jitter_y_bits, values + 81, sizeof(jitter_y_bits));
+            reset = static_cast<const uint8_t*>(constants)[0x19F] != 0;
+        }
+        const uint64_t route_pair =
+            g_streamline_dlss_pair_id != 0 &&
+                    g_streamline_dlss_pair_id != UINT64_MAX
+                ? g_streamline_dlss_pair_id
+                : g_engine_render_pair_id;
+        record_route_flight(
+            w3vr::route_flight::EventCode::DlssConstants,
+            static_cast<int32_t>(eye), route_pair, 0,
+            g_streamline_dlss_route_tag_valid
+                ? g_streamline_dlss_route_tag.generation
+                : UINT32_MAX,
+            0,
+            (constants != nullptr ? 0x01u : 0u) |
+                (g_streamline_dlss_route_tag_valid ? 0x02u : 0u) |
+                (reset ? 0x20u : 0u) |
+                (viewport != source_viewport ? 0x40u : 0u),
+            frame_token,
+            (source_viewport & 0xFFFFu) | ((viewport & 0xFFFFu) << 16),
+            jitter_x_bits, jitter_y_bits);
+    }
     g_sl_set_constants(constants, frame_token, viewport);
 
     if (asymmetric_sl.active) {
@@ -36116,7 +36527,8 @@ int __fastcall hook_sl_set_tag(const void* resource, uint32_t tag, uint32_t view
         uint32_t width;
         uint32_t height;
     } tagged_extent{};
-    if (extent != nullptr && g_config.logging_enabled) {
+    if (extent != nullptr &&
+        (g_config.logging_enabled || w3vr::route_flight::enabled())) {
         memcpy(&tagged_extent, extent, sizeof(tagged_extent));
     }
     capture_streamline_dlss_callback_resource(resource, tag, eye);
@@ -36174,8 +36586,34 @@ int __fastcall hook_sl_set_tag(const void* resource, uint32_t tag, uint32_t view
         g_streamline_output_frame.render_view_valid = g_engine_render_view_valid;
     }
 
-    return g_sl_set_tag(resource, tag,
-        streamline_viewport_for_eye(viewport), extent);
+    const uint32_t routed_viewport = streamline_viewport_for_eye(viewport);
+    if (temporal_backend_is_dlss()) {
+        uint32_t state{};
+        if (resource != nullptr) {
+            memcpy(&state,
+                static_cast<const uint8_t*>(resource) + 32,
+                sizeof(state));
+        }
+        const auto& snapshot = g_streamline_dlss_evaluate_snapshot;
+        record_route_flight(
+            w3vr::route_flight::EventCode::DlssTag,
+            static_cast<int32_t>(eye),
+            snapshot.route_valid ? snapshot.route_tag.pair_id : 0,
+            0,
+            snapshot.route_valid ? snapshot.route_tag.generation
+                                 : UINT32_MAX,
+            0,
+            (resource != nullptr ? 0x01u : 0u) |
+                (extent != nullptr ? 0x02u : 0u) |
+                (snapshot.route_valid ? 0x04u : 0u),
+            tag,
+            (viewport & 0xFFFFu) |
+                ((routed_viewport & 0xFFFFu) << 16),
+            state,
+            (tagged_extent.width & 0xFFFFu) |
+                ((tagged_extent.height & 0xFFFFu) << 16));
+    }
+    return g_sl_set_tag(resource, tag, routed_viewport, extent);
 }
 
 int __fastcall hook_sl_set_feature_constants(
@@ -36185,6 +36623,21 @@ int __fastcall hook_sl_set_feature_constants(
     // viewport instead of alternating between the two DLSS viewport IDs.
     const uint32_t routed_viewport =
         feature == 0 ? streamline_viewport_for_eye(viewport) : viewport;
+    if (feature == 0 && temporal_backend_is_dlss()) {
+        record_route_flight(
+            w3vr::route_flight::EventCode::DlssTag,
+            static_cast<int32_t>(streamline_eye()),
+            g_streamline_dlss_evaluate_snapshot.route_valid
+                ? g_streamline_dlss_evaluate_snapshot.route_tag.pair_id
+                : 0,
+            0,
+            g_streamline_dlss_evaluate_snapshot.route_valid
+                ? g_streamline_dlss_evaluate_snapshot.route_tag.generation
+                : UINT32_MAX,
+            1,
+            constants != nullptr ? 0x01u : 0u,
+            feature, frame_token, viewport, routed_viewport);
+    }
     return g_sl_set_feature_constants(
         feature, constants, frame_token, routed_viewport);
 }
@@ -36277,6 +36730,22 @@ int __fastcall hook_sl_evaluate_feature(
         }
     }
     const bool public_bundle_ready = puredark_afw_bundle_slot >= 0;
+    if (feature == 0) {
+        const auto& snapshot = g_streamline_dlss_evaluate_snapshot;
+        record_route_flight(
+            w3vr::route_flight::EventCode::DlssEvaluate,
+            static_cast<int32_t>(eye),
+            snapshot.route_valid ? snapshot.route_tag.pair_id : 0,
+            0,
+            snapshot.route_valid ? snapshot.route_tag.generation
+                                 : UINT32_MAX,
+            0,
+            (streamline_completion_active ? 0x04u : 0u) |
+                (streamline_snapshot_active ? 0x02u : 0u) |
+                (callback_constants_valid ? 0x08u : 0u),
+            frame_token, viewport, routed_viewport,
+            static_cast<uint32_t>(puredark_afw_bundle_slot));
+    }
     const int result = g_sl_evaluate_feature(
         command_buffer, feature, frame_token, routed_viewport);
     if (streamline_completion_active) {
@@ -36329,6 +36798,28 @@ int __fastcall hook_sl_evaluate_feature(
                     snapshot.route_valid ? snapshot.route_tag.pair_id : 0),
                 command_list, frame_token, routed_viewport);
         }
+        const auto& snapshot = g_streamline_dlss_evaluate_snapshot;
+        record_route_flight(
+            w3vr::route_flight::EventCode::DlssEvaluate,
+            static_cast<int32_t>(eye),
+            snapshot.route_valid ? snapshot.route_tag.pair_id : 0,
+            0,
+            snapshot.route_valid ? snapshot.route_tag.generation
+                                 : UINT32_MAX,
+            1,
+            (completion_success ? 0x01u : 0u) |
+                (streamline_snapshot_active ? 0x02u : 0u) |
+                (streamline_completion_active ? 0x04u : 0u) |
+                (callback_constants_valid ? 0x08u : 0u) |
+                (public_jitter_applied ? 0x10u : 0u) |
+                (public_bundle_ready ? 0x20u : 0u) |
+                (snapshot.depth_valid ? 0x40u : 0u) |
+                (snapshot.motion_vectors_valid ? 0x80u : 0u) |
+                (snapshot.output_valid ? 0x100u : 0u) |
+                (snapshot.motion_scale_valid ? 0x200u : 0u) |
+                (mode3_aer_presentation_active() ? 0x800u : 0x400u),
+            frame_token, viewport, routed_viewport,
+            static_cast<uint32_t>(result));
         g_streamline_dlss_evaluate_snapshot = {};
     }
     dlss_gpu_profile_mark(
@@ -38019,7 +38510,7 @@ void ensure_initialized() {
                 "focus_fire_b1=stereo_structural_aer_upstream_owner "
                 "aer_taau_hud=scene_and_retained_pair_fail_open");
             log_line(
-                "witcher3vr dxgi proxy initialized build=V1318 base=V1317_plus_V1305 "
+                "witcher3vr dxgi proxy initialized build=V1319 base=V1318_plus_V1310_recorder "
                 "anchor_smoothing_ini=%d anchor_smoothing_seconds=%.4f "
                 "first_person_strafe_ini=%d mode3_aer_presentation=%d raytracing_enabled=%d raytracing_history_buffers=%d "
                 "aer_afw_enabled=%d persistent_registry=%d dlss_public_streamline=%d "
@@ -38075,6 +38566,8 @@ void ensure_initialized() {
                 "V1299 AER TAAU AFW camera producer_gate=shared_gameplay_policy consumer_gate=shared_gameplay_policy normal_gameplay_capture=restored");
             log_line(
                 "V1302 AER TAAU Full-VR HUD authority=exact_pending_command_list matches_dlss=1 preceding_completed_eye=removed retained_t1_same_tag=1");
+            log_line(
+                "V1310 route flight recorder=ini_opt_in default_off f3_dump=15s renderdoc_f3_preserved=1 qpc=present_only gpu_readback=0 descriptor_scan=0 text_hotpath=0");
             log_line(
                 "V1279 DLSS compatibility=public_streamline_aer_private_history_ngx_stereo legacy_module_agnostic_discovery=disabled_by_V1288");
             log_line(
@@ -45608,6 +46101,89 @@ void handle_puredark_afw_visual_debug_hotkey() {
             g_present_count.load(std::memory_order_relaxed)));
 }
 
+void handle_route_flight_and_renderdoc_hotkey(IDXGISwapChain* swapchain) {
+    if ((GetAsyncKeyState(VK_F3) & 1) == 0) {
+        return;
+    }
+    // F3 keeps its existing RenderDoc meaning. The independent route dump is
+    // an additional no-op unless [debug] route_flight_recorder=1.
+    w3vr::route_flight::dump_last_seconds("V1319", 15);
+    trigger_renderdoc_capture(swapchain);
+}
+
+void record_route_flight_present(uint64_t frame) {
+    update_route_flight_present_clock();
+    if (!w3vr::route_flight::enabled()) {
+        return;
+    }
+    const int completed_eye =
+        g_engine_completed_eye.load(std::memory_order_relaxed);
+    const uint64_t completed_pair =
+        g_engine_completed_pair_id.load(std::memory_order_relaxed);
+    const uint64_t accepted_pair =
+        g_packed_accepted_pair_signal.load(std::memory_order_relaxed);
+    const uint32_t generation =
+        g_streamline_capture_generation.load(std::memory_order_relaxed);
+    const uint32_t route_flags =
+        (g_config.openxr_mode == 3 ? 0x001u : 0u) |
+        (mode3_aer_presentation_active() ? 0x002u : 0u) |
+        (g_config.native_stereo ? 0x004u : 0u) |
+        (g_config.temporal_backend == TemporalBackend::Dlss ? 0x008u : 0u) |
+        (g_config.temporal_backend == TemporalBackend::Taau ? 0x010u : 0u) |
+        (g_config.puredark_afw_enabled ? 0x020u : 0u) |
+        (g_engine_loading_screen_video_active.load(
+             std::memory_order_relaxed) ? 0x040u : 0u) |
+        (g_cinema_mode_active.load(std::memory_order_relaxed) ? 0x080u : 0u) |
+        (g_engine_menu_state.load(std::memory_order_relaxed) != 0
+             ? 0x100u : 0u);
+    record_route_flight(
+        w3vr::route_flight::EventCode::Present,
+        completed_eye, completed_pair, accepted_pair, generation, 0,
+        route_flags,
+        static_cast<uint32_t>(
+            g_puredark_afw_recorded_candidates.load(
+                std::memory_order_relaxed)),
+        static_cast<uint32_t>(
+            g_puredark_afw_submitted_candidates.load(
+                std::memory_order_relaxed)),
+        static_cast<uint32_t>(
+            g_puredark_afw_ready_candidates.load(
+                std::memory_order_relaxed)),
+        static_cast<uint32_t>(
+            g_puredark_afw_consumed_candidates.load(
+                std::memory_order_relaxed)));
+
+    if (g_config.openxr_mode == 3) {
+        record_route_flight(
+            w3vr::route_flight::EventCode::HudState,
+            completed_eye,
+            g_mode3_strict_hud_target_pair.load(std::memory_order_relaxed),
+            accepted_pair,
+            g_mode3_strict_hud_target_generation.load(
+                std::memory_order_relaxed),
+            0,
+            g_packed_runtime_ready.load(std::memory_order_relaxed)
+                ? 0x01u : 0u,
+            static_cast<uint32_t>(completed_pair),
+            static_cast<uint32_t>(frame),
+            static_cast<uint32_t>(g_packed_eye_version[0]),
+            static_cast<uint32_t>(g_packed_eye_version[1]));
+    }
+}
+
+void record_route_flight_present_end(HRESULT result) {
+    record_route_flight(
+        w3vr::route_flight::EventCode::PresentEnd,
+        g_engine_completed_eye.load(std::memory_order_relaxed),
+        g_engine_completed_pair_id.load(std::memory_order_relaxed),
+        g_packed_accepted_pair_signal.load(std::memory_order_relaxed),
+        UINT32_MAX, 1, SUCCEEDED(result) ? 0x01u : 0u,
+        static_cast<uint32_t>(result),
+        g_packed_runtime_ready.load(std::memory_order_relaxed) ? 1u : 0u,
+        static_cast<uint32_t>(g_packed_eye_version[0]),
+        static_cast<uint32_t>(g_packed_eye_version[1]));
+}
+
 HRESULT STDMETHODCALLTYPE hook_present(IDXGISwapChain* swapchain, UINT sync_interval, UINT flags) {
     if (w3vr::pipeline_flight::enabled()) {
         w3vr::pipeline_flight::process_gpu();
@@ -45615,9 +46191,7 @@ HRESULT STDMETHODCALLTYPE hook_present(IDXGISwapChain* swapchain, UINT sync_inte
             w3vr::pipeline_flight::dump_last_ten_seconds();
         }
     }
-    if ((GetAsyncKeyState(VK_F3) & 1) != 0) {
-        trigger_renderdoc_capture(swapchain);
-    }
+    handle_route_flight_and_renderdoc_hotkey(swapchain);
     // Toggle only the ABI debug bit. This does not enable AFW, alter
     // identities or change publication; the next Evaluate reflects it.
     handle_puredark_afw_visual_debug_hotkey();
@@ -45639,6 +46213,7 @@ HRESULT STDMETHODCALLTYPE hook_present(IDXGISwapChain* swapchain, UINT sync_inte
     }
 
     const auto frame = ++g_present_count;
+    record_route_flight_present(frame);
     w3vr::pipeline_flight::begin_frame(
         frame, g_config.openxr_mode,
         static_cast<int>(g_config.temporal_backend),
@@ -46381,6 +46956,7 @@ HRESULT STDMETHODCALLTYPE hook_present(IDXGISwapChain* swapchain, UINT sync_inte
         w3vr::pipeline_flight::cpu_begin();
     const HRESULT present_result =
         g_present(swapchain, effective_sync_interval, flags);
+    record_route_flight_present_end(present_result);
     w3vr::pipeline_flight::cpu_end(
         w3vr::pipeline_flight::Phase::Present,
         flight_present_begin);
@@ -46399,8 +46975,10 @@ HRESULT STDMETHODCALLTYPE hook_present1(
             w3vr::pipeline_flight::dump_last_ten_seconds();
         }
     }
+    handle_route_flight_and_renderdoc_hotkey(swapchain);
     handle_puredark_afw_visual_debug_hotkey();
     const auto frame = ++g_present_count;
+    record_route_flight_present(frame);
     w3vr::pipeline_flight::begin_frame(
         frame, g_config.openxr_mode,
         static_cast<int>(g_config.temporal_backend),
@@ -46434,6 +47012,7 @@ HRESULT STDMETHODCALLTYPE hook_present1(
         w3vr::pipeline_flight::cpu_begin();
     const HRESULT result =
         g_present1(swapchain, sync_interval, flags, params);
+    record_route_flight_present_end(result);
     w3vr::pipeline_flight::cpu_end(
         w3vr::pipeline_flight::Phase::Present,
         flight_present_begin);

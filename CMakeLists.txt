@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(witcher3vr VERSION 0.1318.0 LANGUAGES C CXX)
+project(witcher3vr VERSION 0.1319.0 LANGUAGES C CXX)
 
 include(CTest)
 
@@ -46,6 +46,7 @@ add_library(witcher3vr_dxgi SHARED
     src/dxgi_proxy.def
     src/openxr_eye_geometry.cpp
     src/pipeline_flight_recorder.cpp
+    src/route_flight_recorder.cpp
     src/puredark_afw_bridge.cpp
     src/puredark_afw_camera.cpp
     src/rt_ingress_join.cpp
@@ -230,6 +231,20 @@ if(BUILD_TESTING)
     add_test(
         NAME pipeline_flight_thread_placement
         COMMAND w3vr_pipeline_flight_thread_tests
+    )
+
+    add_executable(w3vr_route_flight_recorder_tests
+        tests/route_flight_recorder_tests.cpp
+        src/route_flight_recorder.cpp
+    )
+    target_include_directories(w3vr_route_flight_recorder_tests PRIVATE src)
+    target_compile_definitions(w3vr_route_flight_recorder_tests PRIVATE
+        WIN32_LEAN_AND_MEAN
+        NOMINMAX
+    )
+    add_test(
+        NAME route_flight_recorder
+        COMMAND w3vr_route_flight_recorder_tests
     )
 
     add_test(
