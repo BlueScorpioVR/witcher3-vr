@@ -1541,10 +1541,11 @@ float runtime_presentation_cover_fraction(UINT source_width = 0) {
 }
 
 float presentation_render_fov_scale() {
-    if (mode3_stereo_transport_active()) {
-        return 1.0f;
-    }
     const float cover_fraction = runtime_presentation_cover_fraction();
+    if (mode3_stereo_transport_active()) {
+        return w3vr::mode3_transport::symmetric_producer_envelope_scale(
+            cover_fraction);
+    }
     return std::clamp(
         g_config.presentation_scale / cover_fraction, 0.01f, 2.0f);
 }
@@ -29279,8 +29280,8 @@ bool prepare_full_vr_frame_camera(
         const float down = tanf(xr_fov->angleDown);
         const float up = tanf(xr_fov->angleUp);
         // Render the centered symmetric angular interval selected from the
-        // visibility-mask bounds. Presentation later chooses either its exact
-        // raw-FOV sub-image or the filtered V990 fallback.
+        // runtime geometry. Mode 3 submits that complete image and changes
+        // only the final OpenXR FOV; legacy modes retain their own presenter.
         const auto projection_scales = presentation_projection_scales(
             left, right, down, up);
         float horizontal_scale = projection_scales.horizontal;
@@ -32736,11 +32737,10 @@ void __fastcall hook_engine_view_rebuild(float* view) {
         const float right = tanf(xr_fov.angleRight);
         const float down = tanf(xr_fov.angleDown);
         const float up = tanf(xr_fov.angleUp);
-        // presentation_scale controls the visible inset; render resolution only
-        // limits how much black guard band can physically fit in the swapchain.
-        // Keep the regular factory path identical to the final-frame fallback
-        // above. Horizontal and vertical spans remain independent because the
-        // runtime frustum is asymmetric in both axes.
+        // Build the fixed centered envelope required to contain both displaced
+        // runtime eyes. Presentation Size is deliberately absent here in Mode
+        // 3 and is applied only by the common final OpenXR submit. Keep this
+        // regular factory path identical to the final-frame fallback above.
         const auto projection_scales = presentation_projection_scales(
             left, right, down, up);
         float horizontal_scale = projection_scales.horizontal;
@@ -38657,7 +38657,7 @@ void ensure_initialized() {
             log_line(
                 "V1310 route flight recorder=ini_opt_in default_off f3_dump=15s renderdoc_f3_preserved=1 qpc=present_only gpu_readback=0 descriptor_scan=0 text_hotpath=0");
             log_line(
-                "V1326 Mode3 final submit=one_full_source_path producer_scale=1 presentation_scale=direct_unit_anchored_final_fov image_rect=full crop=0 fit=0 shift=0");
+                "V1327 Mode3 final submit=one_full_source_path symmetric_producer=runtime_envelope presentation_scale=direct_unit_anchored_final_fov image_rect=full crop=0 fit=0 shift=0");
             log_line(
                 "V1279 DLSS compatibility=public_streamline_aer_private_history_ngx_stereo legacy_module_agnostic_discovery=disabled_by_V1288");
             log_line(

@@ -29,6 +29,7 @@ int main() {
     using w3vr::mode3_transport::submitted_hud_join_route_active;
     using w3vr::mode3_transport::submitted_hud_join_window_matches;
     using w3vr::mode3_transport::strict_stereo_retained_hud_pair_fresh;
+    using w3vr::mode3_transport::symmetric_producer_envelope_scale;
 
     // The public owner is intentionally narrow. Only Mode-3 OpenXR DLSS can
     // enter it. Projection is not an input, so AER and strict Stereo receive
@@ -129,6 +130,17 @@ int main() {
         false, 2496, 3072, 3900, 16384) == 3900);
     assert(select_swapchain_dimension(
         true, 20000, 3072, 20000, 16384) == 16384);
+
+    // Symmetric producer geometry covers both displaced runtime eyes and is
+    // independent of Presentation Size. The final-submit tests above own the
+    // only user scale. The calibrated Quest 3 cover is about 0.804821.
+    const float symmetric_envelope =
+        symmetric_producer_envelope_scale(0.804821f);
+    assert(symmetric_envelope > 1.24250f);
+    assert(symmetric_envelope < 1.24253f);
+    assert(symmetric_producer_envelope_scale(1.0f) == 1.0f);
+    assert(symmetric_producer_envelope_scale(0.0f) == 2.0f);
+    assert(symmetric_producer_envelope_scale(2.0f) == 1.0f);
 
     // An exact command-list publication must be observable on either queue.
     assert(submission_queue_eligible(true, true));

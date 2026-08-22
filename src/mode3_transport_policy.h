@@ -63,6 +63,21 @@ constexpr uint32_t select_swapchain_dimension(
     return requested < maximum ? requested : maximum;
 }
 
+// A centered symmetric camera must contain the union of the two displaced
+// runtime-eye frusta. This is fixed producer geometry, not Presentation Size:
+// the latter is applied exactly once by decide_final_submit(). The runtime
+// cover fraction is bounded identically to its calibrated source so malformed
+// or unavailable geometry cannot expand the producer beyond 2x.
+constexpr float symmetric_producer_envelope_scale(
+    float runtime_cover_fraction) noexcept {
+    const float cover = runtime_cover_fraction < 0.5f
+        ? 0.5f
+        : (runtime_cover_fraction > 1.0f
+            ? 1.0f
+            : runtime_cover_fraction);
+    return 1.0f / cover;
+}
+
 // Route, backend and projection encoding are deliberately absent. Once the
 // completed eye pair is selected, every non-panel Mode-3 route uses this same
 // full-image handoff. Presentation Size is a direct final angular scale: 1.0
