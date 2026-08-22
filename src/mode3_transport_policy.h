@@ -29,6 +29,15 @@ enum class FinalTransport : uint8_t {
     Unavailable,
 };
 
+// This describes how the producer encoded the pixels, not how an evaluator
+// chose to represent its internal camera. PureDark is allowed to keep centered
+// matrices while the completed texture still contains a native per-eye frame.
+enum class AfwPixelProjection : uint8_t {
+    Invalid,
+    SharedSymmetric,
+    NativeAsymmetric,
+};
+
 struct FinalSubmitInput {
     bool active{};
     bool source_pair_ready{};
@@ -55,6 +64,40 @@ struct ProjectionPairDecision {
     bool ready{};
     bool native_asymmetric{};
 };
+
+// Validate the producer-owned projection at the exact AFW transaction. Native
+// pixels require the source eye's post-rebuild factory proof and both immutable
+// pair FOVs. AFW synthesizes the peer, so its factory bit is deliberately not
+// required. A deliberate shared producer carries its own exact shared FOV.
+constexpr AfwPixelProjection decide_afw_pixel_projection(
+    AfwPixelProjection actual_producer,
+    bool exact_identity_valid,
+    uint32_t producer_generation,
+    uint32_t current_generation,
+    bool pair_slot_valid,
+    uint32_t pair_generation,
+    uint8_t factory_mask,
+    uint32_t source_eye,
+    bool frozen_pair_fovs_valid,
+    bool shared_fov_valid) noexcept {
+    if (!exact_identity_valid || source_eye > 1 ||
+        producer_generation != current_generation) {
+        return AfwPixelProjection::Invalid;
+    }
+    if (actual_producer == AfwPixelProjection::SharedSymmetric) {
+        return shared_fov_valid
+            ? AfwPixelProjection::SharedSymmetric
+            : AfwPixelProjection::Invalid;
+    }
+    if (actual_producer != AfwPixelProjection::NativeAsymmetric) {
+        return AfwPixelProjection::Invalid;
+    }
+    const uint8_t source_bit = static_cast<uint8_t>(1u << source_eye);
+    return pair_slot_valid && pair_generation == producer_generation &&
+            (factory_mask & source_bit) != 0 && frozen_pair_fovs_valid
+        ? AfwPixelProjection::NativeAsymmetric
+        : AfwPixelProjection::Invalid;
+}
 
 // Coalesce every physical F2 edge observed before the next safe Present
 // boundary. An even number is a no-op; an odd number flips the producer once.

@@ -29,12 +29,12 @@
 #include "shadow_cascade_authority_policy.h"
 #include "taau_submission_policy.h"
 
-// V1334 returns to V1331's validated projection geometry and changes only the
-// strict-Stereo HUD lifecycle. A live SYM/ASYM generation boundary now revokes
-// every retained HUD identity without falsifying the Cinema detector. The
-// native-ASymmetric HUD PSOs are completed once the first OpenXR visibility
-// tangents exist, so a SYM startup cannot leave DLSS or TAAU on mismatched
-// symmetric convergence shaders for the rest of the process.
+// V1335 retains V1334's strict-Stereo HUD lifecycle and corrects only AER+AFW
+// pixel-projection ownership. Centered evaluator matrices are an internal AFW
+// convention, never evidence that completed pixels are SYM. The exact producer
+// class now travels with the camera/input/output transaction: proven native
+// ASYM keeps both frozen per-eye FOVs and the full OpenXR imageRect, while a
+// deliberate shared producer keeps the established SYM subImage.
 // V1299 applies the same gameplay/cinema/loading admission policy at both ends
 // of V1298's strict AER TAAU AFW camera FIFO. The producer had accidentally
 // inverted automatic Full VR, leaving normal gameplay with no raw cameras.
@@ -1146,6 +1146,8 @@ struct PuredarkAfwCameraSnapshot {
     uint64_t pair_id{};
     uint32_t generation{};
     uint32_t eye{UINT32_MAX};
+    w3vr::mode3_transport::AfwPixelProjection pixel_projection{
+        w3vr::mode3_transport::AfwPixelProjection::Invalid};
     bool render_views_valid{};
     bool exact_render_view_valid{};
     bool valid{};
@@ -1176,6 +1178,8 @@ struct PuredarkAfwInputSnapshot {
     uint64_t pair_id{};
     uint32_t generation{};
     uint32_t eye{UINT32_MAX};
+    w3vr::mode3_transport::AfwPixelProjection pixel_projection{
+        w3vr::mode3_transport::AfwPixelProjection::Invalid};
     bool render_views_valid{};
     bool exact_render_view_valid{};
     bool valid{};
@@ -1193,47 +1197,26 @@ struct PuredarkAfwPresentResult {
     uint32_t synthesized_eye{UINT32_MAX};
     uint32_t bundle_slot{UINT32_MAX};
     uint64_t submission_serial{};
+    w3vr::mode3_transport::AfwPixelProjection pixel_projection{
+        w3vr::mode3_transport::AfwPixelProjection::Invalid};
     bool render_views_valid{};
     bool exact_render_view_valid{};
     bool valid{};
 };
 
-bool fov_has_off_axis_center(const XrFovf& fov) {
-    const float left = tanf(fov.angleLeft);
-    const float right = tanf(fov.angleRight);
-    const float down = tanf(fov.angleDown);
-    const float up = tanf(fov.angleUp);
-    const float span_x = right - left;
-    const float span_y = up - down;
-    return std::isfinite(span_x) && std::isfinite(span_y) &&
-        span_x > 0.01f && span_y > 0.01f &&
-        (fabsf((right + left) / span_x) > 0.0001f ||
-            fabsf((up + down) / span_y) > 0.0001f);
-}
+struct Mode3AfwPixelProjectionAuthority {
+    std::array<XrFovf, 2> fovs{};
+    w3vr::mode3_transport::AfwPixelProjection encoding{
+        w3vr::mode3_transport::AfwPixelProjection::Invalid};
+};
 
-void pair_centered_afw_camera_with_centered_fov(
-    PuredarkAfwCameraSnapshot& snapshot) {
-    constexpr float kCenteredMatrixEpsilon = 0.0001f;
-    const auto& source = snapshot.camera.source_view_to_clip.values;
-    const auto& destination = snapshot.camera.destination_view_to_clip.values;
-    if (!snapshot.render_views_valid || !snapshot.exact_render_view_valid ||
-        !g_hmd_render_fov_valid.load(std::memory_order_acquire) ||
-        fabsf(source[8]) > kCenteredMatrixEpsilon ||
-        fabsf(source[9]) > kCenteredMatrixEpsilon ||
-        fabsf(destination[8]) > kCenteredMatrixEpsilon ||
-        fabsf(destination[9]) > kCenteredMatrixEpsilon) {
-        return;
-    }
-
-    const XrFovf centered_fov{
-        g_hmd_render_fov_left.load(std::memory_order_acquire),
-        g_hmd_render_fov_right.load(std::memory_order_acquire),
-        g_hmd_render_fov_up.load(std::memory_order_acquire),
-        g_hmd_render_fov_down.load(std::memory_order_acquire)};
-    snapshot.render_views[0].fov = centered_fov;
-    snapshot.render_views[1].fov = centered_fov;
-    snapshot.exact_render_view.fov = centered_fov;
-}
+bool resolve_mode3_afw_pixel_projection(
+    uint64_t pair_id,
+    uint32_t generation,
+    uint32_t source_eye,
+    w3vr::mode3_transport::AfwPixelProjection actual_producer,
+    const XrFovf& shared_fov,
+    Mode3AfwPixelProjectionAuthority& authority);
 
 // [FIX:PUREDARK-AFW-PRODUCER-PUBLICATION V12016 1/8] A DXGI Present is not
 // the producer clock. Keep camera snapshots as a small immutable history, and
@@ -2221,6 +2204,8 @@ struct EngineTemporalMatrixPair {
     float aspect{};
     float near_plane{};
     float far_plane{};
+    w3vr::mode3_transport::AfwPixelProjection afw_pixel_projection{
+        w3vr::mode3_transport::AfwPixelProjection::Invalid};
     bool original_valid{};
     bool corrected_valid{};
     bool hmd_pose_valid{};
@@ -2427,6 +2412,9 @@ std::array<std::array<std::atomic<uint64_t>,
     g_mode3_taau_native_history_prepared_pairs{};
 thread_local XrView g_engine_render_view{XR_TYPE_VIEW};
 thread_local bool g_engine_render_view_valid{};
+thread_local w3vr::mode3_transport::AfwPixelProjection
+    g_engine_render_pixel_projection{
+        w3vr::mode3_transport::AfwPixelProjection::Invalid};
 struct HmdCameraPoseSnapshot {
     float yaw_degrees{};
     float pitch_degrees{};
@@ -2451,6 +2439,8 @@ struct EngineFrameTag {
     uint64_t pair_id{};
     XrView render_view{XR_TYPE_VIEW};
     bool render_view_valid{};
+    w3vr::mode3_transport::AfwPixelProjection pixel_projection{
+        w3vr::mode3_transport::AfwPixelProjection::Invalid};
     HmdCameraPoseSnapshot hmd_pose{};
     bool task_provenance_valid{};
 };
@@ -2650,6 +2640,107 @@ bool native_asymmetric_source_eye_tagged(uint64_t pair_id, uint32_t eye) {
         std::memory_order_acquire) == pair_id;
 }
 
+bool snapshot_shared_mode3_projection_fov(XrFovf& fov) {
+    if (!g_hmd_render_fov_valid.load(std::memory_order_acquire)) {
+        return false;
+    }
+    fov = {
+        g_hmd_render_fov_left.load(std::memory_order_acquire),
+        g_hmd_render_fov_right.load(std::memory_order_acquire),
+        g_hmd_render_fov_up.load(std::memory_order_acquire),
+        g_hmd_render_fov_down.load(std::memory_order_acquire)};
+    w3vr::openxr_eye_geometry::AsymmetricProjectionDescriptor descriptor{};
+    return w3vr::openxr_eye_geometry::derive_asymmetric_projection_descriptor(
+        fov, 1, 1, descriptor);
+}
+
+w3vr::mode3_transport::AfwPixelProjection
+completed_engine_frame_pixel_projection(uint64_t pair_id, uint32_t eye) {
+    using Projection = w3vr::mode3_transport::AfwPixelProjection;
+    if (eye > 1 || pair_id == 0 || pair_id == UINT64_MAX) {
+        return Projection::Invalid;
+    }
+    if (native_asymmetric_source_eye_tagged(pair_id, eye)) {
+        return Projection::NativeAsymmetric;
+    }
+    if (!native_stereo_runtime_enabled()) {
+        return Projection::SharedSymmetric;
+    }
+    // A current slot with no source-eye factory bit means the native rebuild
+    // was attempted but did not survive verification. Never reinterpret those
+    // pixels as SYM. No slot means the producer deliberately used its centered
+    // bootstrap/Full-VR fallback and is genuinely shared.
+    return native_asymmetric_pair_slot(pair_id) != nullptr
+        ? Projection::Invalid
+        : Projection::SharedSymmetric;
+}
+
+bool resolve_mode3_afw_pixel_projection(
+    uint64_t pair_id,
+    uint32_t generation,
+    uint32_t source_eye,
+    w3vr::mode3_transport::AfwPixelProjection actual_producer,
+    const XrFovf& shared_fov,
+    Mode3AfwPixelProjectionAuthority& authority) {
+    authority = {};
+    const uint32_t current_generation =
+        g_streamline_capture_generation.load(std::memory_order_acquire);
+    const bool exact_identity_valid = source_eye <= 1 && pair_id != 0 &&
+        pair_id != UINT64_MAX;
+
+    bool pair_slot_valid{};
+    uint32_t pair_generation{UINT32_MAX};
+    uint8_t factory_mask{};
+    std::array<XrFovf, 2> frozen_fovs{};
+    {
+        // Pair FOVs are immutable after pair_id is release-published. Keep the
+        // lock while copying so ring reuse cannot splice two producer pairs.
+        std::scoped_lock slot_lock{g_native_asymmetric_pair_slot_mutex};
+        auto& slot = g_native_asymmetric_pair_slots[
+            exact_identity_valid
+                ? pair_id % kNativeAsymmetricPairSlotCount
+                : 0];
+        pair_slot_valid = exact_identity_valid &&
+            slot.pair_id.load(std::memory_order_acquire) == pair_id;
+        if (pair_slot_valid) {
+            pair_generation = slot.generation.load(
+                std::memory_order_acquire);
+            factory_mask = slot.factory_mask.load(
+                std::memory_order_acquire);
+            frozen_fovs[0] = slot.fov[0];
+            frozen_fovs[1] = slot.fov[1];
+            pair_slot_valid =
+                slot.pair_id.load(std::memory_order_acquire) == pair_id;
+        }
+    }
+
+    const auto valid_fov = [](const XrFovf& candidate) {
+        w3vr::openxr_eye_geometry::AsymmetricProjectionDescriptor descriptor{};
+        return w3vr::openxr_eye_geometry::
+            derive_asymmetric_projection_descriptor(
+                candidate, 1, 1, descriptor);
+    };
+    const bool frozen_pair_fovs_valid = pair_slot_valid &&
+        valid_fov(frozen_fovs[0]) && valid_fov(frozen_fovs[1]);
+    const bool shared_fov_valid = valid_fov(shared_fov);
+    const auto encoding =
+        w3vr::mode3_transport::decide_afw_pixel_projection(
+            actual_producer, exact_identity_valid, generation,
+            current_generation, pair_slot_valid, pair_generation,
+            factory_mask, source_eye, frozen_pair_fovs_valid,
+            shared_fov_valid);
+    if (encoding ==
+        w3vr::mode3_transport::AfwPixelProjection::Invalid) {
+        return false;
+    }
+    authority.encoding = encoding;
+    authority.fovs = encoding ==
+            w3vr::mode3_transport::AfwPixelProjection::NativeAsymmetric
+        ? frozen_fovs
+        : std::array<XrFovf, 2>{shared_fov, shared_fov};
+    return true;
+}
+
 void reset_native_asymmetric_noaa_state() {
     g_native_asymmetric_noaa_writer_seen.store(
         false, std::memory_order_release);
@@ -2767,18 +2858,28 @@ EngineFrameTag make_aer_frame_tag(uint64_t render_ordinal) {
     tag.generation =
         g_streamline_capture_generation.load(std::memory_order_acquire);
     tag.pair_id = identity.pair_id;
+    tag.pixel_projection = completed_engine_frame_pixel_projection(
+        identity.pair_id, identity.eye);
     if (identity.eye < g_xr_views.size() &&
         g_hmd_pose_valid.load(std::memory_order_acquire)) {
         tag.render_view = g_config.hmd_compositor_only
             ? g_hmd_center_views[identity.eye]
             : g_xr_views[identity.eye];
-        XrFovf frozen_fov{};
-        if (snapshot_native_asymmetric_pair_fov(
-                identity.pair_id, identity.eye, frozen_fov)) {
+        XrFovf producer_fov{};
+        if (tag.pixel_projection ==
+                w3vr::mode3_transport::AfwPixelProjection::NativeAsymmetric &&
+            snapshot_native_asymmetric_pair_fov(
+                identity.pair_id, identity.eye, producer_fov)) {
             // ASYM pixels were rendered with the producer's p-scaled tangent
             // interval. Carry that exact FOV through AER just as strict Stereo
             // does; raw runtime FOV would overstate the frame below scale 1.
-            tag.render_view.fov = frozen_fov;
+            tag.render_view.fov = producer_fov;
+        } else if (tag.pixel_projection ==
+                w3vr::mode3_transport::AfwPixelProjection::SharedSymmetric &&
+            snapshot_shared_mode3_projection_fov(producer_fov)) {
+            // Freeze the centered FOV beside the explicit producer class.
+            // Delayed AFW work must not read a newer global after F2.
+            tag.render_view.fov = producer_fov;
         }
         tag.render_view_valid = true;
     }
@@ -2792,6 +2893,7 @@ void apply_engine_render_tag(const EngineFrameTag& tag) {
     g_engine_render_pair_id = tag.pair_id;
     g_engine_render_view = tag.render_view;
     g_engine_render_view_valid = tag.render_view_valid;
+    g_engine_render_pixel_projection = tag.pixel_projection;
     g_engine_render_hmd_pose = tag.hmd_pose;
 }
 std::atomic<int> g_engine_completed_eye{-1};
@@ -8817,6 +8919,7 @@ bool current_puredark_afw_direct_route_tag(
         route_tag.pair_id = g_engine_render_pair_id;
         route_tag.render_view = g_engine_render_view;
         route_tag.render_view_valid = g_engine_render_view_valid;
+        route_tag.pixel_projection = g_engine_render_pixel_projection;
         route_tag.hmd_pose = g_engine_render_hmd_pose;
         route_tag.task_provenance_valid = true;
     } else {
@@ -8960,6 +9063,16 @@ void capture_puredark_afw_camera(
         log_puredark_afw_failure("camera", error);
         return;
     }
+    Mode3AfwPixelProjectionAuthority projection_authority{};
+    if (!resolve_mode3_afw_pixel_projection(
+            route_tag.pair_id, route_tag.generation, routed_eye,
+            route_tag.pixel_projection, route_tag.render_view.fov,
+            projection_authority)) {
+        log_puredark_afw_failure(
+            "camera_pixel_projection",
+            L"exact AFW producer has no valid pixel-projection authority");
+        return;
+    }
     // [FIX:PUREDARK-AFW-AER-DIRECT-PEER-FOV V12080 1/1]
     // `capture_puredark_afw_dlss_inputs` consumes this exact route-tagged
     // camera producer. Mode-3 AER has no same-tick Stereo pair ledger, so use
@@ -8967,12 +9080,14 @@ void capture_puredark_afw_camera(
     // exact native-asymmetric producer pair. Depth, MVec, scale and command
     // ordering remain the exact NGX inputs.
     if (puredark_afw_mode3_aer_dlss_route_configured() &&
-        native_asymmetric_noaa_route_active()) {
+        projection_authority.encoding ==
+            w3vr::mode3_transport::AfwPixelProjection::NativeAsymmetric) {
         const bool final_source_already_compensated =
             puredark_afw_mode3_aer_dlss_final_source_active();
         const uint32_t destination_eye = 1u - routed_eye;
-        XrFovf source_fov{};
-        XrFovf destination_fov{};
+        const XrFovf source_fov = projection_authority.fovs[routed_eye];
+        const XrFovf destination_fov =
+            projection_authority.fovs[destination_eye];
         bool aer_reference_poses_valid{};
         {
             std::scoped_lock pose_lock{g_hmd_pose_snapshot_mutex};
@@ -8983,12 +9098,7 @@ void capture_puredark_afw_camera(
                 aer_reference_poses_valid = true;
             }
         }
-        const bool frozen_pair_fovs_valid =
-            snapshot_native_asymmetric_pair_fov(
-                route_tag.pair_id, routed_eye, source_fov) &&
-            snapshot_native_asymmetric_pair_fov(
-                route_tag.pair_id, destination_eye, destination_fov);
-        if (aer_reference_poses_valid && frozen_pair_fovs_valid) {
+        if (aer_reference_poses_valid) {
             aer_reference_views[routed_eye].fov = source_fov;
             aer_reference_views[destination_eye].fov = destination_fov;
             aer_reference_views_valid = true;
@@ -9083,6 +9193,8 @@ void capture_puredark_afw_camera(
     captured.capture_present =
         g_present_count.load(std::memory_order_relaxed);
     captured.exact_render_view = route_tag.render_view;
+    captured.exact_render_view.fov =
+        projection_authority.fovs[routed_eye];
     captured.exact_render_view_valid = true;
     if (aer_reference_views_valid) {
         captured.render_views = aer_reference_views;
@@ -9092,7 +9204,12 @@ void capture_puredark_afw_camera(
         captured.render_views = {g_xr_views[0], g_xr_views[1]};
         captured.render_views_valid = true;
     }
-    pair_centered_afw_camera_with_centered_fov(captured);
+    if (!captured.render_views_valid) {
+        return;
+    }
+    captured.render_views[0].fov = projection_authority.fovs[0];
+    captured.render_views[1].fov = projection_authority.fovs[1];
+    captured.pixel_projection = projection_authority.encoding;
     captured.valid = true;
     {
         std::scoped_lock lock{g_puredark_afw_mutex};
@@ -9435,6 +9552,7 @@ int32_t capture_puredark_afw_dlss_inputs_from_resources(
     captured.render_views_valid = camera.render_views_valid;
     captured.exact_render_view = camera.exact_render_view;
     captured.exact_render_view_valid = camera.exact_render_view_valid;
+    captured.pixel_projection = camera.pixel_projection;
     captured.motion_scale[0] = motion_scale_x *
         static_cast<float>(output_desc.Width) /
         static_cast<float>(motion_desc.Width);
@@ -9801,7 +9919,8 @@ bool capture_puredark_afw_mode3_taau_inputs(
     uint32_t eye,
     uint64_t pair_id,
     const std::array<XrView, 2>& exact_render_views,
-    bool exact_render_views_valid) {
+    bool exact_render_views_valid,
+    w3vr::mode3_transport::AfwPixelProjection pixel_projection) {
     RouteFlightOutcomeScope route_flight{
         w3vr::route_flight::EventCode::AfwCapture,
         static_cast<int32_t>(eye), pair_id, generation, 1u};
@@ -9827,7 +9946,9 @@ bool capture_puredark_afw_mode3_taau_inputs(
     if (!gameplay_capture_allowed || command_list == nullptr ||
         depth.resource == nullptr || motion_vectors.resource == nullptr ||
         eye > 1 || pair_id == 0 || pair_id == UINT64_MAX ||
-        generation != current_generation) {
+        generation != current_generation || !exact_render_views_valid ||
+        pixel_projection ==
+            w3vr::mode3_transport::AfwPixelProjection::Invalid) {
         return false;
     }
     route_flight.advance(
@@ -9952,11 +10073,11 @@ bool capture_puredark_afw_mode3_taau_inputs(
     recovered_camera.render_views_valid = true;
     recovered_camera.exact_render_view = exact_render_views[eye];
     recovered_camera.exact_render_view_valid = true;
-    pair_centered_afw_camera_with_centered_fov(recovered_camera);
     recovered_camera.capture_present = raw_camera.capture_present;
     recovered_camera.pair_id = pair_id;
     recovered_camera.generation = generation;
     recovered_camera.eye = eye;
+    recovered_camera.pixel_projection = pixel_projection;
     recovered_camera.valid = true;
     const PuredarkAfwCameraSnapshot* camera_authority = &recovered_camera;
 
@@ -10095,6 +10216,7 @@ bool capture_puredark_afw_mode3_taau_inputs(
     captured.pair_id = pair_id;
     captured.generation = generation;
     captured.eye = eye;
+    captured.pixel_projection = camera_authority->pixel_projection;
     captured.valid = true;
     slot.state = PuredarkAfwBundleState::PendingSubmission;
 
@@ -10507,6 +10629,7 @@ bool current_exact_engine_render_tag(EngineFrameTag& tag) {
     tag.pair_id = g_engine_render_pair_id;
     tag.render_view = g_engine_render_view;
     tag.render_view_valid = g_engine_render_view_valid;
+    tag.pixel_projection = g_engine_render_pixel_projection;
     tag.hmd_pose = g_engine_render_hmd_pose;
     tag.task_provenance_valid = true;
     return true;
@@ -11311,6 +11434,7 @@ bool evaluate_puredark_afw_mode3_common(
     result.render_views_valid = captured.render_views_valid;
     result.exact_render_view = captured.exact_render_view;
     result.exact_render_view_valid = captured.exact_render_view_valid;
+    result.pixel_projection = captured.pixel_projection;
     result.pair_id = pair_id;
     result.generation = generation;
     result.real_eye = real_eye;
@@ -11370,12 +11494,11 @@ bool publish_puredark_afw_mode3_common(
     const bool destination_valid = synthesized_eye_valid &&
         g_packed_present_cache[result.synthesized_eye] != nullptr;
     const bool output_valid = result.synthesized_color.texture != nullptr;
-    const bool eye0_native_asymmetric = result.render_views_valid &&
-        fov_has_off_axis_center(result.render_views[0].fov);
-    const bool eye1_native_asymmetric = result.render_views_valid &&
-        fov_has_off_axis_center(result.render_views[1].fov);
     const bool projection_pair_valid = result.render_views_valid &&
-        eye0_native_asymmetric == eye1_native_asymmetric;
+        result.pixel_projection !=
+            w3vr::mode3_transport::AfwPixelProjection::Invalid;
+    const bool native_asymmetric = result.pixel_projection ==
+        w3vr::mode3_transport::AfwPixelProjection::NativeAsymmetric;
     if (!route_configured || command_list == nullptr || !result.valid ||
         !identity_valid || !generation_valid || !real_color_valid ||
         !destination_valid || !output_valid || !projection_pair_valid) {
@@ -11448,10 +11571,10 @@ bool publish_puredark_afw_mode3_common(
         result.render_views_valid;
     g_mode3_aer_packed_eye_valid[synthesized_eye] = true;
     g_mode3_aer_packed_eye_generated[synthesized_eye] = true;
-    g_mode3_aer_packed_native_eye[0] = eye0_native_asymmetric;
-    g_mode3_aer_packed_native_eye[1] = eye1_native_asymmetric;
+    g_mode3_aer_packed_native_eye[0] = native_asymmetric;
+    g_mode3_aer_packed_native_eye[1] = native_asymmetric;
     g_packed_present_cache_native_asymmetric =
-        eye0_native_asymmetric;
+        native_asymmetric;
     g_packed_present_cache_valid = true;
     g_packed_last_accepted_present =
         g_present_count.load(std::memory_order_relaxed);
@@ -14105,7 +14228,7 @@ bool ensure_asymmetric_bootstrap_hud_psos() {
         if (pipelines[0] != nullptr) pipelines[0]->Release();
         if (pipelines[1] != nullptr) pipelines[1]->Release();
         log_line(
-            "V1334 deferred asymmetric HUD PSO creation failed "
+            "V1335 deferred asymmetric HUD PSO creation failed "
             "hr=0x%08X,0x%08X",
             static_cast<unsigned>(results[0]),
             static_cast<unsigned>(results[1]));
@@ -14123,7 +14246,7 @@ bool ensure_asymmetric_bootstrap_hud_psos() {
     g_asymmetric_hud_composite_eye1_pso.store(
         pipelines[1], std::memory_order_release);
     log_line(
-        "V1334 deferred asymmetric HUD ready pso=%p,%p "
+        "V1335 deferred asymmetric HUD ready pso=%p,%p "
         "optical_px=%.3f,%.3f/%.3f,%.3f "
         "hud_size=%.4f,%.4f source_shift=%d,%d/%d,%d render=%ux%u",
         pipelines[0], pipelines[1],
@@ -18559,7 +18682,7 @@ HRESULT STDMETHODCALLTYPE hook_create_graphics_pipeline_state(
         if (g_hud_composite_original_pso.load(std::memory_order_acquire) == nullptr) {
             if (!capture_hud_composite_pso_recipe(device, *desc, info)) {
                 log_line(
-                    "V1334 HUD PSO recipe capture failed; deferred asymmetric HUD unavailable");
+                    "V1335 HUD PSO recipe capture failed; deferred asymmetric HUD unavailable");
             }
             IDxcBlob* eye0_shader = compile_hud_composite_pixel_shader(
                 g_config.hud_stereo_shift_px, g_config.hud_size);
@@ -22403,6 +22526,8 @@ struct TaauHmdMotionParameters {
     uint32_t previous_matched_generation{};
     int matched_eye{-1};
     float matrix_error{};
+    w3vr::mode3_transport::AfwPixelProjection afw_pixel_projection{
+        w3vr::mode3_transport::AfwPixelProjection::Invalid};
     bool exact_pair_match{};
     bool matched_render_views_valid{};
 };
@@ -22602,6 +22727,7 @@ bool find_taau_hmd_motion_parameters(
     out.matched_corrected_camera = current.corrected_camera;
     out.matched_render_views = current.render_views;
     out.matched_render_views_valid = current.render_views_valid;
+    out.afw_pixel_projection = current.afw_pixel_projection;
     out.vertical_fov_degrees = current.vertical_fov_degrees;
     out.aspect = current.aspect;
     out.near_plane = current.near_plane;
@@ -23805,7 +23931,8 @@ bool dispatch_taau_inplace_marker(
                 static_cast<uint32_t>(hmd_motion.matched_eye),
                 hmd_motion.matched_pair_id,
                 hmd_motion.matched_render_views,
-                hmd_motion.matched_render_views_valid);
+                hmd_motion.matched_render_views_valid,
+                hmd_motion.afw_pixel_projection);
         }
     }
     route_flight.mark_afw(
@@ -26872,7 +26999,8 @@ bool prepare_full_vr_frame_camera(
     const XrView& render_view,
     bool render_view_valid,
     const HmdCameraPoseSnapshot& hmd_pose,
-    std::array<float, 512>& original_camera);
+    std::array<float, 512>& original_camera,
+    w3vr::mode3_transport::AfwPixelProjection& actual_producer);
 bool prepare_cinema_frame_camera(
     void* frame_data,
     uint64_t present,
@@ -26999,6 +27127,8 @@ void __fastcall hook_engine_frame_builder(void* render_context, void* frame_data
     const int previous_eye = g_engine_render_eye;
     const uint64_t previous_pair_id = g_engine_render_pair_id;
     const HmdCameraPoseSnapshot previous_hmd_pose = g_engine_render_hmd_pose;
+    const auto previous_pixel_projection =
+        g_engine_render_pixel_projection;
     if (g_engine_dual_render_active.load() &&
         g_engine_render_eye < 0 && frame_data != nullptr) {
         g_engine_dual_frame_mutex.lock();
@@ -27061,6 +27191,9 @@ void __fastcall hook_engine_frame_builder(void* render_context, void* frame_data
     }
     std::array<float, 512> fallback_original_camera{};
     bool fallback_frame_camera_applied{};
+    w3vr::mode3_transport::AfwPixelProjection
+        fallback_pixel_projection{
+            w3vr::mode3_transport::AfwPixelProjection::Invalid};
     const bool stereo_transport = geometry_stereo_transport_active();
     const bool stereo_frame_tag_valid = stereo_transport &&
         g_engine_render_eye >= 0 && g_engine_render_eye <= 1 &&
@@ -27135,7 +27268,23 @@ void __fastcall hook_engine_frame_builder(void* render_context, void* frame_data
         fallback_frame_camera_applied = prepare_full_vr_frame_camera(
             frame_data, present, correction_eye, correction_pair,
             correction_view, correction_view_valid,
-            correction_hmd_pose, fallback_original_camera);
+            correction_hmd_pose, fallback_original_camera,
+            fallback_pixel_projection);
+        if (fallback_frame_camera_applied) {
+            g_engine_render_pixel_projection = fallback_pixel_projection;
+            XrFovf fallback_fov{};
+            const bool fallback_fov_valid = fallback_pixel_projection ==
+                    w3vr::mode3_transport::AfwPixelProjection::
+                        NativeAsymmetric
+                ? snapshot_native_asymmetric_pair_fov(
+                    correction_pair, static_cast<uint32_t>(correction_eye),
+                    fallback_fov)
+                : snapshot_shared_mode3_projection_fov(fallback_fov);
+            if (fallback_fov_valid) {
+                g_engine_render_view.fov = fallback_fov;
+                g_engine_render_view_valid = true;
+            }
+        }
     } else {
         const bool normal_cinema_active =
             g_cinema_mode_active.load(std::memory_order_relaxed) &&
@@ -27422,6 +27571,7 @@ void __fastcall hook_engine_frame_builder(void* render_context, void* frame_data
     }
     g_engine_render_eye = previous_eye;
     g_engine_render_pair_id = previous_pair_id;
+    g_engine_render_pixel_projection = previous_pixel_projection;
     g_engine_render_hmd_pose = previous_hmd_pose;
 }
 
@@ -27494,6 +27644,7 @@ void __fastcall hook_engine_dlss_command_emit(
         emitted_tag.pair_id = g_engine_render_pair_id;
         emitted_tag.render_view = g_engine_render_view;
         emitted_tag.render_view_valid = g_engine_render_view_valid;
+        emitted_tag.pixel_projection = g_engine_render_pixel_projection;
         emitted_tag.hmd_pose = g_engine_render_hmd_pose;
         emitted_tag.task_provenance_valid = true;
         emitted_tag_valid = emitted_tag.eye <= 1 &&
@@ -27961,6 +28112,7 @@ void __fastcall hook_engine_gameplay_frame_entry(void* frame_task) {
         completed_tag.pair_id = g_engine_render_pair_id;
         completed_tag.render_view = g_engine_render_view;
         completed_tag.render_view_valid = true;
+        completed_tag.pixel_projection = g_engine_render_pixel_projection;
         g_engine_completed_tag_queue_mutex.lock();
         if (g_engine_completed_tag_queue.size() >= 32) {
             g_engine_completed_tag_queue.pop_front();
@@ -28028,6 +28180,7 @@ void __fastcall hook_engine_gameplay_frame_entry(void* frame_task) {
             completed_tag.pair_id = g_engine_render_pair_id;
             completed_tag.render_view = g_engine_render_view;
             completed_tag.render_view_valid = g_engine_render_view_valid;
+            completed_tag.pixel_projection = g_engine_render_pixel_projection;
             size_t queued_tags{};
             g_engine_completed_tag_queue_mutex.lock();
             if (g_engine_completed_tag_queue.size() >= 32) {
@@ -28649,6 +28802,7 @@ bool capture_asymmetric_temporal_authority(
         route_tag.pair_id = g_engine_render_pair_id;
         route_tag.render_view = g_engine_render_view;
         route_tag.render_view_valid = g_engine_render_view_valid;
+        route_tag.pixel_projection = g_engine_render_pixel_projection;
         route_tag_valid = true;
     }
 
@@ -29359,7 +29513,8 @@ void capture_engine_corrected_temporal_matrix(
     uint64_t present,
     const XrQuaternionf& hmd_orientation,
     const XrVector3f& hmd_position,
-    const std::array<float, 12>& base_camera) {
+    const std::array<float, 12>& base_camera,
+    w3vr::mode3_transport::AfwPixelProjection actual_producer) {
     constexpr size_t kTemporalMatrixFloatOffset = 0x3C0 / sizeof(float);
     std::array<float, 16> matrix{};
     if (view == nullptr || !safe_copy_engine_view_snapshot(
@@ -29388,6 +29543,18 @@ void capture_engine_corrected_temporal_matrix(
         (eye < 0 || eye > 1 || pair_id == 0 || pair_id == UINT64_MAX)) {
         return;
     }
+    XrFovf shared_fov{};
+    const bool shared_fov_valid =
+        actual_producer ==
+            w3vr::mode3_transport::AfwPixelProjection::SharedSymmetric &&
+        snapshot_shared_mode3_projection_fov(shared_fov);
+    Mode3AfwPixelProjectionAuthority afw_projection_authority{};
+    const bool afw_projection_authority_valid =
+        puredark_afw_mode3_aer_common_transport_configured() &&
+        resolve_mode3_afw_pixel_projection(
+            pair_id, generation, static_cast<uint32_t>(eye),
+            actual_producer, shared_fov_valid ? shared_fov : XrFovf{},
+            afw_projection_authority);
     const uint64_t sequence = pair_id != 0 ? pair_id : present;
     const size_t slot_index =
         (sequence % (g_engine_temporal_matrix_ring.size() / 2)) * 2 +
@@ -29448,6 +29615,8 @@ void capture_engine_corrected_temporal_matrix(
     pair.aspect = view[10];
     pair.near_plane = view[12];
     pair.far_plane = view[13];
+    pair.afw_pixel_projection =
+        w3vr::mode3_transport::AfwPixelProjection::Invalid;
     if (g_xr_views.size() >= 2) {
         for (size_t render_view_eye = 0; render_view_eye < 2; ++render_view_eye) {
             pair.render_views[render_view_eye] = g_config.hmd_compositor_only
@@ -29463,6 +29632,11 @@ void capture_engine_corrected_temporal_matrix(
             }
         }
         pair.render_views_valid = true;
+        if (afw_projection_authority_valid) {
+            pair.render_views[0].fov = afw_projection_authority.fovs[0];
+            pair.render_views[1].fov = afw_projection_authority.fovs[1];
+            pair.afw_pixel_projection = afw_projection_authority.encoding;
+        }
     }
     pair.hmd_pose_valid = true;
     if (new_identity) {
@@ -29483,7 +29657,10 @@ bool prepare_full_vr_frame_camera(
     const XrView& render_view,
     bool render_view_valid,
     const HmdCameraPoseSnapshot& tagged_hmd_pose,
-    std::array<float, 512>& original_camera) {
+    std::array<float, 512>& original_camera,
+    w3vr::mode3_transport::AfwPixelProjection& actual_producer) {
+    actual_producer =
+        w3vr::mode3_transport::AfwPixelProjection::Invalid;
     if (frame_data == nullptr || eye < 0 || eye > 1 || pair_id == 0 ||
         pair_id == UINT64_MAX) {
         return false;
@@ -29816,7 +29993,10 @@ bool prepare_full_vr_frame_camera(
 
     capture_engine_corrected_temporal_matrix(
         corrected.data(), present, applied_hmd_orientation,
-        applied_hmd_position, base_camera);
+        applied_hmd_position, base_camera,
+        native_asymmetric_full_vr_projection_applied
+            ? w3vr::mode3_transport::AfwPixelProjection::NativeAsymmetric
+            : w3vr::mode3_transport::AfwPixelProjection::SharedSymmetric);
     {
         std::scoped_lock lock{g_engine_temporal_matrix_mutex};
         auto& pair = g_engine_temporal_matrix_ring[slot_index];
@@ -29884,6 +30064,9 @@ bool prepare_full_vr_frame_camera(
             corrected_camera[0], corrected_camera[1], corrected_camera[2],
             corrected[7], corrected[10]);
     }
+    actual_producer = native_asymmetric_full_vr_projection_applied
+        ? w3vr::mode3_transport::AfwPixelProjection::NativeAsymmetric
+        : w3vr::mode3_transport::AfwPixelProjection::SharedSymmetric;
     return true;
 }
 
@@ -29962,7 +30145,8 @@ bool prepare_cinema_frame_camera(
     capture_engine_corrected_temporal_matrix(
         corrected.data(), present,
         XrQuaternionf{0.0f, 0.0f, 0.0f, 1.0f}, XrVector3f{},
-        base_camera);
+        base_camera,
+        w3vr::mode3_transport::AfwPixelProjection::SharedSymmetric);
     g_cinema_projection_last_present.store(
         present, std::memory_order_release);
     if (g_config.cinema_camera_diagnostics || g_config.logging_enabled ||
@@ -34087,7 +34271,14 @@ void __fastcall hook_engine_view_rebuild(float* view) {
             }
             capture_engine_corrected_temporal_matrix(
                 view, present, applied_hmd_orientation, applied_hmd_position,
-                base_camera);
+                base_camera,
+                native_asymmetric_factory_candidate
+                    ? (native_asymmetric_factory_projection_applied
+                        ? w3vr::mode3_transport::AfwPixelProjection::
+                            NativeAsymmetric
+                        : w3vr::mode3_transport::AfwPixelProjection::Invalid)
+                    : w3vr::mode3_transport::AfwPixelProjection::
+                        SharedSymmetric);
         }
     }
 
@@ -38971,7 +39162,7 @@ void ensure_initialized() {
                 "focus_fire_b1=stereo_structural_aer_upstream_owner "
                 "aer_taau_hud=scene_and_retained_pair_fail_open");
             log_line(
-                "witcher3vr dxgi proxy initialized build=V1334 base=V1331_runtime_mode3_projection "
+                "witcher3vr dxgi proxy initialized build=V1335 base=V1334_stereo_hud_projection_lifecycle "
                 "anchor_smoothing_ini=%d anchor_smoothing_seconds=%.4f "
                 "first_person_strafe_ini=%d mode3_aer_presentation=%d raytracing_enabled=%d raytracing_history_buffers=%d "
                 "aer_afw_enabled=%d persistent_registry=%d dlss_public_streamline=%d "
@@ -39030,7 +39221,7 @@ void ensure_initialized() {
             log_line(
                 "V1310 route flight recorder=ini_opt_in default_off f3_dump=15s renderdoc_f3_preserved=1 qpc=present_only gpu_readback=0 descriptor_scan=0 text_hotpath=0");
             log_line(
-                "V1334 mode3_projection=V1331_runtime_SYM_ASYM stereo_hud_generation_reset=atomic asymmetric_hud_pso=deferred_openxr_geometry aer=unchanged flight_recorders=F3");
+                "V1335 mode3_projection=V1331_runtime_SYM_ASYM stereo_hud_generation_reset=atomic asymmetric_hud_pso=deferred_openxr_geometry aer_afw_projection=producer_owned native_asym_submit=full_frame centered_afw_camera=internal_only flight_recorders=F3");
             log_line(
                 "V1279 DLSS compatibility=public_streamline_aer_private_history_ngx_stereo legacy_module_agnostic_discovery=disabled_by_V1288");
             log_line(
@@ -44607,21 +44798,16 @@ void render_openxr_test_frame(
                             puredark_afw.generation ==
                                 g_streamline_capture_generation.load(
                                     std::memory_order_acquire);
-                        const bool puredark_eye0_native_asymmetric =
-                            puredark_afw.render_views_valid &&
-                            fov_has_off_axis_center(
-                                puredark_afw.render_views[0].fov);
-                        const bool puredark_eye1_native_asymmetric =
-                            puredark_afw.render_views_valid &&
-                            fov_has_off_axis_center(
-                                puredark_afw.render_views[1].fov);
                         puredark_pair_projection_homogeneous =
                             puredark_afw.render_views_valid &&
-                            puredark_eye0_native_asymmetric ==
-                                puredark_eye1_native_asymmetric;
+                            puredark_afw.pixel_projection !=
+                                w3vr::mode3_transport::
+                                    AfwPixelProjection::Invalid;
                         puredark_pair_native_asymmetric =
                             puredark_pair_projection_homogeneous &&
-                            puredark_eye0_native_asymmetric;
+                            puredark_afw.pixel_projection ==
+                                w3vr::mode3_transport::
+                                    AfwPixelProjection::NativeAsymmetric;
                     } else if (puredark_afw_hold_last) {
                         // Both cache slices and their render-time XrViews stay
                         // immutable until another submitted producer bundle is
@@ -45591,7 +45777,7 @@ void render_openxr_test_frame(
                                 1, std::memory_order_relaxed);
                         if (log_index < 16) {
                             log_line(
-                                "V1334 final Mode3 OpenXR submit sample=%u "
+                                "V1335 final Mode3 OpenXR submit sample=%u "
                                 "route=%s backend=%s dlaa=%u projection=%s "
                                 "source=%ux%u swapchain=%ux%u "
                                 "rect0=%d,%d %dx%d rect1=%d,%d %dx%d "
@@ -46876,7 +47062,7 @@ void handle_runtime_mode3_projection_hotkey() {
     }
     if (!mode3_stereo_transport_active()) {
         log_line(
-            "V1334 runtime projection hotkey=F2 ignored route=non_mode3 "
+            "V1335 runtime projection hotkey=F2 ignored route=non_mode3 "
             "present=%llu",
             static_cast<unsigned long long>(
                 g_present_count.load(std::memory_order_relaxed)));
@@ -46886,7 +47072,7 @@ void handle_runtime_mode3_projection_hotkey() {
     g_runtime_mode3_projection_toggle_requests.fetch_add(
         1, std::memory_order_release);
     log_line(
-        "V1334 Mode3 runtime projection toggle queued hotkey=F2 "
+        "V1335 Mode3 runtime projection toggle queued hotkey=F2 "
         "route=%s present=%llu",
         mode3_aer_presentation_active() ? "aer" : "stereo",
         static_cast<unsigned long long>(
@@ -46934,7 +47120,7 @@ void apply_present_boundary_requests() {
             native_asymmetric, std::memory_order_release);
         g_mode3_final_submit_logs.store(0, std::memory_order_release);
         log_line(
-            "V1334 Mode3 runtime projection=%s hotkey=F2 route=%s "
+            "V1335 Mode3 runtime projection=%s hotkey=F2 route=%s "
             "boundary=post_submit present=%llu requests=%u",
             native_asymmetric ? "asymmetric" : "symmetric",
             mode3_aer_presentation_active() ? "aer" : "stereo",
@@ -46957,7 +47143,7 @@ void handle_f3_capture_hotkey(IDXGISwapChain* swapchain) {
     if (w3vr::pipeline_flight::enabled()) {
         w3vr::pipeline_flight::dump_last_ten_seconds();
     }
-    w3vr::route_flight::dump_last_seconds("V1334", 15);
+    w3vr::route_flight::dump_last_seconds("V1335", 15);
     trigger_renderdoc_capture(
         g_game_swapchain != nullptr ? g_game_swapchain : swapchain);
 }

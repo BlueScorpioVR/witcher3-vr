@@ -14,7 +14,7 @@ set(required_fragments
     "bool capture_hud_composite_pso_recipe("
     "bool ensure_asymmetric_bootstrap_hud_psos()"
     "ensure_asymmetric_bootstrap_hud_psos();"
-    "V1334 deferred asymmetric HUD ready"
+    "V1335 deferred asymmetric HUD ready"
 )
 
 foreach(fragment IN LISTS required_fragments)

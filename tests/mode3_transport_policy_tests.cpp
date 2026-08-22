@@ -7,6 +7,7 @@
 #include <initializer_list>
 
 int main() {
+    using w3vr::mode3_transport::AfwPixelProjection;
     using w3vr::mode3_transport::DlssCompletionOwner;
     using w3vr::mode3_transport::FinalTransport;
     using w3vr::mode3_transport::HudProjectionRoute;
@@ -15,6 +16,7 @@ int main() {
     using w3vr::mode3_transport::afw_queued_producer_expired;
     using w3vr::mode3_transport::dlss_submission_route_active;
     using w3vr::mode3_transport::decide_final_submit;
+    using w3vr::mode3_transport::decide_afw_pixel_projection;
     using w3vr::mode3_transport::decide_projection_pair;
     using w3vr::mode3_transport::decide_runtime_projection_transition;
     using w3vr::mode3_transport::dlss_completion_apply_public_jitter;
@@ -182,6 +184,46 @@ int main() {
         true, true, 6, 7, 7, false, false).ready);
     assert(!decide_projection_pair(
         true, true, 7, 7, 7, false, true).ready);
+
+    // Centered AFW matrices do not classify the completed pixels. The exact
+    // producer says Shared or Native; Native additionally proves the real eye
+    // survived its factory rebuild. The synthesized peer needs no factory bit.
+    assert(decide_afw_pixel_projection(
+        AfwPixelProjection::NativeAsymmetric,
+        true, 7, 7, true, 7, 0x1u, 0, true, false) ==
+        AfwPixelProjection::NativeAsymmetric);
+    assert(decide_afw_pixel_projection(
+        AfwPixelProjection::NativeAsymmetric,
+        true, 7, 7, true, 7, 0x2u, 0, true, false) ==
+        AfwPixelProjection::Invalid);
+    assert(decide_afw_pixel_projection(
+        AfwPixelProjection::NativeAsymmetric,
+        true, 7, 7, true, 7, 0x2u, 1, true, false) ==
+        AfwPixelProjection::NativeAsymmetric);
+    assert(decide_afw_pixel_projection(
+        AfwPixelProjection::NativeAsymmetric,
+        true, 7, 7, true, 7, 0x0u, 0, true, false) ==
+        AfwPixelProjection::Invalid);
+    assert(decide_afw_pixel_projection(
+        AfwPixelProjection::NativeAsymmetric,
+        true, 7, 7, true, 6, 0x1u, 0, true, false) ==
+        AfwPixelProjection::Invalid);
+    assert(decide_afw_pixel_projection(
+        AfwPixelProjection::NativeAsymmetric,
+        true, 7, 7, true, 7, 0x1u, 0, false, false) ==
+        AfwPixelProjection::Invalid);
+    assert(decide_afw_pixel_projection(
+        AfwPixelProjection::SharedSymmetric,
+        true, 7, 7, false, 0, 0, 0, false, true) ==
+        AfwPixelProjection::SharedSymmetric);
+    assert(decide_afw_pixel_projection(
+        AfwPixelProjection::SharedSymmetric,
+        true, 7, 7, false, 0, 0, 0, false, false) ==
+        AfwPixelProjection::Invalid);
+    assert(decide_afw_pixel_projection(
+        AfwPixelProjection::Invalid,
+        true, 7, 7, true, 7, 0x3u, 0, true, true) ==
+        AfwPixelProjection::Invalid);
 
     // An exact command-list publication must be observable on either queue.
     assert(submission_queue_eligible(true, true));
