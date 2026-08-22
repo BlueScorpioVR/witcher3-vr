@@ -28,24 +28,19 @@
 #include "native_asymmetric_transport_policy.h"
 #include "pipeline_flight_recorder.h"
 #include "route_flight_recorder.h"
-#include "smoke_visibility_recorder.h"
 #include "rt_ingress_join.h"
 #include "shadow_cascade_authority_policy.h"
 #include "taau_submission_policy.h"
 
-// V1355 removes the startup-order dependency from real-smoke projection PSO
-// preparation: the immutable original recipe is retained and missing eye
-// variants are completed as soon as OpenXR publishes valid views. V1354's
-// no-write smoke clipping A/B and independent
-// per-draw camera-to-temporal-ledger eye match.  The dump now compares the
-// mutable command-list cache used by the renderer with a fresh decision over
-// the same b1 camera, including exact pair, distance and separation margin.
-// The fresh decision is diagnostic only and never selects the rendered PSO.
-// V1353 keeps V1352's validated AFW motion repair unchanged and replaces the
-// completed AFW packet recorder with a deterministic smoke clipping A/B.  Each
-// canonical smoke draw is measured as rendered and through three hidden,
-// color/depth/stencil-no-write projection variants that share one draw-group
-// identity.  The diagnostic changes no visible smoke pixels.
+// V1358 combines V1357's passive smoke baseline with V1356's validated
+// soft-particle depth correction. The reconstructed world position owns both
+// SV_Position and the linear view-depth payload consumed by the original PS.
+// V1357 physically removes V1353-V1355's smoke visibility recorder and its
+// three hidden projection draws. Those GPU queries ran even when Diagnostic
+// Logging was disabled and stopped abruptly at a fixed sample capacity,
+// changing renderer load and cadence during the session. The validated V1355
+// smoke renderer and deferred projection-PSO preparation remain unchanged;
+// F3 retains only the passive route/pipeline recorders and RenderDoc capture.
 // V1352 repairs the projection contract of the exact motion field consumed by
 // AER AFW. Packet captures proved that native-ASym geometry/object pixels used
 // native projection while far-plane/transparent pixels still used centered
@@ -3653,9 +3648,6 @@ constexpr uint64_t kRealSmokePsHash = 0x88504F5A627B9F03ull;
 std::atomic<ID3D12PipelineState*> g_real_smoke_pipeline{};
 std::array<std::atomic<ID3D12PipelineState*>, 3>
     g_real_smoke_center_pipelines{};
-std::array<std::atomic<ID3D12PipelineState*>, 3>
-    g_real_smoke_clip_probe_pipelines{};
-std::atomic<uint64_t> g_real_smoke_draw_group{};
 
 // The automatic focus path reads the vertex-visible b1/b12 table at root 3.
 constexpr uint32_t kFocusVsCbvRoot = 3;
@@ -15086,6 +15078,7 @@ void main(triangle VertexData input[3], inout TriangleStream<VertexData> output)
             desired_h * (horizontal_coordinate * horizontal_length) +
             desired_v * (vertical_coordinate * vertical_length);
         vertex.tc7.xyz = new_world;
+        vertex.tc1.w = dot(cameraRows[10], float4(new_world, 1.0));
         vertex.position = project_world(new_world);
         vertex.position.x += %.9g * vertex.position.w;
         vertex.position.y += %.9g * vertex.position.w;
@@ -15175,17 +15168,13 @@ bool ensure_real_smoke_projection_psos() {
         projections{};
     std::array<std::vector<uint8_t>, 3> geometry_shaders{};
     std::array<ID3D12PipelineState*, 3> variants{};
-    std::array<ID3D12PipelineState*, 3> clip_probes{};
     bool created_any{};
     for (uint32_t variant_index = 0;
          variant_index < variants.size(); ++variant_index) {
         const bool need_variant =
             g_real_smoke_center_pipelines[variant_index].load(
                 std::memory_order_acquire) == nullptr;
-        const bool need_probe =
-            g_real_smoke_clip_probe_pipelines[variant_index].load(
-                std::memory_order_acquire) == nullptr;
-        if ((!need_variant && !need_probe) ||
+        if (!need_variant ||
             !w3vr::mode3_transport::real_smoke_variant_bootstrap_allowed(
                 variant_index, runtime_views_ready)) {
             continue;
@@ -15216,22 +15205,6 @@ bool ensure_real_smoke_projection_psos() {
                 IID_PPV_ARGS(&variants[variant_index])))) {
             variants[variant_index] = nullptr;
         }
-        if (need_probe) {
-            auto probe_desc = variant_desc;
-            for (UINT target = 0; target < probe_desc.NumRenderTargets;
-                 ++target) {
-                probe_desc.BlendState.RenderTarget[target].
-                    RenderTargetWriteMask = 0;
-            }
-            probe_desc.DepthStencilState.DepthWriteMask =
-                D3D12_DEPTH_WRITE_MASK_ZERO;
-            probe_desc.DepthStencilState.StencilWriteMask = 0;
-            if (FAILED(g_create_graphics_pipeline_state(
-                    recipe.device, &probe_desc,
-                    IID_PPV_ARGS(&clip_probes[variant_index])))) {
-                clip_probes[variant_index] = nullptr;
-            }
-        }
     }
 
     {
@@ -15248,26 +15221,14 @@ bool ensure_real_smoke_projection_psos() {
                 variants[variant_index] = nullptr;
                 created_any = true;
             }
-            if (clip_probes[variant_index] != nullptr &&
-                g_real_smoke_clip_probe_pipelines[variant_index].load(
-                    std::memory_order_relaxed) == nullptr) {
-                g_pipeline_infos[clip_probes[variant_index]] =
-                    recipe.pipeline_info;
-                g_real_smoke_clip_probe_pipelines[variant_index].store(
-                    clip_probes[variant_index], std::memory_order_release);
-                clip_probes[variant_index] = nullptr;
-            }
         }
     }
     for (auto* variant : variants) {
         if (variant != nullptr) variant->Release();
     }
-    for (auto* probe : clip_probes) {
-        if (probe != nullptr) probe->Release();
-    }
     if (created_any) {
         log_line(
-            "V1355 real-smoke projection PSOs completed runtime_views=%d "
+            "V1358 real-smoke projection PSOs completed runtime_views=%d "
             "pso=%p,%p,%p",
             runtime_views_ready ? 1 : 0,
             g_real_smoke_center_pipelines[0].load(
@@ -17595,12 +17556,10 @@ void install_reverse_hooks() {
         puredark_afw_mode3_aer_any_route_configured();
     const bool dlss_cache_execute_publication =
         dlss_submitted_cache_route_active();
-    const bool smoke_visibility_execute = common_renderer_pipeline_hooks_needed();
 
     if ((metadata_hooks ||
             puredark_afw_execute_publication ||
-            dlss_cache_execute_publication ||
-            smoke_visibility_execute) &&
+            dlss_cache_execute_publication) &&
         g_command_queue != nullptr && g_execute_command_lists == nullptr) {
         auto target = method<void*>(g_command_queue, 10);
         if (MH_CreateHook(target, reinterpret_cast<void*>(&hook_execute_command_lists), reinterpret_cast<void**>(&g_execute_command_lists)) == MH_OK &&
@@ -18563,8 +18522,6 @@ void STDMETHODCALLTYPE hook_execute_command_lists(
                 w3vr::pipeline_flight::Phase::QueueSubmit};
             g_execute_command_lists(queue, num_command_lists, command_lists);
         }
-        w3vr::smoke_visibility::on_execute(
-            queue, num_command_lists, command_lists);
         w3vr::pipeline_flight::on_execute(
             queue, num_command_lists, command_lists);
         publish_puredark_afw_submissions_after_execute(
@@ -18758,8 +18715,6 @@ void STDMETHODCALLTYPE hook_execute_command_lists(
             w3vr::pipeline_flight::Phase::QueueSubmit};
         g_execute_command_lists(queue, num_command_lists, command_lists);
     }
-    w3vr::smoke_visibility::on_execute(
-        queue, num_command_lists, command_lists);
     w3vr::pipeline_flight::on_execute(
         queue, num_command_lists, command_lists);
     publish_puredark_afw_submissions_after_execute(
@@ -19070,7 +19025,7 @@ HRESULT STDMETHODCALLTYPE hook_create_graphics_pipeline_state(
                 if (!capture_graphics_pso_recipe(
                         g_real_smoke_pso_recipe, device, *desc, info)) {
                     log_line(
-                        "V1355 real-smoke PSO recipe capture failed");
+                        "V1358 real-smoke PSO recipe capture failed");
                 }
             }
             ensure_real_smoke_projection_psos();
@@ -20051,8 +20006,6 @@ HRESULT STDMETHODCALLTYPE hook_reset_command_list(
     if (FAILED(result)) {
         return result;
     }
-
-    w3vr::smoke_visibility::on_command_list_reset(command_list);
 
     store_command_list_pipeline(command_list, initial_state);
     if (auto* local = access_dlss_graphics_state(command_list, false)) {
@@ -21225,145 +21178,6 @@ void process_dlss_gpu_profile() {
     }
 }
 
-bool capture_real_smoke_visibility_metadata(
-    ID3D12GraphicsCommandList* command_list,
-    ID3D12PipelineState* original_pipeline,
-    ID3D12PipelineState* selected_pipeline,
-    uint64_t draw_group,
-    int32_t variant_index,
-    uint32_t draw_flags,
-    UINT index_count_per_instance,
-    UINT instance_count,
-    UINT start_index_location,
-    INT base_vertex_location,
-    UINT start_instance_location,
-    w3vr::smoke_visibility::DrawMetadata& metadata) {
-    metadata = {};
-    metadata.present = g_present_count.load(std::memory_order_relaxed);
-    metadata.draw_group = draw_group;
-    metadata.generation = g_streamline_capture_generation.load(
-        std::memory_order_acquire);
-    metadata.flags = draw_flags |
-        (mode3_aer_presentation_active()
-            ? w3vr::smoke_visibility::DrawRouteAer
-            : w3vr::smoke_visibility::DrawRouteStereo);
-    switch (g_config.temporal_backend) {
-    case TemporalBackend::Taau:
-        metadata.flags |= w3vr::smoke_visibility::DrawBackendTaau;
-        break;
-    case TemporalBackend::Dlss:
-        metadata.flags |= w3vr::smoke_visibility::DrawBackendDlss;
-        break;
-    default:
-        metadata.flags |= w3vr::smoke_visibility::DrawBackendNoAa;
-        break;
-    }
-    metadata.variant_index = variant_index;
-    metadata.index_count = index_count_per_instance;
-    metadata.instance_count = instance_count;
-    metadata.start_index = start_index_location;
-    metadata.base_vertex = base_vertex_location;
-    metadata.start_instance = start_instance_location;
-    metadata.command_list = reinterpret_cast<uintptr_t>(command_list);
-    metadata.original_pipeline = reinterpret_cast<uintptr_t>(original_pipeline);
-    metadata.selected_pipeline = reinterpret_cast<uintptr_t>(selected_pipeline);
-
-    NativeFocusDrawEyeAuthority authority{};
-    if (load_native_focus_draw_eye(
-            command_list, metadata.present, authority)) {
-        metadata.flags |= w3vr::smoke_visibility::DrawAuthorityPresent;
-        metadata.eye = authority.eye <= 1
-            ? static_cast<int32_t>(authority.eye) : -1;
-        metadata.pair_id = authority.pair_id;
-        metadata.pixel_projection = static_cast<uint32_t>(
-            w3vr::mode3_transport::AfwPixelProjection::NativeAsymmetric);
-        metadata.authority_route = authority.route;
-    }
-
-    // [DIAG:SMOKE-CLIP-AB V1353] Freeze the producer transaction separately
-    // from the late draw selector.  V1352 proved that those two authorities
-    // can become visible at different points in one Present; the A/B probes
-    // must therefore retain both identities instead of inferring one from the
-    // other or from the runtime SYM/ASYM request.
-    EngineFrameTag producer{};
-    uint32_t producer_route{};
-    if (current_exact_engine_render_tag(producer)) {
-        producer_route = 1;
-    } else if (lookup_taau_recording_producer(command_list, producer)) {
-        producer_route = 2;
-    } else if (lookup_dlss_recording_producer(command_list, producer)) {
-        producer_route = 3;
-    } else if (lookup_streamline_command_list_route(
-            command_list, producer)) {
-        producer_route = 4;
-    }
-    const uint32_t current_generation =
-        g_streamline_capture_generation.load(std::memory_order_acquire);
-    if (producer_route != 0 && producer.task_provenance_valid &&
-        producer.eye <= 1 && producer.pair_id != 0 &&
-        producer.pair_id != UINT64_MAX &&
-        producer.generation == current_generation) {
-        metadata.flags |= w3vr::smoke_visibility::DrawProducerTransaction;
-        metadata.producer_authority_route = producer_route;
-        metadata.producer_eye = static_cast<int32_t>(producer.eye);
-        metadata.producer_pair_id = producer.pair_id;
-        metadata.producer_generation = producer.generation;
-        metadata.producer_pixel_projection =
-            static_cast<uint32_t>(producer.pixel_projection);
-    }
-
-    const auto pipeline = lookup_pipeline_info(original_pipeline);
-    metadata.cull_mode = static_cast<uint32_t>(pipeline.cull_mode);
-    metadata.front_counter_clockwise =
-        pipeline.front_counter_clockwise != FALSE ? 1u : 0u;
-    metadata.depth_clip_enable =
-        pipeline.depth_clip_enable != FALSE ? 1u : 0u;
-
-    const auto* state = access_dlss_graphics_state(command_list, false);
-    if (state == nullptr) {
-        return true;
-    }
-    metadata.viewport_count = state->viewport_count;
-    metadata.scissor_count = state->scissor_count;
-    metadata.viewport = state->viewport;
-    metadata.scissor = state->scissor;
-    metadata.root3_table = state->tables[3].ptr;
-    metadata.root6_table = state->tables[6].ptr;
-    if (metadata.root3_table != 0 && metadata.root6_table != 0) {
-        metadata.flags |= w3vr::smoke_visibility::DrawRootTablesReady;
-    }
-
-    CbvDescriptorInfo cbv{};
-    std::array<float, 176> b1{};
-    if (resolve_real_smoke_cbv(*state, 1, cbv) &&
-        cbv.size_in_bytes >= b1.size() * sizeof(float) &&
-        copy_gpu_va_bytes(cbv.gpu_va, b1.data(),
-            b1.size() * sizeof(float)) &&
-        std::all_of(b1.begin(), b1.end(),
-            [](float value) { return std::isfinite(value); })) {
-        metadata.flags |= w3vr::smoke_visibility::DrawB1Captured;
-        metadata.b1_hash = fnv1a64(b1.data(), b1.size() * sizeof(float));
-        std::copy_n(b1.begin(), metadata.clip_matrix.size(),
-            metadata.clip_matrix.begin());
-        metadata.camera_position = {b1[144], b1[145], b1[146]};
-        NativeFocusDrawEyeAuthority fresh_authority{};
-        if (match_native_focus_draw_eye(
-                metadata.camera_position, metadata.present,
-                fresh_authority)) {
-            metadata.flags |=
-                w3vr::smoke_visibility::DrawFreshEyeAuthority;
-            metadata.fresh_authority_route = fresh_authority.route;
-            metadata.fresh_eye = static_cast<int32_t>(fresh_authority.eye);
-            metadata.fresh_pair_id = fresh_authority.pair_id;
-            metadata.fresh_selected_distance =
-                fresh_authority.selected_distance;
-            metadata.fresh_separation_margin =
-                fresh_authority.separation_margin;
-        }
-    }
-    return true;
-}
-
 // [FIX:DLSS-PACKED 8/10] Preserve the geometry-pair identity until the
 // corresponding processed image pair becomes active for presentation.
 void STDMETHODCALLTYPE hook_draw_indexed_instanced(
@@ -21379,71 +21193,11 @@ void STDMETHODCALLTYPE hook_draw_indexed_instanced(
         real_smoke_pipeline != nullptr &&
         real_smoke_pipeline ==
             g_real_smoke_pipeline.load(std::memory_order_acquire);
-    const uint64_t smoke_draw_group = real_smoke_candidate
-        ? g_real_smoke_draw_group.fetch_add(
-            1, std::memory_order_relaxed) + 1
-        : 0;
-    uint32_t smoke_attempt_flags{};
-    const auto issue_draw = [&](ID3D12PipelineState* selected_pipeline,
-                                int32_t variant_index,
-                                uint32_t flags) {
-        w3vr::smoke_visibility::DrawToken token{};
-        w3vr::smoke_visibility::DrawMetadata metadata{};
-        if (real_smoke_candidate) {
-            capture_real_smoke_visibility_metadata(
-                command_list, real_smoke_pipeline, selected_pipeline,
-                smoke_draw_group, variant_index, flags,
-                index_count_per_instance, instance_count,
-                start_index_location, base_vertex_location,
-                start_instance_location, metadata);
-            token = w3vr::smoke_visibility::begin_draw(
-                command_list, metadata);
-        }
+    const auto issue_draw = [&]() {
         g_draw_indexed_instanced(
             command_list, index_count_per_instance, instance_count,
             start_index_location, base_vertex_location,
             start_instance_location);
-        if (token.valid()) {
-            w3vr::smoke_visibility::end_draw(command_list, token);
-        }
-        if (!token.valid() || variant_index < 0 ||
-            g_set_pipeline_state == nullptr) {
-            return;
-        }
-
-        // Execute three hidden reference projections over the exact same
-        // geometry/root state.  Their PSOs cannot write color, depth or
-        // stencil; only the pipeline-statistics queries survive.  Comparing
-        // CPrimitives inside one draw_group tells us deterministically which
-        // projection clips a disappearing smoke draw.
-        for (int32_t probe_variant = 0; probe_variant < 3;
-             ++probe_variant) {
-            auto* probe_pipeline =
-                g_real_smoke_clip_probe_pipelines[probe_variant].load(
-                    std::memory_order_acquire);
-            if (probe_pipeline == nullptr) {
-                continue;
-            }
-            auto probe_metadata = metadata;
-            probe_metadata.flags |=
-                w3vr::smoke_visibility::DrawReferenceProbe;
-            probe_metadata.variant_index = probe_variant;
-            probe_metadata.selected_pipeline =
-                reinterpret_cast<uintptr_t>(probe_pipeline);
-            const auto probe_token = w3vr::smoke_visibility::begin_draw(
-                command_list, probe_metadata);
-            if (!probe_token.valid()) {
-                continue;
-            }
-            g_set_pipeline_state(command_list, probe_pipeline);
-            g_draw_indexed_instanced(
-                command_list, index_count_per_instance, instance_count,
-                start_index_location, base_vertex_location,
-                start_instance_location);
-            w3vr::smoke_visibility::end_draw(
-                command_list, probe_token);
-        }
-        g_set_pipeline_state(command_list, selected_pipeline);
     };
 
     if (real_smoke_world_up_route_active() &&
@@ -21463,18 +21217,6 @@ void STDMETHODCALLTYPE hook_draw_indexed_instanced(
                 native_stereo_runtime_enabled(),
                 native_asymmetric_cinema_panel_active(),
                 native_asymmetric_full_vr_scene_active());
-        if (asymmetric_center) {
-            smoke_attempt_flags |=
-                w3vr::smoke_visibility::DrawOffaxisRequested;
-        }
-        if (native_asymmetric_cinema_panel_active()) {
-            smoke_attempt_flags |=
-                w3vr::smoke_visibility::DrawCinemaExcluded;
-        }
-        if (native_asymmetric_full_vr_scene_active()) {
-            smoke_attempt_flags |=
-                w3vr::smoke_visibility::DrawFullVrExcluded;
-        }
         bool variant_selected{};
         if (asymmetric_center) {
             variant_selected = select_real_smoke_offaxis_pipeline(
@@ -21489,10 +21231,6 @@ void STDMETHODCALLTYPE hook_draw_indexed_instanced(
                 variant_pipeline = g_real_smoke_center_pipelines[2].load(
                     std::memory_order_acquire);
                 variant_selected = variant_pipeline != nullptr;
-                if (variant_selected) {
-                    smoke_attempt_flags |=
-                        w3vr::smoke_visibility::DrawZeroCenterFallback;
-                }
             }
         } else {
             variant_pipeline = g_real_smoke_center_pipelines[2].load(
@@ -21500,17 +21238,6 @@ void STDMETHODCALLTYPE hook_draw_indexed_instanced(
             variant_selected = variant_pipeline != nullptr;
         }
         if (variant_selected) {
-            smoke_attempt_flags |=
-                w3vr::smoke_visibility::DrawVariantSelected;
-            int32_t variant_index{-1};
-            for (int32_t index = 0; index < 3; ++index) {
-                if (variant_pipeline ==
-                    g_real_smoke_center_pipelines[index].load(
-                        std::memory_order_acquire)) {
-                    variant_index = index;
-                    break;
-                }
-            }
             const auto* state = access_dlss_graphics_state(
                 command_list, false);
             if (state != nullptr && state->tables[3].ptr != 0 &&
@@ -21519,13 +21246,11 @@ void STDMETHODCALLTYPE hook_draw_indexed_instanced(
                 // Root 3 and root 6 are the matching VS/GS CBV tables in the
                 // REDengine stage schema. Give the local GS the exact b1 used
                 // by the proven smoke VS, then restore both bindings
-                // immediately after the one recorded draw.
+                // immediately after the one smoke draw.
                 g_set_graphics_root_descriptor_table(
                     command_list, 6, state->tables[3]);
                 g_set_pipeline_state(command_list, variant_pipeline);
-                issue_draw(variant_pipeline, variant_index,
-                    smoke_attempt_flags |
-                        w3vr::smoke_visibility::DrawRootTablesReady);
+                issue_draw();
                 g_set_pipeline_state(command_list, real_smoke_pipeline);
                 g_set_graphics_root_descriptor_table(
                     command_list, 6, original_geometry_table);
@@ -21561,13 +21286,7 @@ void STDMETHODCALLTYPE hook_draw_indexed_instanced(
         if (focus_fire_selected != nullptr) {
             g_set_pipeline_state(command_list, focus_fire_selected);
         }
-        issue_draw(
-            focus_fire_selected != nullptr
-                ? focus_fire_selected : real_smoke_pipeline,
-            -1,
-            smoke_attempt_flags |
-                (real_smoke_candidate
-                    ? w3vr::smoke_visibility::DrawOriginalFallback : 0u));
+        issue_draw();
         if (focus_fire_selected != nullptr) {
             g_set_pipeline_state(command_list, focus_fire_original);
         }
@@ -21614,13 +21333,7 @@ void STDMETHODCALLTYPE hook_draw_indexed_instanced(
     if (focus_fire_selected != nullptr) {
         g_set_pipeline_state(command_list, focus_fire_selected);
     }
-    issue_draw(
-        focus_fire_selected != nullptr
-            ? focus_fire_selected : real_smoke_pipeline,
-        -1,
-        smoke_attempt_flags |
-            (real_smoke_candidate
-                ? w3vr::smoke_visibility::DrawOriginalFallback : 0u));
+    issue_draw();
     if (focus_fire_selected != nullptr) {
         g_set_pipeline_state(command_list, focus_fire_original);
     }
@@ -40201,7 +39914,7 @@ void ensure_initialized() {
                 "focus_fire_b1=stereo_and_aer_centered_draw_proven "
                 "aer_taau_hud=scene_and_retained_pair_fail_open");
             log_line(
-                "witcher3vr dxgi proxy initialized build=V1355 base=V1354_smoke_eye_authority_ab_diagnostic "
+                "witcher3vr dxgi proxy initialized build=V1358 base=V1357_passive_smoke_baseline_plus_V1356_depth "
                 "anchor_smoothing_ini=%d anchor_smoothing_seconds=%.4f "
                 "first_person_strafe_ini=%d mode3_aer_presentation=%d raytracing_enabled=%d raytracing_history_buffers=%d "
                 "aer_afw_enabled=%d persistent_registry=%d dlss_public_streamline=%d "
@@ -40260,11 +39973,9 @@ void ensure_initialized() {
             log_line(
                 "V1310 route flight recorder=ini_opt_in default_off f3_dump=15s renderdoc_f3_preserved=1 qpc=present_only gpu_readback=0 descriptor_scan=0 text_hotpath=0");
             log_line(
-                "V1348 base=V1347 smoke_selection=V1341_live_ASYM_command_eye smoke_visibility=exact_canonical_draw pipeline_statistics=IA_VS_GS_CLIP_PS b1=hash_matrix_camera raster=viewport_scissor_cull always_record=1 file_write=F3_last15s V1342_actual_producer_authority=removed");
-            log_line(
                 "V1350 AER AFW native projection=exact_frozen_per_eye_scale_and_center source_and_peer=full_tangent_geometry imageRect=full identity_copy=1 fallback=none smoke=unchanged_V1348");
             log_line(
-                "V1355 smoke projection PSO preparation=deferred_exact_runtime_fov smoke_clip_diagnostic=exact_draw_actual_plus_three_no_write_projection_variants full_b1=1 fresh_camera_ledger_eye_match=diagnostic_only");
+                "V1358 smoke world-up depth=reprojected_from_new_world_row10 projection_PSO=deferred_exact_runtime_fov smoke_visibility_diagnostic=removed hidden_draws=0 gpu_queries=0 f3=route_pipeline_renderdoc_only");
             log_line(
                 "V1279 DLSS compatibility=public_streamline_aer_private_history_ngx_stereo legacy_module_agnostic_discovery=disabled_by_V1288");
             log_line(
@@ -40302,10 +40013,6 @@ void capture_d3d12_objects(IUnknown* dxgi_device_parameter) {
         g_d3d12_device = device;
     }
     log_line("Captured D3D12 queue=%p device=%p", g_command_queue, g_d3d12_device);
-    const bool smoke_visibility_ready =
-        w3vr::smoke_visibility::initialize(g_d3d12_device);
-    log_line("V1355 smoke eye-authority A/B recorder initialized=%u capacity=65536 window=15s trigger=F3 probes=eye0_eye1_zero_center fresh_camera_match=1 no_write=1",
-        smoke_visibility_ready ? 1u : 0u);
     install_reverse_hooks();
     // [FIX:AER-AFW-HUD-BARRIER-HOOK V12014 1/1] AER deliberately never
     // enables the same-tick dual-render transition that historically installed
@@ -48245,14 +47952,12 @@ void handle_f3_capture_hotkey(IDXGISwapChain* swapchain) {
     if (w3vr::pipeline_flight::enabled()) {
         w3vr::pipeline_flight::dump_last_ten_seconds();
     }
-    w3vr::smoke_visibility::dump_last_seconds("V1355", 15);
-    w3vr::route_flight::dump_last_seconds("V1355", 15);
+    w3vr::route_flight::dump_last_seconds("V1358", 15);
     trigger_renderdoc_capture(
         g_game_swapchain != nullptr ? g_game_swapchain : swapchain);
 }
 
 void record_route_flight_present(uint64_t frame) {
-    w3vr::smoke_visibility::update_present_clock(frame);
     update_route_flight_present_clock();
     if (!w3vr::route_flight::enabled()) {
         return;
