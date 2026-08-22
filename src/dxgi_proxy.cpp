@@ -38657,7 +38657,7 @@ void ensure_initialized() {
             log_line(
                 "V1310 route flight recorder=ini_opt_in default_off f3_dump=15s renderdoc_f3_preserved=1 qpc=present_only gpu_readback=0 descriptor_scan=0 text_hotpath=0");
             log_line(
-                "V1323 Mode3 final submit=one_full_source_path producer_scale=1 presentation_scale=cover_normalized_final_fov image_rect=full crop=0 fit=0 shift=0");
+                "V1326 Mode3 final submit=one_full_source_path producer_scale=1 presentation_scale=direct_unit_anchored_final_fov image_rect=full crop=0 fit=0 shift=0");
             log_line(
                 "V1279 DLSS compatibility=public_streamline_aer_private_history_ngx_stereo legacy_module_agnostic_discovery=disabled_by_V1288");
             log_line(
@@ -44983,8 +44983,7 @@ void render_openxr_test_frame(
                             swapchain.height,
                             full_source_copy_compatible,
                             identity_shader_ready},
-                            requested_scale,
-                            fullscreen_cover_fraction);
+                            requested_scale);
                     mode3_unified_direct_copy = decision.transport ==
                         w3vr::mode3_transport::FinalTransport::DirectCopy;
                     mode3_unified_identity_shader = decision.transport ==

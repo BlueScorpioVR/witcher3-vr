@@ -1,7 +1,6 @@
 #include "mode3_transport_policy.h"
 
 #include <cassert>
-#include <cmath>
 #include <initializer_list>
 
 int main() {
@@ -97,13 +96,23 @@ int main() {
 
     const auto final_submit = decide_final_submit({
         true, true, 3072, 3264, 3072, 3264, true, true},
-        0.8f, 0.804821f);
+        0.8f);
     assert(final_submit.transport == FinalTransport::DirectCopy);
     assert(final_submit.width == 3072 && final_submit.height == 3264);
-    assert(std::fabs(final_submit.fov_scale -
-        (0.8f / 0.804821f)) < 0.00001f);
+    assert(final_submit.fov_scale == 0.8f);
+    const auto identity_submit = decide_final_submit({
+        true, true, 3072, 3264, 3072, 3264, true, true},
+        1.0f);
+    assert(identity_submit.transport == FinalTransport::DirectCopy);
+    assert(identity_submit.fov_scale == 1.0f);
     assert(decide_final_submit({
-        true, true, 2458, 2611, 3072, 3264, true, true}, 0.8f, 0.8f)
+        true, true, 3072, 3264, 3072, 3264, true, true}, 1.5f)
+        .fov_scale == 1.0f);
+    assert(decide_final_submit({
+        true, true, 3072, 3264, 3072, 3264, true, true}, 0.0f)
+        .fov_scale == 0.01f);
+    assert(decide_final_submit({
+        true, true, 2458, 2611, 3072, 3264, true, true}, 0.8f)
         .transport == FinalTransport::Unavailable);
 
     // Mode 3 presents the complete selected-resolution image into a matching
