@@ -29,6 +29,10 @@
 #include "shadow_cascade_authority_policy.h"
 #include "taau_submission_policy.h"
 
+// V1296 gives every Mode-3 AER/Stereo backend one presentation contract:
+// the swapchain stays at selected source resolution and Presentation Size
+// changes only final FOV/zoom. AER TAAU and DLSS additionally share the same
+// scale-1 final remap so neither falls into the legacy 0.804821 cover crop.
 // V1295 removes the obsolete alternate-resize experiment. Virtual Desktop
 // foveated rendering no longer needs its special full-surface letterbox route;
 // Presentation Size and the normal legacy/fullscreen presenters are unchanged.
@@ -37964,7 +37968,7 @@ void ensure_initialized() {
                 "focus_fire_b1=stereo_structural_aer_upstream_owner "
                 "aer_taau_hud=scene_and_retained_pair_fail_open");
             log_line(
-                "witcher3vr dxgi proxy initialized build=V1295 base=V1294 "
+                "witcher3vr dxgi proxy initialized build=V1314 base=V1313_plus_V1296 "
                 "anchor_smoothing_ini=%d anchor_smoothing_seconds=%.4f "
                 "first_person_strafe_ini=%d mode3_aer_presentation=%d raytracing_enabled=%d raytracing_history_buffers=%d "
                 "aer_afw_enabled=%d persistent_registry=%d dlss_public_streamline=%d "
@@ -38012,6 +38016,8 @@ void ensure_initialized() {
                 "V1294 first-person camera anchor cadence=aer_per_present strict_stereo_pair_frozen backend_independent=1 pr=13");
             log_line(
                 "V1295 alternate presentation resize=removed vd_foveated_special_route=removed presentation_size=unchanged fullscreen_ini=preserved");
+            log_line(
+                "V1296 Mode-3 presentation=aer_and_stereo_all_backends source_resolution_fixed_100_percent aer_dlss_taau_scale1_cover_crop=bypassed slider=fov_only cinema_unchanged=1");
             log_line(
                 "V1279 DLSS compatibility=public_streamline_aer_private_history_ngx_stereo legacy_module_agnostic_discovery=disabled_by_V1288");
             log_line(
@@ -39562,20 +39568,18 @@ bool create_openxr_swapchains() {
     const uint32_t source_height = requested_height > 0
         ? requested_height
         : scaled_height;
-    const bool aer_taau_fixed_resolution =
+    const bool mode3_fixed_resolution =
         w3vr::aer_presentation_size_policy::fixed_resolution_route_active({
-            mode3_aer_presentation_active(),
-            g_config.native_stereo,
-            temporal_backend_is_taau()});
-    // [FIX:AER-TAAU-FIXED-RESOLUTION-PRESENTATION V1291 1/3]
-    // TAAU already produced the selected full-resolution pair. Do not divide
-    // the swapchain extent by Presentation Size; that slider is an angular
-    // zoom-out control on this route, not a supersampling control.
-    const uint32_t presentation_width = aer_taau_fixed_resolution
+            mode3_stereo_transport_active()});
+    // [FIX:MODE3-FIXED-RESOLUTION-PRESENTATION V1296 1/3] Every Mode-3
+    // backend already produced the selected-resolution eye texture. Never
+    // divide swapchain extent by Presentation Size; the slider is only an
+    // angular zoom-out control for AER/Stereo No AA, TAAU and DLSS.
+    const uint32_t presentation_width = mode3_fixed_resolution
         ? source_width
         : static_cast<uint32_t>(ceilf(
             static_cast<float>(source_width) / presentation_scale));
-    const uint32_t presentation_height = aer_taau_fixed_resolution
+    const uint32_t presentation_height = mode3_fixed_resolution
         ? source_height
         : static_cast<uint32_t>(ceilf(
             static_cast<float>(source_height) / presentation_scale));
@@ -39606,7 +39610,7 @@ bool create_openxr_swapchains() {
 
     result = pfn_xrCreateSwapchain(g_xr_session, &swapchain_info, &swapchain.handle);
     g_xr_eye_swapchains[1].handle = swapchain.handle;
-    log_line("OpenXR xrCreateSwapchain stereo-array result=%s (%d) size=%ux%u recommended=%ux%u requested=%ux%u presentation=%.3f aer_taau_fixed_resolution=%d max=%ux%u format=%u samples=%u",
+    log_line("OpenXR xrCreateSwapchain stereo-array result=%s (%d) size=%ux%u recommended=%ux%u requested=%ux%u presentation=%.3f mode3_fixed_resolution=%d max=%ux%u format=%u samples=%u",
         xr_result_name(result),
         result,
         swapchain.width,
@@ -39616,7 +39620,7 @@ bool create_openxr_swapchains() {
         requested_width,
         requested_height,
         presentation_scale,
-        aer_taau_fixed_resolution ? 1 : 0,
+        mode3_fixed_resolution ? 1 : 0,
         config.maxImageRectWidth,
         config.maxImageRectHeight,
         static_cast<unsigned>(selected_format),
@@ -42825,6 +42829,7 @@ void render_openxr_test_frame(
                             mode3_aer_presentation_active(),
                             g_config.native_stereo,
                             temporal_backend_is_taau(),
+                            temporal_backend_is_dlss(),
                             puredark_afw_gameplay_frame,
                             g_config.hmd_freelook,
                             aer_size_projection_pipeline_ready,
@@ -42885,10 +42890,12 @@ void render_openxr_test_frame(
                 UINT projection_height = std::min(swapchain.height,
                     std::max(copy_height, static_cast<UINT>(lroundf(
                         static_cast<float>(copy_height) / effective_vertical_scale))));
-                // [FIX:AER-TAAU-FIXED-RESOLUTION-PRESENTATION V1291 2/3]
-                // TAAU takes this route at scale 1 as well: the source extent
+                // [FIX:MODE3-FIXED-RESOLUTION-PRESENTATION V1296 2/3] AER
+                // TAAU and DLSS both take this route at scale 1: source extent
                 // remains exact and the legacy cover crop cannot report or
-                // submit the image as 80%. Below 1 only the target FOV changes.
+                // submit 80%. Below 1 only the target FOV changes. Strict
+                // Stereo keeps its native/symmetric final FOV path above the
+                // same fixed-resolution swapchain.
                 // [FIX:AER-FINAL-PRESENTATION-SIZE V1262 1/3] AER's old
                 // legacy-copy presenter encoded reduced Presentation Size by
                 // increasing imageRect (3072 -> 3297 at 0.75 on Quest 3).
@@ -44780,10 +44787,11 @@ void render_openxr_test_frame(
                     // native routes still select the packed view above.
                     projection_views[eye].fov = render_view->fov;
                 } else if (aer_asymmetric_final_size_remap) {
-                    // [FIX:AER-TAAU-FIXED-RESOLUTION-PRESENTATION V1291 3/3]
-                    // Scale 1 submits the raw runtime FOV; lower slider values
-                    // submit only the tangent-scaled FOV. Pixel extent stays
-                    // identical in both cases.
+                    // [FIX:MODE3-FIXED-RESOLUTION-PRESENTATION V1296 3/3]
+                    // AER TAAU/DLSS scale 1 submits raw runtime FOV; lower
+                    // values submit only tangent-scaled FOV. Pixel extent is
+                    // identical. Strict Stereo already obtains its matching
+                    // scaled FOV from the accepted native/symmetric pair.
                     // [FIX:AER-FINAL-PRESENTATION-SIZE V1262 3/3] The shader
                     // above remapped the completed symmetric-envelope image
                     // into this eye's tangent-scaled target. Submit that exact
