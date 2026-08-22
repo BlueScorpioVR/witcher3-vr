@@ -111,7 +111,7 @@ void on_execute(
 void process_gpu();
 
 // Creates a timestamped witcher3vr_pipeline_flight_*.log beside this DLL with
-// the most recent ten seconds. Every F2 dump is a new file; the recorder keeps
+// the most recent ten seconds. Every F3 dump is a new file; the recorder keeps
 // running and file I/O happens only on this explicit action.
 bool dump_last_ten_seconds();
 

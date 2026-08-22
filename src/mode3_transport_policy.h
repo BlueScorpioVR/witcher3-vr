@@ -44,12 +44,33 @@ struct FinalSubmitDecision {
     FinalTransport transport{FinalTransport::Inactive};
     uint32_t width{};
     uint32_t height{};
-    float fov_scale{1.0f};
 };
 
+struct RuntimeProjectionTransitionDecision {
+    bool apply{};
+    bool native_asymmetric{};
+};
+
+// Coalesce every physical F2 edge observed before the next safe Present
+// boundary. An even number is a no-op; an odd number flips the producer once.
+// Route eligibility is revalidated at that boundary, not merely when the key
+// was sampled.
+constexpr RuntimeProjectionTransitionDecision
+decide_runtime_projection_transition(
+    bool current_native_asymmetric,
+    uint32_t request_count,
+    bool route_eligible) noexcept {
+    const bool apply = route_eligible && (request_count & 1u) != 0;
+    return {
+        apply,
+        apply ? !current_native_asymmetric : current_native_asymmetric};
+}
+
 // A Mode-3 producer already owns the selected full-frame resolution. Give
-// OpenXR that exact destination extent so the final handoff remains an
-// identity operation: no crop, stretch, padding or presentation-scale resize.
+// OpenXR that exact destination extent so the GPU handoff remains an identity
+// operation with no stretch, padding or presentation-scale resize. Strict
+// Stereo may still select a per-eye subImage from the completed symmetric
+// texture; that optical choice never changes the texture transport extent.
 // Legacy modes retain their existing runtime/presentation extent selection.
 constexpr uint32_t select_swapchain_dimension(
     bool mode3_transport,
@@ -65,8 +86,8 @@ constexpr uint32_t select_swapchain_dimension(
 
 // A centered symmetric camera starts from the union of the two displaced
 // runtime-eye frusta, then applies the same tangent-space Presentation Size as
-// a native asymmetric producer. The completed pixels therefore already own
-// the exact FOV submitted to OpenXR: no crop, remap or second final scale.
+// a native asymmetric producer. Strict Stereo later selects the corresponding
+// per-eye tangent crop; Presentation Size is not applied a second time.
 constexpr float symmetric_producer_fov_scale(
     float runtime_cover_fraction,
     float requested_scale) noexcept {
@@ -82,16 +103,15 @@ constexpr float symmetric_producer_fov_scale(
 
 // Route, backend and projection encoding are deliberately absent. Once the
 // completed eye pair is selected, every non-panel Mode-3 route uses this same
-// full-image handoff. Presentation Size already belongs to the producer FOV,
-// so final submit forwards that exact source-owned geometry at scale 1.
+// full-texture handoff. Projection-specific OpenXR imageRect/FOV selection is
+// a separate optical decision after transport.
 constexpr FinalSubmitDecision decide_final_submit(
     const FinalSubmitInput& input) noexcept {
     if (!input.active) return {};
     FinalSubmitDecision result{
         FinalTransport::Unavailable,
         input.swapchain_width,
-        input.swapchain_height,
-        1.0f};
+        input.swapchain_height};
     if (!input.source_pair_ready || input.source_width == 0 ||
         input.source_height == 0 ||
         input.source_width != input.swapchain_width ||
@@ -102,6 +122,18 @@ constexpr FinalSubmitDecision decide_final_submit(
             ? FinalTransport::IdentityShader
             : FinalTransport::Unavailable);
     return result;
+}
+
+// A truly symmetric strict-Stereo producer stores a centered envelope, so its
+// final optical submit always selects the matching per-eye tangent interval.
+// A native asymmetric producer already owns that interval in its full frame.
+// AER remains outside this first runtime-projection trial.
+constexpr bool strict_stereo_symmetric_subimage_active(
+    bool mode3_transport,
+    bool aer_presentation,
+    bool source_native_asymmetric) noexcept {
+    return mode3_transport && !aer_presentation &&
+        !source_native_asymmetric;
 }
 
 // Public Streamline is the universal Mode-3 DLSS boundary. Projection and

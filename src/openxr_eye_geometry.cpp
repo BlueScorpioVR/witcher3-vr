@@ -389,6 +389,154 @@ bool scale_asymmetric_projection_fov(
         std::isfinite(scaled_fov.angleDown);
 }
 
+bool derive_pixel_exact_subimage_fov(
+    const XrFovf& content_fov,
+    const XrRect2Di& content_rect,
+    const XrRect2Di& submitted_rect,
+    XrFovf& represented_fov) {
+    if (content_rect.extent.width <= 0 || content_rect.extent.height <= 0 ||
+        submitted_rect.extent.width <= 0 ||
+        submitted_rect.extent.height <= 0) {
+        return false;
+    }
+
+    const int64_t content_right =
+        static_cast<int64_t>(content_rect.offset.x) +
+        content_rect.extent.width;
+    const int64_t content_bottom =
+        static_cast<int64_t>(content_rect.offset.y) +
+        content_rect.extent.height;
+    const int64_t submitted_right =
+        static_cast<int64_t>(submitted_rect.offset.x) +
+        submitted_rect.extent.width;
+    const int64_t submitted_bottom =
+        static_cast<int64_t>(submitted_rect.offset.y) +
+        submitted_rect.extent.height;
+    if (submitted_rect.offset.x < content_rect.offset.x ||
+        submitted_rect.offset.y < content_rect.offset.y ||
+        submitted_right > content_right ||
+        submitted_bottom > content_bottom) {
+        return false;
+    }
+
+    const float content_left = std::tan(content_fov.angleLeft);
+    const float content_right_tangent = std::tan(content_fov.angleRight);
+    const float content_up = std::tan(content_fov.angleUp);
+    const float content_down = std::tan(content_fov.angleDown);
+    const float span_x = content_right_tangent - content_left;
+    const float span_y = content_up - content_down;
+    if (!std::isfinite(content_left) ||
+        !std::isfinite(content_right_tangent) ||
+        !std::isfinite(content_up) || !std::isfinite(content_down) ||
+        span_x <= 0.01f || span_y <= 0.01f) {
+        return false;
+    }
+
+    const float inv_width =
+        1.0f / static_cast<float>(content_rect.extent.width);
+    const float inv_height =
+        1.0f / static_cast<float>(content_rect.extent.height);
+    const float u0 = static_cast<float>(
+        submitted_rect.offset.x - content_rect.offset.x) * inv_width;
+    const float u1 = static_cast<float>(
+        submitted_right - content_rect.offset.x) * inv_width;
+    const float v0 = static_cast<float>(
+        submitted_rect.offset.y - content_rect.offset.y) * inv_height;
+    const float v1 = static_cast<float>(
+        submitted_bottom - content_rect.offset.y) * inv_height;
+
+    const float exact_left = content_left + span_x * u0;
+    const float exact_right = content_left + span_x * u1;
+    const float exact_up = content_up - span_y * v0;
+    const float exact_down = content_up - span_y * v1;
+    if (!std::isfinite(exact_left) || !std::isfinite(exact_right) ||
+        !std::isfinite(exact_up) || !std::isfinite(exact_down) ||
+        exact_left >= exact_right || exact_down >= exact_up) {
+        return false;
+    }
+
+    represented_fov = {
+        std::atan(exact_left), std::atan(exact_right),
+        std::atan(exact_up), std::atan(exact_down)};
+    return std::isfinite(represented_fov.angleLeft) &&
+        std::isfinite(represented_fov.angleRight) &&
+        std::isfinite(represented_fov.angleUp) &&
+        std::isfinite(represented_fov.angleDown);
+}
+
+bool derive_symmetric_eye_subimage(
+    const XrFovf& content_fov,
+    const XrFovf& target_fov,
+    const XrRect2Di& content_rect,
+    SymmetricEyeSubimage& subimage) {
+    if (content_rect.extent.width <= 0 || content_rect.extent.height <= 0) {
+        return false;
+    }
+
+    const float content_left = std::tan(content_fov.angleLeft);
+    const float content_right = std::tan(content_fov.angleRight);
+    const float content_up = std::tan(content_fov.angleUp);
+    const float content_down = std::tan(content_fov.angleDown);
+    const float target_left = std::tan(target_fov.angleLeft);
+    const float target_right = std::tan(target_fov.angleRight);
+    const float target_up = std::tan(target_fov.angleUp);
+    const float target_down = std::tan(target_fov.angleDown);
+    const float content_span_x = content_right - content_left;
+    const float content_span_y = content_up - content_down;
+    const float target_span_x = target_right - target_left;
+    const float target_span_y = target_up - target_down;
+    if (!std::isfinite(content_left) || !std::isfinite(content_right) ||
+        !std::isfinite(content_up) || !std::isfinite(content_down) ||
+        !std::isfinite(target_left) || !std::isfinite(target_right) ||
+        !std::isfinite(target_up) || !std::isfinite(target_down) ||
+        content_span_x <= 0.01f || content_span_y <= 0.01f ||
+        target_span_x <= 0.01f || target_span_y <= 0.01f) {
+        return false;
+    }
+
+    constexpr float kContainmentEpsilon = 0.0001f;
+    if (target_left < content_left - kContainmentEpsilon ||
+        target_right > content_right + kContainmentEpsilon ||
+        target_down < content_down - kContainmentEpsilon ||
+        target_up > content_up + kContainmentEpsilon) {
+        return false;
+    }
+
+    const float u0 = std::clamp(
+        (target_left - content_left) / content_span_x, 0.0f, 1.0f);
+    const float u1 = std::clamp(
+        (target_right - content_left) / content_span_x, 0.0f, 1.0f);
+    const float v0 = std::clamp(
+        (content_up - target_up) / content_span_y, 0.0f, 1.0f);
+    const float v1 = std::clamp(
+        (content_up - target_down) / content_span_y, 0.0f, 1.0f);
+    const int32_t width = content_rect.extent.width;
+    const int32_t height = content_rect.extent.height;
+    const int32_t left = std::clamp(
+        static_cast<int32_t>(std::floor(u0 * width)), 0, width);
+    const int32_t right = std::clamp(
+        static_cast<int32_t>(std::ceil(u1 * width)), 0, width);
+    const int32_t top = std::clamp(
+        static_cast<int32_t>(std::floor(v0 * height)), 0, height);
+    const int32_t bottom = std::clamp(
+        static_cast<int32_t>(std::ceil(v1 * height)), 0, height);
+    if (right <= left || bottom <= top) {
+        return false;
+    }
+
+    SymmetricEyeSubimage candidate{};
+    candidate.image_rect = {
+        {content_rect.offset.x + left, content_rect.offset.y + top},
+        {right - left, bottom - top}};
+    if (!derive_pixel_exact_subimage_fov(
+            content_fov, content_rect, candidate.image_rect,
+            candidate.represented_fov)) {
+        return false;
+    }
+    subimage = candidate;
+    return true;
+}
+
 float inverse_hud_distance_from_parallel_reference(
     float left_eye_shift_px,
     float hud_size,

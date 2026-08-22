@@ -677,6 +677,124 @@ void test_asymmetric_presentation_scale() {
         "asymmetric presentation rejects non-finite scale");
 }
 
+void test_strict_stereo_symmetric_subimage_equivalence() {
+    constexpr uint32_t width = 3072;
+    constexpr uint32_t height = 3216;
+    const XrRect2Di full_rect{
+        {0, 0}, {static_cast<int32_t>(width),
+                 static_cast<int32_t>(height)}};
+    const XrFovf runtime_fovs[2]{
+        {-0.942478f, 0.698132f, 0.767945f, -0.959931f},
+        {-0.698132f, 0.942478f, 0.767945f, -0.959931f}};
+
+    // Reproduce the current centered producer: one uniform cover fraction is
+    // selected from both optical centers, then the runtime-eye tangent spans
+    // are expanded by 1/q. Presentation Size scales this envelope and each
+    // per-eye target by the same p, so p must cancel out of imageRect.
+    float cover = 1.0f;
+    for (const auto& fov : runtime_fovs) {
+        const float left = std::tan(fov.angleLeft);
+        const float right = std::tan(fov.angleRight);
+        const float up = std::tan(fov.angleUp);
+        const float down = std::tan(fov.angleDown);
+        const float center_x = -left / (right - left);
+        const float center_y = up / (up - down);
+        cover = std::min(cover,
+            0.5f / std::max(center_x, 1.0f - center_x));
+        cover = std::min(cover,
+            0.5f / std::max(center_y, 1.0f - center_y));
+    }
+    require(std::fabs(cover - 0.804821f) < 2.0e-5f,
+        "Quest strict-Stereo cover reference");
+
+    const float runtime_horizontal_span =
+        std::tan(runtime_fovs[0].angleRight) -
+        std::tan(runtime_fovs[0].angleLeft);
+    const float runtime_vertical_span =
+        std::tan(runtime_fovs[0].angleUp) -
+        std::tan(runtime_fovs[0].angleDown);
+    const float content_half_x = runtime_horizontal_span / (2.0f * cover);
+    const float content_half_y = runtime_vertical_span / (2.0f * cover);
+    const XrFovf base_content{
+        std::atan(-content_half_x), std::atan(content_half_x),
+        std::atan(content_half_y), std::atan(-content_half_y)};
+
+    eye_geometry::SymmetricEyeSubimage crops[2][2]{};
+    const float scales[2]{1.0f, 0.8f};
+    for (uint32_t scale_index = 0; scale_index < 2; ++scale_index) {
+        XrFovf content{};
+        require(eye_geometry::scale_asymmetric_projection_fov(
+            base_content, scales[scale_index], content),
+            "strict-Stereo scaled symmetric content");
+        for (uint32_t eye = 0; eye < 2; ++eye) {
+            XrFovf target{};
+            require(eye_geometry::scale_asymmetric_projection_fov(
+                runtime_fovs[eye], scales[scale_index], target),
+                "strict-Stereo scaled asymmetric target");
+            require(eye_geometry::derive_symmetric_eye_subimage(
+                content, target, full_rect, crops[scale_index][eye]),
+                "strict-Stereo symmetric tangent crop");
+
+            const float content_step_x =
+                (std::tan(content.angleRight) -
+                    std::tan(content.angleLeft)) / width;
+            const float content_step_y =
+                (std::tan(content.angleUp) -
+                    std::tan(content.angleDown)) / height;
+            require(std::fabs(
+                std::tan(crops[scale_index][eye].represented_fov.angleLeft) -
+                    std::tan(target.angleLeft)) <= content_step_x * 1.01f &&
+                std::fabs(
+                std::tan(crops[scale_index][eye].represented_fov.angleRight) -
+                    std::tan(target.angleRight)) <= content_step_x * 1.01f &&
+                std::fabs(
+                std::tan(crops[scale_index][eye].represented_fov.angleUp) -
+                    std::tan(target.angleUp)) <= content_step_y * 1.01f &&
+                std::fabs(
+                std::tan(crops[scale_index][eye].represented_fov.angleDown) -
+                    std::tan(target.angleDown)) <= content_step_y * 1.01f,
+                "strict-Stereo crop target differs by under one source pixel");
+        }
+    }
+
+    for (uint32_t eye = 0; eye < 2; ++eye) {
+        const auto& at_one = crops[0][eye].image_rect;
+        const auto& at_point_eight = crops[1][eye].image_rect;
+        require(at_one.offset.x == at_point_eight.offset.x &&
+            at_one.offset.y == at_point_eight.offset.y &&
+            at_one.extent.width == at_point_eight.extent.width &&
+            at_one.extent.height == at_point_eight.extent.height,
+            "strict-Stereo normalized crop is slider invariant");
+        require(std::fabs(
+            static_cast<float>(at_one.extent.width) / width - cover) <=
+                2.0f / width &&
+            std::fabs(
+            static_cast<float>(at_one.extent.height) / height - cover) <=
+                2.0f / height,
+            "strict-Stereo crop uses Quest cover fraction per axis");
+    }
+    const auto& left = crops[0][0].image_rect;
+    const auto& right = crops[0][1].image_rect;
+    require(left.offset.x == static_cast<int32_t>(width) -
+            (right.offset.x + right.extent.width) &&
+        left.offset.y == right.offset.y &&
+        left.extent.width == right.extent.width &&
+        left.extent.height == right.extent.height,
+        "strict-Stereo eye crops are mirrored horizontally");
+
+    XrFovf outside = runtime_fovs[0];
+    outside.angleLeft = std::atan(-content_half_x * 1.1f);
+    eye_geometry::SymmetricEyeSubimage rejected{};
+    require(!eye_geometry::derive_symmetric_eye_subimage(
+        base_content, outside, full_rect, rejected),
+        "strict-Stereo crop rejects target outside content");
+    XrRect2Di outside_rect{{-1, 0}, {static_cast<int32_t>(width), 10}};
+    XrFovf represented{};
+    require(!eye_geometry::derive_pixel_exact_subimage_fov(
+        base_content, full_rect, outside_rect, represented),
+        "strict-Stereo exact FOV rejects rectangle outside content");
+}
+
 void test_asymmetric_hud_source_shift() {
     constexpr uint32_t width = 3072;
     constexpr uint32_t height = 3216;
@@ -728,6 +846,7 @@ int main() {
     test_parallel_headset_adaptation();
     test_asymmetric_projection_descriptor();
     test_asymmetric_presentation_scale();
+    test_strict_stereo_symmetric_subimage_equivalence();
     test_asymmetric_hud_source_shift();
     if (failures != 0) {
         std::fprintf(stderr, "%d eye-geometry test(s) failed\n", failures);

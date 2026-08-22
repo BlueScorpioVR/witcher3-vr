@@ -52,6 +52,15 @@ struct AsymmetricProjectionDescriptor {
     float vertical_tangent_span{};
 };
 
+// A symmetric producer stores a centered angular envelope in one full image.
+// Strict Stereo submits one eye-specific part of that image. The represented
+// FOV is derived back from the quantized integer rectangle so OpenXR rays stay
+// paired with the exact source pixels selected by imageRect.
+struct SymmetricEyeSubimage {
+    XrRect2Di image_rect{};
+    XrFovf represented_fov{};
+};
+
 XrQuaternionf multiply(
     const XrQuaternionf& left, const XrQuaternionf& right);
 XrQuaternionf conjugate(const XrQuaternionf& quaternion);
@@ -96,6 +105,21 @@ bool scale_asymmetric_projection_fov(
     const XrFovf& fov,
     float scale,
     XrFovf& scaled_fov);
+
+bool derive_pixel_exact_subimage_fov(
+    const XrFovf& content_fov,
+    const XrRect2Di& content_rect,
+    const XrRect2Di& submitted_rect,
+    XrFovf& represented_fov);
+
+// Selects the integer sub-image which represents target_fov inside a centered
+// producer image. Tangent-space leading edges are floored and trailing edges
+// are ceiled so quantization never drops a requested ray at the boundary.
+bool derive_symmetric_eye_subimage(
+    const XrFovf& content_fov,
+    const XrFovf& target_fov,
+    const XrRect2Di& content_rect,
+    SymmetricEyeSubimage& subimage);
 
 // Converts a legacy left-eye source-pixel shift, captured on a parallel-view
 // reference headset, into the inverse physical distance of a cyclopean HUD

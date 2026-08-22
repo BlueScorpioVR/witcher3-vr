@@ -12,6 +12,7 @@ int main() {
     using w3vr::mode3_transport::afw_queued_producer_expired;
     using w3vr::mode3_transport::dlss_submission_route_active;
     using w3vr::mode3_transport::decide_final_submit;
+    using w3vr::mode3_transport::decide_runtime_projection_transition;
     using w3vr::mode3_transport::dlss_completion_apply_public_jitter;
     using w3vr::mode3_transport::dlss_completion_capture_public_bundle;
     using w3vr::mode3_transport::dlss_completion_ngx_uses_public_bundle;
@@ -26,6 +27,7 @@ int main() {
     using w3vr::mode3_transport::select_swapchain_dimension;
     using w3vr::mode3_transport::submission_queue_eligible;
     using w3vr::mode3_transport::streamline_dlss_evaluate_callback_active;
+    using w3vr::mode3_transport::strict_stereo_symmetric_subimage_active;
     using w3vr::mode3_transport::submitted_hud_join_route_active;
     using w3vr::mode3_transport::submitted_hud_join_window_matches;
     using w3vr::mode3_transport::strict_stereo_retained_hud_pair_fresh;
@@ -99,19 +101,16 @@ int main() {
         true, true, 3072, 3264, 3072, 3264, true, true});
     assert(final_submit.transport == FinalTransport::DirectCopy);
     assert(final_submit.width == 3072 && final_submit.height == 3264);
-    assert(final_submit.fov_scale == 1.0f);
     const auto identity_submit = decide_final_submit({
         true, true, 3072, 3264, 3072, 3264, true, true});
     assert(identity_submit.transport == FinalTransport::DirectCopy);
-    assert(identity_submit.fov_scale == 1.0f);
     assert(decide_final_submit({
         true, true, 2458, 2611, 3072, 3264, true, true})
         .transport == FinalTransport::Unavailable);
 
-    // Mode 3 presents the complete selected-resolution image into a matching
-    // OpenXR destination. The runtime recommendation must not silently enlarge
-    // that destination, because an extent mismatch cannot be fixed without a
-    // crop, stretch or padded bands at final submit.
+    // Mode 3 transports the complete selected-resolution texture into a
+    // matching OpenXR destination. Strict Stereo may select a subImage from
+    // that texture, but the GPU handoff itself never resizes or pads it.
     assert(select_swapchain_dimension(
         true, 2496, 3072, 2496, 16384) == 2496);
     assert(select_swapchain_dimension(
@@ -124,8 +123,8 @@ int main() {
         true, 20000, 3072, 20000, 16384) == 16384);
 
     // Symmetric producer geometry covers both displaced runtime eyes and then
-    // applies Presentation Size once. Final submit forwards the result at
-    // identity. The calibrated Quest 3 cover is about 0.804821.
+    // applies Presentation Size once. The calibrated Quest 3 cover is about
+    // 0.804821; the final per-eye crop is tested in eye_geometry.
     const float symmetric_envelope =
         symmetric_producer_fov_scale(0.804821f, 1.0f);
     assert(symmetric_envelope > 1.24250f);
@@ -137,6 +136,39 @@ int main() {
     assert(symmetric_producer_fov_scale(1.0f, 1.0f) == 1.0f);
     assert(symmetric_producer_fov_scale(0.0f, 1.0f) == 2.0f);
     assert(symmetric_producer_fov_scale(2.0f, 1.0f) == 1.0f);
+
+    // Strict Stereo always maps a genuinely symmetric source to the per-eye
+    // tangent interval. Runtime F2 changes the producer itself; it is not a
+    // second optical gate. Native ASYM stays full and AER is still excluded.
+    assert(strict_stereo_symmetric_subimage_active(
+        true, false, false));
+    assert(!strict_stereo_symmetric_subimage_active(
+        false, false, false));
+    assert(!strict_stereo_symmetric_subimage_active(
+        true, false, true));
+    assert(!strict_stereo_symmetric_subimage_active(
+        true, true, false));
+    assert(!strict_stereo_symmetric_subimage_active(
+        true, true, true));
+
+    // F2 requests are consumed only at an eligible safe boundary. Multiple
+    // Present/Present1 observations collapse by parity, so two edges cannot
+    // cause a needless generation reset.
+    const auto sym_to_asym = decide_runtime_projection_transition(
+        false, 1, true);
+    assert(sym_to_asym.apply && sym_to_asym.native_asymmetric);
+    const auto asym_to_sym = decide_runtime_projection_transition(
+        true, 1, true);
+    assert(asym_to_sym.apply && !asym_to_sym.native_asymmetric);
+    const auto even_requests = decide_runtime_projection_transition(
+        false, 2, true);
+    assert(!even_requests.apply && !even_requests.native_asymmetric);
+    const auto odd_requests = decide_runtime_projection_transition(
+        true, 3, true);
+    assert(odd_requests.apply && !odd_requests.native_asymmetric);
+    const auto ineligible = decide_runtime_projection_transition(
+        false, 1, false);
+    assert(!ineligible.apply && !ineligible.native_asymmetric);
 
     // An exact command-list publication must be observable on either queue.
     assert(submission_queue_eligible(true, true));
