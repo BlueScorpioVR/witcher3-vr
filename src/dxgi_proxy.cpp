@@ -33,6 +33,7 @@
 #include "shadow_cascade_authority_policy.h"
 #include "taau_submission_policy.h"
 
+// V1363 physically removes V1340's ineffective DLSS scene-boundary reset.
 // V1362 makes the exact producer record behind TAAU CB10 the sole owner of a
 // strict-Stereo resolve identity. The completed-task queue and committed eye
 // history can no longer substitute an old pair while the producer task is
@@ -4890,14 +4891,6 @@ std::atomic<uint8_t> g_stereo_taau_history_reset_mask{};
 std::atomic<uint32_t> g_mode3_projection_reset_generation{};
 std::atomic<uint8_t> g_mode3_taau_projection_reset_mask{};
 std::atomic<uint8_t> g_mode3_dlss_projection_reset_mask{};
-// Loading/Cinema boundaries do not necessarily change the producer
-// generation. Keep their DLSS reset transaction separate from the F2 reset
-// and bind it to the first exact post-boundary pair.
-std::atomic<bool> g_mode3_dlss_scene_reset_requested{};
-std::atomic<uint32_t> g_mode3_dlss_scene_reset_generation{};
-std::atomic<uint64_t> g_mode3_dlss_scene_reset_pair_floor{};
-std::atomic<uint64_t> g_mode3_dlss_scene_reset_pair_ceiling{};
-std::atomic<uint8_t> g_mode3_dlss_scene_reset_mask{};
 // Loading can leave a delayed pre-boundary TAAU command list in flight. Keep a
 // separate reset request pending until each eye sees a strictly newer pair.
 std::atomic<uint8_t> g_loading_taau_history_reset_mask{};
@@ -21603,70 +21596,6 @@ void service_mode3_hud_generation_drain() {
             g_present_count.load(std::memory_order_relaxed)));
 }
 
-void clear_mode3_dlss_scene_history_reset() {
-    g_mode3_dlss_scene_reset_requested.store(
-        false, std::memory_order_release);
-    g_mode3_dlss_scene_reset_generation.store(
-        0, std::memory_order_release);
-    g_mode3_dlss_scene_reset_pair_floor.store(
-        0, std::memory_order_release);
-    g_mode3_dlss_scene_reset_pair_ceiling.store(
-        0, std::memory_order_release);
-    g_mode3_dlss_scene_reset_mask.store(
-        0, std::memory_order_release);
-}
-
-void clear_mode3_dlss_engine_camera_history() {
-    // The native 0xB0 previous-camera record is upstream of Streamline. A
-    // reset pulse alone cannot repair an eye seeded from the preceding scene.
-    {
-        std::scoped_lock lock{g_engine_per_eye_temporal_camera_mutex};
-        g_engine_per_eye_temporal_camera_history = {};
-    }
-    g_full_vr_frame_camera_last_pair[0].store(
-        0, std::memory_order_release);
-    g_full_vr_frame_camera_last_pair[1].store(
-        0, std::memory_order_release);
-}
-
-void arm_mode3_dlss_scene_history_reset(
-    uint64_t present,
-    const char* reason) {
-    if (!mode3_stereo_transport_active() ||
-        !temporal_backend_is_dlss()) {
-        return;
-    }
-
-    // Native Full VR and the presentation detector can observe the same
-    // boundary a few Presents apart. Do not move an unconsumed reset forward.
-    if (g_mode3_dlss_scene_reset_requested.load(
-            std::memory_order_acquire) ||
-        g_mode3_dlss_scene_reset_mask.load(
-            std::memory_order_acquire) != 0) {
-        return;
-    }
-
-    const uint64_t pair_floor =
-        g_engine_pair_sequence.load(std::memory_order_acquire) + 1;
-    clear_mode3_dlss_engine_camera_history();
-    g_mode3_dlss_scene_reset_generation.store(
-        0, std::memory_order_release);
-    g_mode3_dlss_scene_reset_pair_floor.store(
-        pair_floor, std::memory_order_release);
-    g_mode3_dlss_scene_reset_pair_ceiling.store(
-        0, std::memory_order_release);
-    g_mode3_dlss_scene_reset_mask.store(
-        0, std::memory_order_release);
-    g_mode3_dlss_scene_reset_requested.store(
-        true, std::memory_order_release);
-    log_line(
-        "V1340 DLSS scene history reset armed reason=%s present=%llu "
-        "pair_floor=%llu",
-        reason != nullptr ? reason : "unknown",
-        static_cast<unsigned long long>(present),
-        static_cast<unsigned long long>(pair_floor));
-}
-
 void reset_loading_video_presentation_state(uint64_t present) {
     // [FIX:POST-LOADING-INIT-TRANSACTION 2/8] Loading video is a hard content
     // boundary. Mono HUD replays and completed Mode-3 pairs belong to the
@@ -21679,11 +21608,6 @@ void reset_loading_video_presentation_state(uint64_t present) {
         g_engine_pair_sequence.load(std::memory_order_acquire) + 1;
     g_loading_video_scene_pair_floor.store(
         pair_floor, std::memory_order_release);
-    clear_mode3_dlss_scene_history_reset();
-    if (temporal_backend_is_dlss()) {
-        clear_mode3_dlss_engine_camera_history();
-    }
-
     g_mono_hud_outputs_valid.store(false, std::memory_order_release);
     g_streamline_capture_latest_slot[0].store(
         UINT32_MAX, std::memory_order_release);
@@ -33469,11 +33393,9 @@ void __fastcall hook_engine_view_rebuild(float* view) {
         const bool native_camera_changed = automatic_full_vr_cutscene &&
             previous_native_camera != 0 && current_native_camera != 0 &&
             previous_native_camera != current_native_camera;
-        const bool full_vr_camera_boundary =
-            previous_full_vr != automatic_full_vr_cutscene ||
-            native_camera_changed;
         if (taau_stereo_route_active() &&
-            full_vr_camera_boundary) {
+            (previous_full_vr != automatic_full_vr_cutscene ||
+                native_camera_changed)) {
             g_full_vr_frame_camera_last_pair[0].store(
                 0, std::memory_order_release);
             g_full_vr_frame_camera_last_pair[1].store(
@@ -33491,15 +33413,6 @@ void __fastcall hook_engine_view_rebuild(float* view) {
                 native_camera_changed ? "native_camera_change" :
                     (automatic_full_vr_cutscene ? "full_vr_entry" :
                         "full_vr_exit"));
-        }
-        if (dlss_sequential_mode_active() &&
-            full_vr_camera_boundary) {
-            arm_mode3_dlss_scene_history_reset(
-                present,
-                native_camera_changed ? "full_vr_camera_change" :
-                    (automatic_full_vr_cutscene
-                        ? "full_vr_entry"
-                        : "full_vr_exit"));
         }
     }
     const bool hmd_scene_camera = !native_loading_video &&
@@ -35427,7 +35340,6 @@ void __fastcall hook_engine_is_loading_screen_video_playing(
             0, std::memory_order_release);
     } else if (!active && previous) {
         arm_post_loading_taau_history_reset(present);
-        arm_mode3_dlss_scene_history_reset(present, "post_loading");
         g_post_loading_auto_recenter_deadline_ms.store(
             GetTickCount64() + kPostLoadingAutoRecenterDelayMs,
             std::memory_order_release);
@@ -35517,10 +35429,8 @@ bool poll_engine_loading_screen_video_state() {
         g_post_loading_auto_recenter_deadline_ms.store(
             0, std::memory_order_release);
     } else if (!active && previous) {
-        const uint64_t present =
-            g_present_count.load(std::memory_order_relaxed);
-        arm_post_loading_taau_history_reset(present);
-        arm_mode3_dlss_scene_history_reset(present, "post_loading_poll");
+        arm_post_loading_taau_history_reset(
+            g_present_count.load(std::memory_order_relaxed));
         g_post_loading_auto_recenter_deadline_ms.store(
             GetTickCount64() + kPostLoadingAutoRecenterDelayMs,
             std::memory_order_release);
@@ -36622,11 +36532,6 @@ void apply_engine_dual_render_transition(
             false, std::memory_order_release);
         g_automatic_full_vr_native_camera.store(0, std::memory_order_release);
     }
-    if (force_generation_reset) {
-        // F2 owns the new generation and its existing projection-reset pulse;
-        // do not carry an older scene-boundary transaction across it.
-        clear_mode3_dlss_scene_history_reset();
-    }
     g_mode3_projection_reset_generation.store(
         force_generation_reset ? generation : 0,
         std::memory_order_release);
@@ -37384,96 +37289,34 @@ void __fastcall hook_sl_set_constants(void* constants, uint32_t frame_token, uin
     const uint32_t source_viewport = viewport;
     if (constants != nullptr && eye <= 1 &&
         mode3_stereo_transport_active()) {
-        const uint8_t eye_mask = static_cast<uint8_t>(1u << eye);
-        EngineFrameTag reset_tag{};
-        const bool reset_tag_valid =
-            current_puredark_afw_direct_route_tag(eye, reset_tag);
-        auto claim_eye_reset = [eye_mask](
-            std::atomic<uint8_t>& reset_mask) {
-            uint8_t pending_reset = reset_mask.load(
-                std::memory_order_acquire);
-            while ((pending_reset & eye_mask) != 0) {
-                const uint8_t remaining = static_cast<uint8_t>(
-                    pending_reset & static_cast<uint8_t>(~eye_mask));
-                if (reset_mask.compare_exchange_weak(
-                        pending_reset, remaining,
-                        std::memory_order_acq_rel,
-                        std::memory_order_acquire)) {
-                    return true;
-                }
-            }
-            return false;
-        };
-
-        // A loading exit can be observed before strict Stereo auto-start bumps
-        // the generation. Freeze the reset generation only when the first
-        // exact post-boundary producer tag reaches Streamline.
-        const uint64_t scene_pair_floor =
-            g_mode3_dlss_scene_reset_pair_floor.load(
-                std::memory_order_acquire);
-        if (reset_tag_valid && reset_tag.pair_id >= scene_pair_floor &&
-            scene_pair_floor != 0 &&
-            g_mode3_dlss_scene_reset_requested.load(
-                std::memory_order_acquire)) {
-            bool requested = true;
-            if (g_mode3_dlss_scene_reset_requested.compare_exchange_strong(
-                    requested, false,
-                    std::memory_order_acq_rel,
-                    std::memory_order_acquire)) {
-                constexpr uint64_t kSceneResetPairWindow = 8;
-                g_mode3_dlss_scene_reset_generation.store(
-                    reset_tag.generation, std::memory_order_release);
-                g_mode3_dlss_scene_reset_pair_ceiling.store(
-                    reset_tag.pair_id + kSceneResetPairWindow,
-                    std::memory_order_release);
-                g_mode3_dlss_scene_reset_mask.store(
-                    0x3u, std::memory_order_release);
-                log_line(
-                    "V1340 DLSS scene history reset activated eye=%u "
-                    "pair=%llu generation=%u floor=%llu present=%llu",
-                    eye,
-                    static_cast<unsigned long long>(reset_tag.pair_id),
-                    reset_tag.generation,
-                    static_cast<unsigned long long>(scene_pair_floor),
-                    static_cast<unsigned long long>(
-                        g_present_count.load(std::memory_order_relaxed)));
-            }
-        }
-
-        bool claimed_scene_reset{};
-        const uint32_t scene_reset_generation =
-            g_mode3_dlss_scene_reset_generation.load(
-                std::memory_order_acquire);
-        const uint64_t scene_reset_ceiling =
-            g_mode3_dlss_scene_reset_pair_ceiling.load(
-                std::memory_order_acquire);
-        if (reset_tag_valid && scene_reset_generation != 0 &&
-            reset_tag.generation == scene_reset_generation) {
-            if (reset_tag.pair_id <= scene_reset_ceiling) {
-                claimed_scene_reset = claim_eye_reset(
-                    g_mode3_dlss_scene_reset_mask);
-            } else {
-                // This runtime may expose constants for only one public
-                // viewport. Retire an unclaimable peer bit instead of letting
-                // it reset an unrelated scene hundreds of pairs later.
-                g_mode3_dlss_scene_reset_mask.store(
-                    0, std::memory_order_release);
-                g_mode3_dlss_scene_reset_generation.store(
-                    0, std::memory_order_release);
-                g_mode3_dlss_scene_reset_pair_ceiling.store(
-                    0, std::memory_order_release);
-            }
-        }
-
         const uint32_t reset_generation =
             g_mode3_projection_reset_generation.load(
                 std::memory_order_acquire);
-        bool claimed_projection_reset{};
-        if (reset_generation != 0 && reset_tag_valid &&
+        EngineFrameTag reset_tag{};
+        if (reset_generation != 0 &&
+            current_puredark_afw_direct_route_tag(eye, reset_tag) &&
             reset_tag.generation == reset_generation) {
-            claimed_projection_reset = claim_eye_reset(
-                g_mode3_dlss_projection_reset_mask);
-            if (claimed_projection_reset) {
+            const uint8_t eye_mask = static_cast<uint8_t>(1u << eye);
+            uint8_t pending_reset =
+                g_mode3_dlss_projection_reset_mask.load(
+                std::memory_order_acquire);
+            bool claimed_reset{};
+            while ((pending_reset & eye_mask) != 0) {
+                const uint8_t remaining = static_cast<uint8_t>(
+                    pending_reset & static_cast<uint8_t>(~eye_mask));
+                if (g_mode3_dlss_projection_reset_mask.compare_exchange_weak(
+                        pending_reset, remaining,
+                        std::memory_order_acq_rel,
+                        std::memory_order_acquire)) {
+                    claimed_reset = true;
+                    break;
+                }
+            }
+            if (claimed_reset) {
+                // Streamline 1.5 sl::Constants::reset. This mutation occurs
+                // before both the callback cache and the original API call,
+                // so the exact new-generation evaluation sees one pulse.
+                static_cast<uint8_t*>(constants)[0x19F] = 1;
                 log_line(
                     "V1331 DLSS projection history reset applied eye=%u "
                     "pair=%llu generation=%u present=%llu",
@@ -37483,21 +37326,6 @@ void __fastcall hook_sl_set_constants(void* constants, uint32_t frame_token, uin
                     static_cast<unsigned long long>(
                         g_present_count.load(std::memory_order_relaxed)));
             }
-        }
-        if (claimed_scene_reset || claimed_projection_reset) {
-            // Streamline 1.5 sl::Constants::reset. Apply it before both the
-            // callback cache and the original API call.
-            static_cast<uint8_t*>(constants)[0x19F] = 1;
-        }
-        if (claimed_scene_reset) {
-            log_line(
-                "V1340 DLSS scene history reset applied eye=%u pair=%llu "
-                "generation=%u present=%llu",
-                eye,
-                static_cast<unsigned long long>(reset_tag.pair_id),
-                reset_tag.generation,
-                static_cast<unsigned long long>(
-                    g_present_count.load(std::memory_order_relaxed)));
         }
     }
     if (constants != nullptr &&
@@ -39757,7 +39585,7 @@ void ensure_initialized() {
                 "focus_fire_b1=stereo_and_aer_centered_draw_proven "
                 "aer_taau_hud=scene_and_retained_pair_fail_open");
             log_line(
-                "witcher3vr dxgi proxy initialized build=V1362 base=V1361_cbv_hash_plus_strict_taau_cb10_producer_identity "
+                "witcher3vr dxgi proxy initialized build=V1363 base=V1362_without_rejected_V1340_dlss_scene_history_reset "
                 "anchor_smoothing_ini=%d anchor_smoothing_seconds=%.4f "
                 "first_person_strafe_ini=%d mode3_aer_presentation=%d raytracing_enabled=%d raytracing_history_buffers=%d "
                 "aer_afw_enabled=%d persistent_registry=%d dlss_public_streamline=%d "
@@ -39819,6 +39647,8 @@ void ensure_initialized() {
                 "V1350 AER AFW native projection=exact_frozen_per_eye_scale_and_center source_and_peer=full_tangent_geometry imageRect=full identity_copy=1 fallback=none smoke=unchanged_V1348");
             log_line(
                 "V1362 smoke world-up depth=reprojected_from_new_world_row10 cbv_cache=full_handle_hash_lock_free taau_stereo_identity=exact_cb10_producer_no_history_fallback projection_PSO=deferred_exact_runtime_fov smoke_visibility_diagnostic=removed hidden_draws=0 gpu_queries=0 f3=route_pipeline_renderdoc_only");
+            log_line(
+                "V1363 dlss_scene_history_reset=removed_rejected_V1340 projection_switch_reset=V1331_only");
             log_line(
                 "V1279 DLSS compatibility=public_streamline_aer_private_history_ngx_stereo legacy_module_agnostic_discovery=disabled_by_V1288");
             log_line(
@@ -44092,10 +43922,6 @@ void render_openxr_test_frame(
         g_cinema_capture_diagnostic_logs.store(0, std::memory_order_relaxed);
         g_cinema_pair_diagnostic_logs.store(0, std::memory_order_relaxed);
         g_cinema_mode_active.store(cinema_mode, std::memory_order_relaxed);
-        if (previous_cinema && !cinema_mode) {
-            arm_mode3_dlss_scene_history_reset(
-                current_present, "cinema_exit");
-        }
         if (cinema_mode && g_config.runtime_diagnostics) {
             // The startup sample is not evidence for the cinema path. Rearm
             // the same bounded readback on entry so the two cached eye images
@@ -47795,7 +47621,7 @@ void handle_f3_capture_hotkey(IDXGISwapChain* swapchain) {
     if (w3vr::pipeline_flight::enabled()) {
         w3vr::pipeline_flight::dump_last_ten_seconds();
     }
-    w3vr::route_flight::dump_last_seconds("V1362", 15);
+    w3vr::route_flight::dump_last_seconds("V1363", 15);
     trigger_renderdoc_capture(
         g_game_swapchain != nullptr ? g_game_swapchain : swapchain);
 }

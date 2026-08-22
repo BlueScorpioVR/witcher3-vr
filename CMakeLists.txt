@@ -316,13 +316,6 @@ if(BUILD_TESTING)
     )
 
     add_test(
-        NAME renderer_mode3_dlss_scene_history_contract
-        COMMAND "${CMAKE_COMMAND}"
-            "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
-            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/mode3_dlss_scene_history_contract.cmake"
-    )
-
-    add_test(
         NAME renderer_mode3_asymmetric_effect_contract
         COMMAND "${CMAKE_COMMAND}"
             "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
