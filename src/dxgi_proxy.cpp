@@ -16,6 +16,7 @@
 #include <openxr/openxr_platform.h>
 
 #include "aer_scheduler.h"
+#include "cbv_descriptor_cache_policy.h"
 #include "cinema_aspect.h"
 #include "openxr_eye_geometry.h"
 #include "puredark_afw_bridge.h"
@@ -32,6 +33,9 @@
 #include "shadow_cascade_authority_policy.h"
 #include "taau_submission_policy.h"
 
+// V1361 is the clean V1359 smoke fix: it combines V1358's diagnostic-free
+// renderer with V1359's full-handle CBV cache hash. No smoke GPU queries,
+// hidden probe draws or smoke-specific F3 recorder remain in this source.
 // V1358 combines V1357's passive smoke baseline with V1356's validated
 // soft-particle depth correction. The reconstructed world position owns both
 // SV_Position and the linear view-depth payload consumed by the original PS.
@@ -3745,10 +3749,12 @@ std::array<CbvDescriptorSlot, kCbvDescriptorSlotCount> g_cbv_descriptor_slots{};
 std::array<CbvDescriptorShard, kCbvDescriptorShardCount> g_cbv_descriptor_shards{};
 
 size_t cbv_descriptor_slot_index(SIZE_T cpu_handle) {
-    // D3D12 CBV/SRV/UAV descriptors are 32-byte aligned on the target device.
-    // Preserve their sequential layout so REDengine's descriptor streams stay
-    // cache-local instead of scattering every access across the 24 MB table.
-    return static_cast<size_t>(cpu_handle >> 5) & (kCbvDescriptorSlotCount - 1);
+    // Separate descriptor heaps often reuse the same low address pattern,
+    // which overflowed the 64-slot lock-free probe run in an
+    // initialization-order-dependent way. Smoke draws cannot wait on the
+    // collision map, so hash the complete immutable CPU handle.
+    return w3vr::cbv_descriptor_cache::
+        slot_index<kCbvDescriptorSlotCount>(cpu_handle);
 }
 
 CbvDescriptorShard& cbv_descriptor_shard(SIZE_T cpu_handle) {
@@ -15228,7 +15234,7 @@ bool ensure_real_smoke_projection_psos() {
     }
     if (created_any) {
         log_line(
-            "V1358 real-smoke projection PSOs completed runtime_views=%d "
+            "V1361 real-smoke projection PSOs completed runtime_views=%d "
             "pso=%p,%p,%p",
             runtime_views_ready ? 1 : 0,
             g_real_smoke_center_pipelines[0].load(
@@ -19025,7 +19031,7 @@ HRESULT STDMETHODCALLTYPE hook_create_graphics_pipeline_state(
                 if (!capture_graphics_pso_recipe(
                         g_real_smoke_pso_recipe, device, *desc, info)) {
                     log_line(
-                        "V1358 real-smoke PSO recipe capture failed");
+                        "V1361 real-smoke PSO recipe capture failed");
                 }
             }
             ensure_real_smoke_projection_psos();
@@ -39914,7 +39920,7 @@ void ensure_initialized() {
                 "focus_fire_b1=stereo_and_aer_centered_draw_proven "
                 "aer_taau_hud=scene_and_retained_pair_fail_open");
             log_line(
-                "witcher3vr dxgi proxy initialized build=V1358 base=V1357_passive_smoke_baseline_plus_V1356_depth "
+                "witcher3vr dxgi proxy initialized build=V1361 base=V1358_diagnostic_free_plus_V1359_cbv_full_handle_hash "
                 "anchor_smoothing_ini=%d anchor_smoothing_seconds=%.4f "
                 "first_person_strafe_ini=%d mode3_aer_presentation=%d raytracing_enabled=%d raytracing_history_buffers=%d "
                 "aer_afw_enabled=%d persistent_registry=%d dlss_public_streamline=%d "
@@ -39975,7 +39981,7 @@ void ensure_initialized() {
             log_line(
                 "V1350 AER AFW native projection=exact_frozen_per_eye_scale_and_center source_and_peer=full_tangent_geometry imageRect=full identity_copy=1 fallback=none smoke=unchanged_V1348");
             log_line(
-                "V1358 smoke world-up depth=reprojected_from_new_world_row10 projection_PSO=deferred_exact_runtime_fov smoke_visibility_diagnostic=removed hidden_draws=0 gpu_queries=0 f3=route_pipeline_renderdoc_only");
+                "V1361 smoke world-up depth=reprojected_from_new_world_row10 cbv_cache=full_handle_hash_lock_free projection_PSO=deferred_exact_runtime_fov smoke_visibility_diagnostic=removed hidden_draws=0 gpu_queries=0 f3=route_pipeline_renderdoc_only");
             log_line(
                 "V1279 DLSS compatibility=public_streamline_aer_private_history_ngx_stereo legacy_module_agnostic_discovery=disabled_by_V1288");
             log_line(
@@ -47952,7 +47958,7 @@ void handle_f3_capture_hotkey(IDXGISwapChain* swapchain) {
     if (w3vr::pipeline_flight::enabled()) {
         w3vr::pipeline_flight::dump_last_ten_seconds();
     }
-    w3vr::route_flight::dump_last_seconds("V1358", 15);
+    w3vr::route_flight::dump_last_seconds("V1361", 15);
     trigger_renderdoc_capture(
         g_game_swapchain != nullptr ? g_game_swapchain : swapchain);
 }

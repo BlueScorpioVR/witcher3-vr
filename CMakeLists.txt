@@ -271,6 +271,15 @@ if(BUILD_TESTING)
         COMMAND w3vr_route_flight_recorder_tests
     )
 
+    add_executable(w3vr_cbv_descriptor_cache_policy_tests
+        tests/cbv_descriptor_cache_policy_tests.cpp
+    )
+    target_include_directories(w3vr_cbv_descriptor_cache_policy_tests PRIVATE src)
+    add_test(
+        NAME renderer_cbv_descriptor_cache_policy
+        COMMAND w3vr_cbv_descriptor_cache_policy_tests
+    )
+
     add_test(
         NAME hud_editor_subtitle_preview_nudge_contract
         COMMAND "${CMAKE_COMMAND}"
