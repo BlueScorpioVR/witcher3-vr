@@ -15,7 +15,7 @@ foreach(required
     "dlss_state, frame_data"
     "publish_sequential_dlss_constants_receipt("
     "route_flight::set_enabled(true)"
-    "dump_last_seconds(\"V1409\", 15)")
+    "dump_last_seconds(\"V1410\", 15)")
     string(FIND "${source}" "${required}" found)
     if(found EQUAL -1)
         message(FATAL_ERROR "Missing V1364 DLSS constants contract: ${required}")

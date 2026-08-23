@@ -8,7 +8,6 @@
 
 int main() {
     using w3vr::mode3_transport::AfwPixelProjection;
-    using w3vr::mode3_transport::DlssCompletionOwner;
     using w3vr::mode3_transport::FinalTransport;
     using w3vr::mode3_transport::HudProjectionRoute;
     using w3vr::mode3_transport::TemporalAdapter;
@@ -19,10 +18,6 @@ int main() {
     using w3vr::mode3_transport::decide_afw_pixel_projection;
     using w3vr::mode3_transport::decide_projection_pair;
     using w3vr::mode3_transport::decide_runtime_projection_transition;
-    using w3vr::mode3_transport::dlss_completion_apply_public_jitter;
-    using w3vr::mode3_transport::dlss_completion_capture_public_bundle;
-    using w3vr::mode3_transport::dlss_completion_ngx_uses_public_bundle;
-    using w3vr::mode3_transport::dlss_completion_resolved_owner;
     using w3vr::mode3_transport::exact_afw_backend;
     using w3vr::mode3_transport::final_backbuffer_route_active;
     using w3vr::mode3_transport::final_color_submission_backend;
@@ -32,7 +27,6 @@ int main() {
     using w3vr::mode3_transport::real_smoke_variant_bootstrap_allowed;
     using w3vr::mode3_transport::select_swapchain_dimension;
     using w3vr::mode3_transport::submission_queue_eligible;
-    using w3vr::mode3_transport::streamline_dlss_evaluate_callback_active;
     using w3vr::mode3_transport::mode3_symmetric_subimage_active;
     using w3vr::mode3_transport::submitted_hud_join_route_active;
     using w3vr::mode3_transport::submitted_hud_join_window_matches;
@@ -64,46 +58,6 @@ int main() {
         true, true, false, true));
     assert(!native_asymmetric_effect_preparation_configured(
         true, true, true, false));
-
-    // The public owner is intentionally narrow. Only Mode-3 OpenXR DLSS can
-    // enter it. Projection is not an input, so AER and strict Stereo receive
-    // the same callback policy.
-    assert(streamline_dlss_evaluate_callback_active(
-        true, true, 3, TemporalAdapter::Dlss));
-    assert(!streamline_dlss_evaluate_callback_active(
-        false, true, 3, TemporalAdapter::Dlss));
-    assert(!streamline_dlss_evaluate_callback_active(
-        true, false, 3, TemporalAdapter::Dlss));
-    assert(!streamline_dlss_evaluate_callback_active(
-        true, true, 2, TemporalAdapter::Dlss));
-    assert(!streamline_dlss_evaluate_callback_active(
-        true, true, 3, TemporalAdapter::Taau));
-
-    // The first exact evaluation probes both boundaries. Once an owner is
-    // observed, only that route records a normal per-frame producer. Public
-    // jitter is delayed until the public route has actually been proven.
-    assert(dlss_completion_capture_public_bundle(
-        DlssCompletionOwner::Probe));
-    assert(!dlss_completion_apply_public_jitter(
-        DlssCompletionOwner::Probe));
-    assert(!dlss_completion_capture_public_bundle(
-        DlssCompletionOwner::Ngx));
-    assert(dlss_completion_capture_public_bundle(
-        DlssCompletionOwner::Streamline));
-    assert(dlss_completion_apply_public_jitter(
-        DlssCompletionOwner::Streamline));
-    assert(dlss_completion_ngx_uses_public_bundle(
-        DlssCompletionOwner::Probe, true));
-    assert(!dlss_completion_ngx_uses_public_bundle(
-        DlssCompletionOwner::Ngx, true));
-    assert(dlss_completion_ngx_uses_public_bundle(
-        DlssCompletionOwner::Streamline, true));
-    assert(!dlss_completion_ngx_uses_public_bundle(
-        DlssCompletionOwner::Streamline, false));
-    assert(dlss_completion_resolved_owner(true) ==
-        DlssCompletionOwner::Ngx);
-    assert(dlss_completion_resolved_owner(false) ==
-        DlssCompletionOwner::Streamline);
 
     // Projection is not an input: both symmetric and asymmetric exercise this
     // same policy and must obtain exactly the same answers.

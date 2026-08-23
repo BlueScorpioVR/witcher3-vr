@@ -18,8 +18,8 @@ set(required_fragments
     "g_command_queue->Wait("
     "candidate.last_use_fence"
     "g_packed_present_cache_last_use_fence"
-    "build=V1409"
-    "dump_last_seconds(\"V1409\", 15)")
+    "build=V1410"
+    "dump_last_seconds(\"V1410\", 15)")
 
 foreach(required_fragment IN LISTS required_fragments)
     string(FIND "${source}" "${required_fragment}" fragment_index)

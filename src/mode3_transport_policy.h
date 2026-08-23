@@ -16,12 +16,6 @@ enum class HudProjectionRoute : uint8_t {
     Cinema,
 };
 
-enum class DlssCompletionOwner : uint8_t {
-    Probe,
-    Ngx,
-    Streamline,
-};
-
 enum class FinalTransport : uint8_t {
     Inactive,
     DirectCopy,
@@ -219,46 +213,6 @@ constexpr bool mode3_symmetric_subimage_active(
     bool mode3_transport,
     bool source_native_asymmetric) noexcept {
     return mode3_transport && !source_native_asymmetric;
-}
-
-// Public Streamline is the universal Mode-3 DLSS boundary. Projection and
-// presentation policy are deliberately not inputs, so AER and strict Stereo
-// retain the same temporal ownership and remain independent of NVIDIA's private
-// DLL/export topology.
-constexpr bool streamline_dlss_evaluate_callback_active(
-    bool requested,
-    bool openxr_enabled,
-    int openxr_mode,
-    TemporalAdapter backend) noexcept {
-    return requested && openxr_enabled && openxr_mode == 3 &&
-        backend == TemporalAdapter::Dlss;
-}
-
-// V1287 probes both completion boundaries once, then records only the inputs
-// owned by the route that actually completes on this runtime.  If the active
-// topology changes, one held frame is preferable to publishing two temporal
-// producers for the same command list.
-constexpr bool dlss_completion_capture_public_bundle(
-    DlssCompletionOwner owner) noexcept {
-    return owner != DlssCompletionOwner::Ngx;
-}
-
-constexpr bool dlss_completion_apply_public_jitter(
-    DlssCompletionOwner owner) noexcept {
-    return owner == DlssCompletionOwner::Streamline;
-}
-
-constexpr bool dlss_completion_ngx_uses_public_bundle(
-    DlssCompletionOwner owner,
-    bool public_bundle_ready) noexcept {
-    return owner != DlssCompletionOwner::Ngx && public_bundle_ready;
-}
-
-constexpr DlssCompletionOwner dlss_completion_resolved_owner(
-    bool ngx_seen) noexcept {
-    return ngx_seen
-        ? DlssCompletionOwner::Ngx
-        : DlssCompletionOwner::Streamline;
 }
 
 // Projection is intentionally absent from this policy. Symmetric and

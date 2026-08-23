@@ -30,12 +30,17 @@
 #include "mode3_transport_policy.h"
 #include "mode3_dlss_constants_policy.h"
 #include "native_asymmetric_transport_policy.h"
+#include "optiscaler_jitter_policy.h"
 #include "pipeline_flight_recorder.h"
 #include "route_flight_recorder.h"
 #include "rt_ingress_join.h"
 #include "shadow_cascade_authority_policy.h"
 #include "taau_submission_policy.h"
 
+// V1410 ports V21008's clean OptiScaler integration onto V1409. Public
+// Streamline remains a strict native-viewport pass-through, while the private
+// NGX Create/Evaluate/Release owner keeps two eye histories. Clean Mono retains
+// its independent pre-evaluate native command-list motion dispatch.
 // V1409 adds V18021's fixed-only foliage orientation replacement to V1408.
 // The two immutable corrected PSOs are always selected on an OpenXR HMD-
 // freelook route; the superseded V18020 runtime A/B is physically absent.
@@ -140,30 +145,23 @@
 // swapchain and submitted source extent remain at the selected 100% resolution
 // for every slider value, including scale 1, which bypasses the legacy 80%
 // cover crop. DLSS, strict Stereo, producer resolution and AFW are unchanged.
-// V1290 leaves the complete public Streamline DLSS sequence unchanged. At the
-// final strict-Stereo publication gate only, a successful exact public
-// evaluation credits its routed eye even when that eye needed no jitter
-// rewrite. AER retains the V1289 completion path unchanged.
-// V1289 makes the public Streamline API the sole Mode-3 DLSS owner. Both
-// EvaluateFeature and CreateFeature NGX detours are deliberately absent, so an
-// NVIDIA DLL override cannot leave private cloned histories paired with a
-// public completion callback. Original constants/tags/feature/evaluate calls
-// are forwarded without recipe reconstruction; per-eye viewport identity,
-// REDengine temporal history, reset and exact command routing stay intact.
-// V1277 converts Streamline-normalized motion scale
-// to the NGX/AFW pixel contract and lets two successful public evaluations
-// prove strict Stereo input completion. V1275 completes the opt-in Streamline
-// DLSS callback using
-// Witcher's legacy bool-result ABI and a frame-token constants cache. V1271 bridges
+// V21008 is the clean closure of the isolated OptiScaler line. It preserves
+// V21001's validated functional boundary only: when a deferred eye receives
+// projection-centred jitter carrying the peer eye's centre, strip that exact
+// recorded peer centre before FidelityFX evaluation. The later metadata audit,
+// pixel readback and F4 capture code is physically absent. Native DLSS keeps
+// V1369/V21000's fail-closed conversion unchanged.
+// V21000 starts an isolated OptiScaler checkpoint line from V1369. Public
+// Streamline evaluation is a strict pass-through and one private NGX owner
+// creates, evaluates and releases exactly two Sequential histories. The owner
+// targets canonical nvngx_dlss by default; an explicit sidecar gate may instead
+// load the adjacent, inertly named OptiScaler.dll and target its NGX exports.
+// V1271 bridges
 // Streamline's direct D3D12CreateDevice export call through the
 // optional RenderDoc wrapper and moves capture to F3, leaving F7 exclusively
 // to the HUD editor. The bridge is absent unless RenderDoc is enabled. V1270
 // restores the validated Windows executable-directory lookup used by the
-// optional adjacent RenderDoc loader. V1269 adds a manual, discouraged
-// INI switch which closes the unchanged
-// 0.9.5 Mode-3 DLSS transaction from Streamline slEvaluateFeature instead of
-// this DLL's NGX Evaluate callback. AER/Stereo projection, presentation, AFW
-// and per-eye feature ownership remain on the V1267 path. V1267 gives the
+// optional adjacent RenderDoc loader. V1267 gives the
 // native Full-VR HUD fallback
 // the same route-specific size and
 // convergence as the retained projection HUD. This keeps both launcher
@@ -499,19 +497,12 @@ struct Config {
     bool engine_first_person_combat_exit{false};
     float engine_first_person_combat_return_delay_seconds{10.0f};
     bool streamline_force_reset{false};
-    bool streamline_split_viewports{false};
-    float streamline_right_temporal_offset{0.0f};
-    int streamline_temporal_eye{1};
-    float streamline_temporal_clip_correction{0.0f};
     bool streamline_trace{false};
     int streamline_trace_start_frame{500};
     bool streamline_taau_bridge{false};
     bool ngx_trace{false};
     bool dlss_dlaa{false};
-    // Temporary/manual compatibility callback for systems whose NVIDIA global
-    // DLSS override bypasses the canonical NGX Evaluate export. It is absent
-    // from the launcher and defaults off. AER/Stereo/AFW policy is unchanged.
-    bool dlss_streamline_evaluate_callback{false};
+    bool optiscaler_enabled{false};
     // Optional compatibility/performance route. False regenerates native
     // Depth/MVec for both Sequential eyes; true preserves the old shared-input
     // behavior for users who explicitly prefer its lower cost.
@@ -609,22 +600,6 @@ bool temporal_backend_is_taau() {
 
 bool temporal_backend_is_dlss() {
     return g_config.temporal_backend == TemporalBackend::Dlss;
-}
-
-bool dlss_streamline_evaluate_callback_active() {
-    const auto backend = temporal_backend_is_dlss()
-        ? w3vr::mode3_transport::TemporalAdapter::Dlss
-        : (temporal_backend_is_taau()
-            ? w3vr::mode3_transport::TemporalAdapter::Taau
-            : w3vr::mode3_transport::TemporalAdapter::None);
-    // [FIX:DLSS-STREAMLINE-UNIVERSAL V1289 1/8] AER and strict Stereo use the
-    // same public completion boundary. Projection and AFW presentation policy
-    // do not select a different DLSS owner.
-    return w3vr::mode3_transport::streamline_dlss_evaluate_callback_active(
-        true,
-        g_config.openxr_enabled,
-        g_config.openxr_mode,
-        backend);
 }
 
 bool high_frequency_runtime_diagnostics_active() {
@@ -1803,6 +1778,7 @@ using NgxEvaluateFeatureFn = NVSDK_NGX_Result(NVSDK_CONV*)(
     ID3D12GraphicsCommandList*, const NVSDK_NGX_Handle*, const NVSDK_NGX_Parameter*, PFN_NVSDK_NGX_ProgressCallback);
 using NgxCreateFeatureFn = NVSDK_NGX_Result(NVSDK_CONV*)(
     ID3D12GraphicsCommandList*, NVSDK_NGX_Feature, const NVSDK_NGX_Parameter*, NVSDK_NGX_Handle**);
+using NgxReleaseFeatureFn = NVSDK_NGX_Result(NVSDK_CONV*)(NVSDK_NGX_Handle*);
 using NgxGetParametersFn = NVSDK_NGX_Result(NVSDK_CONV*)(
     NVSDK_NGX_Parameter**);
 using LoadLibraryAFn = HMODULE(WINAPI*)(LPCSTR);
@@ -2655,6 +2631,7 @@ struct NativeAsymmetricDlssJitterOverride {
     bool valid{};
     bool applied{};
     bool source_was_centered{};
+    bool source_used_peer_center{};
     uint32_t reason{};
     uint64_t pair_id{UINT64_MAX};
     uint32_t generation{UINT32_MAX};
@@ -2667,6 +2644,8 @@ struct NativeAsymmetricDlssJitterOverride {
     float pure_y{};
     float center_x{};
     float center_y{};
+    float applied_center_x{};
+    float applied_center_y{};
     uint32_t extent_width{};
     uint32_t extent_height{};
 };
@@ -3163,6 +3142,9 @@ SlSetFeatureConstantsFn g_sl_set_feature_constants{};
 SlEvaluateFeatureFn g_sl_evaluate_feature{};
 NgxEvaluateFeatureFn g_ngx_evaluate_feature{};
 NgxCreateFeatureFn g_ngx_create_feature{};
+NgxReleaseFeatureFn g_ngx_release_feature{};
+HMODULE g_optiscaler_module{};
+std::mutex g_ngx_dlss_hook_mutex{};
 NgxGetParametersFn g_ngx_allocate_parameters{};
 NgxGetParametersFn g_ngx_get_capability_parameters{};
 NgxGetParametersFn g_ngx_get_parameters{};
@@ -3252,6 +3234,8 @@ uint64_t g_sequential_dlss_latest_history_generations[2]{};
 bool g_sequential_dlss_latest_history_needs_reset[2]{};
 std::unordered_map<const NVSDK_NGX_Handle*, SequentialDlssHistoryBinding>
     g_sequential_dlss_source_histories[2]{};
+std::unordered_map<NVSDK_NGX_Handle*, NVSDK_NGX_Handle*>
+    g_sequential_dlss_peer_histories{};
 uint64_t g_sequential_dlss_history_generation{};
 thread_local int g_streamline_forced_eye{-1};
 thread_local int g_sequential_pipeline_eye{-1};
@@ -3375,46 +3359,6 @@ struct StreamlineOutputFrameState {
     bool render_view_valid{};
 };
 thread_local StreamlineOutputFrameState g_streamline_output_frame{};
-struct StreamlineDlssEvaluateSnapshot {
-    EngineFrameTag route_tag{};
-    ID3D12Resource* depth{};
-    ID3D12Resource* motion_vectors{};
-    ID3D12Resource* output{};
-    D3D12_RESOURCE_STATES depth_state{
-        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE};
-    D3D12_RESOURCE_STATES motion_state{
-        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE};
-    float motion_scale_x{};
-    float motion_scale_y{};
-    NativeAsymmetricDlssJitterOverride jitter{};
-    bool route_valid{};
-    bool depth_valid{};
-    bool motion_vectors_valid{};
-    bool output_valid{};
-    bool motion_scale_valid{};
-    bool jitter_applied_to_streamline{};
-};
-thread_local StreamlineDlssEvaluateSnapshot
-    g_streamline_dlss_evaluate_snapshot{};
-// [FIX:DLSS-STREAMLINE-CALLBACK V1275 1/4] slSetConstants runs before the
-// deferred engine command exposes its exact eye/pair TLS. Preserve only the
-// constants block under Streamline's own token; slEvaluateFeature will combine
-// it with the exact command route already present at completion.
-constexpr size_t kStreamlineDlssCallbackConstantsSlotCount = 128;
-constexpr size_t kStreamlineDlssCallbackConstantsBytes = 0x1A0;
-struct StreamlineDlssCallbackConstantsSlot {
-    std::array<float, kStreamlineDlssCallbackConstantsBytes / sizeof(float)>
-        constants{};
-    uint32_t frame_token{};
-    uint32_t eye{UINT32_MAX};
-    bool valid{};
-};
-std::mutex g_streamline_dlss_callback_constants_mutex{};
-std::array<StreamlineDlssCallbackConstantsSlot,
-    kStreamlineDlssCallbackConstantsSlotCount>
-    g_streamline_dlss_callback_constants{};
-std::atomic<uint32_t> g_streamline_dlss_callback_constants_logs{};
-std::atomic<bool> g_dlss_completion_auto_hook_logged{};
 
 struct CleanMonoDlssTemporalState {
     std::array<float, 12> matched_camera{};
@@ -3447,123 +3391,6 @@ ID3D12RootSignature* g_clean_mono_dlss_mvec_root_signature{};
 ID3D12PipelineState* g_clean_mono_dlss_mvec_pipeline{};
 UINT g_clean_mono_dlss_mvec_descriptor_increment{};
 std::once_flag g_clean_mono_dlss_mvec_pipeline_once{};
-
-size_t streamline_dlss_callback_constants_slot(
-    uint32_t frame_token,
-    uint32_t eye) {
-    // Both eyes may legitimately share Streamline's frame token. The viewport
-    // is the public history identity, so the cache must preserve the eye too.
-    return (static_cast<size_t>(frame_token) * 2u + (eye & 1u)) %
-        kStreamlineDlssCallbackConstantsSlotCount;
-}
-
-using DlssCompletionOwner =
-    w3vr::mode3_transport::DlssCompletionOwner;
-std::atomic<DlssCompletionOwner> g_dlss_completion_owner{
-    DlssCompletionOwner::Streamline};
-struct DlssCompletionAutoProbe {
-    uint64_t serial{};
-    DlssCompletionOwner owner_before{DlssCompletionOwner::Probe};
-    bool public_bundle_ready{};
-    bool public_jitter_applied{};
-    bool ngx_seen{};
-    bool ngx_success{};
-    bool ngx_uses_public_bundle{};
-    bool ngx_private_bundle_used{};
-};
-struct DlssCompletionAutoNgxDecision {
-    bool active{};
-    bool public_jitter_applied{};
-    bool use_public_bundle{};
-};
-struct DlssCompletionAutoOutcome {
-    bool valid{};
-    bool ngx_seen{};
-    bool ngx_success{};
-    bool ngx_uses_public_bundle{};
-    bool ngx_private_bundle_used{};
-};
-std::mutex g_dlss_completion_probe_mutex{};
-std::unordered_map<ID3D12GraphicsCommandList*, DlssCompletionAutoProbe>
-    g_dlss_completion_probes{};
-std::atomic<uint64_t> g_dlss_completion_probe_serial{};
-std::atomic<uint32_t> g_dlss_completion_auto_logs{};
-std::atomic<uint64_t> g_dlss_completion_ngx_owned{};
-std::atomic<uint64_t> g_dlss_completion_streamline_owned{};
-std::atomic<uint64_t> g_dlss_completion_owner_switches{};
-
-const char* dlss_completion_owner_name(DlssCompletionOwner owner) {
-    switch (owner) {
-    case DlssCompletionOwner::Ngx:
-        return "ngx";
-    case DlssCompletionOwner::Streamline:
-        return "streamline";
-    default:
-        return "probe";
-    }
-}
-
-uint64_t begin_dlss_completion_auto_probe(
-    ID3D12GraphicsCommandList* command_list,
-    DlssCompletionOwner owner_before,
-    bool public_bundle_ready,
-    bool public_jitter_applied) {
-    if (command_list == nullptr) {
-        return 0;
-    }
-    const uint64_t serial =
-        g_dlss_completion_probe_serial.fetch_add(
-            1, std::memory_order_relaxed) + 1;
-    std::scoped_lock lock{g_dlss_completion_probe_mutex};
-    g_dlss_completion_probes[command_list] = DlssCompletionAutoProbe{
-        serial, owner_before, public_bundle_ready, public_jitter_applied};
-    return serial;
-}
-
-DlssCompletionAutoNgxDecision mark_dlss_completion_auto_ngx_entry(
-    ID3D12GraphicsCommandList* command_list) {
-    std::scoped_lock lock{g_dlss_completion_probe_mutex};
-    const auto found = g_dlss_completion_probes.find(command_list);
-    if (found == g_dlss_completion_probes.end()) {
-        return {};
-    }
-    auto& probe = found->second;
-    probe.ngx_seen = true;
-    const bool use_public_bundle =
-        w3vr::mode3_transport::dlss_completion_ngx_uses_public_bundle(
-            probe.owner_before, probe.public_bundle_ready);
-    probe.ngx_uses_public_bundle |= use_public_bundle;
-    probe.ngx_private_bundle_used |= !use_public_bundle;
-    return {true, probe.public_jitter_applied, use_public_bundle};
-}
-
-void mark_dlss_completion_auto_ngx_result(
-    ID3D12GraphicsCommandList* command_list,
-    bool success) {
-    std::scoped_lock lock{g_dlss_completion_probe_mutex};
-    const auto found = g_dlss_completion_probes.find(command_list);
-    if (found != g_dlss_completion_probes.end()) {
-        found->second.ngx_success |= success;
-    }
-}
-
-DlssCompletionAutoOutcome finish_dlss_completion_auto_probe(
-    ID3D12GraphicsCommandList* command_list,
-    uint64_t serial) {
-    if (command_list == nullptr || serial == 0) {
-        return {};
-    }
-    std::scoped_lock lock{g_dlss_completion_probe_mutex};
-    const auto found = g_dlss_completion_probes.find(command_list);
-    if (found == g_dlss_completion_probes.end() ||
-        found->second.serial != serial) {
-        return {};
-    }
-    const auto probe = found->second;
-    g_dlss_completion_probes.erase(found);
-    return {true, probe.ngx_seen, probe.ngx_success,
-        probe.ngx_uses_public_bundle, probe.ngx_private_bundle_used};
-}
 ID3D12Resource* g_stereo_luma_readback[2]{};
 D3D12_PLACED_SUBRESOURCE_FOOTPRINT g_stereo_luma_footprint{};
 uint64_t g_stereo_luma_readback_bytes{};
@@ -5408,7 +5235,6 @@ void STDMETHODCALLTYPE hook_set_graphics_root_signature(
 void STDMETHODCALLTYPE hook_set_compute_root_signature(
     ID3D12GraphicsCommandList* command_list,
     ID3D12RootSignature* root_signature);
-uint32_t streamline_viewport_for_eye(uint32_t viewport);
 int __fastcall hook_sl_set_tag(
     const void* resource, uint32_t tag, uint32_t viewport, const void* extent);
 int __fastcall hook_sl_set_feature_constants(
@@ -5423,8 +5249,6 @@ bool prepare_native_asymmetric_dlss_jitter_override_values(
     NativeAsymmetricDlssJitterOverride& override_state);
 bool commit_native_asymmetric_dlss_input(
     const NativeAsymmetricDlssJitterOverride& override_state);
-bool commit_streamline_native_asymmetric_dlss_input(
-    const EngineFrameTag& route_tag);
 
 void STDMETHODCALLTYPE hook_draw_indexed_instanced(
     ID3D12GraphicsCommandList* command_list,
@@ -9380,106 +9204,6 @@ bool current_puredark_afw_direct_route_tag(
         route_tag.generation == capture_generation;
 }
 
-bool same_streamline_dlss_callback_identity(
-    const EngineFrameTag& lhs,
-    const EngineFrameTag& rhs) {
-    return lhs.task_provenance_valid && rhs.task_provenance_valid &&
-        lhs.eye == rhs.eye && lhs.generation == rhs.generation &&
-        lhs.pair_id == rhs.pair_id;
-}
-
-StreamlineDlssEvaluateSnapshot* acquire_streamline_dlss_evaluate_snapshot(
-    uint32_t routed_eye) {
-    if (!dlss_streamline_evaluate_callback_active() || routed_eye > 1) {
-        return nullptr;
-    }
-    EngineFrameTag route_tag{};
-    if (!current_puredark_afw_direct_route_tag(routed_eye, route_tag)) {
-        return nullptr;
-    }
-    auto& snapshot = g_streamline_dlss_evaluate_snapshot;
-    if (!snapshot.route_valid ||
-        !same_streamline_dlss_callback_identity(
-            snapshot.route_tag, route_tag)) {
-        snapshot = {};
-        snapshot.route_tag = route_tag;
-        snapshot.route_valid = true;
-    }
-    return &snapshot;
-}
-
-bool streamline_dlss_evaluate_snapshot_matches_current(
-    uint32_t routed_eye) {
-    const auto& snapshot = g_streamline_dlss_evaluate_snapshot;
-    return snapshot.route_valid && g_streamline_dlss_route_tag_valid &&
-        routed_eye <= 1 &&
-        same_streamline_dlss_callback_identity(
-            snapshot.route_tag, g_streamline_dlss_route_tag) &&
-        snapshot.route_tag.eye == routed_eye &&
-        snapshot.route_tag.generation ==
-            g_streamline_capture_generation.load(std::memory_order_acquire);
-}
-
-void capture_streamline_dlss_callback_resource(
-    const void* resource,
-    uint32_t tag,
-    uint32_t routed_eye) {
-    if (tag != 0 && tag != 1 && tag != 4) {
-        return;
-    }
-    auto* snapshot = acquire_streamline_dlss_evaluate_snapshot(routed_eye);
-    if (snapshot == nullptr) {
-        return;
-    }
-    ID3D12Resource* native{};
-    uint32_t state = static_cast<uint32_t>(
-        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    if (resource != nullptr) {
-        memcpy(&native, static_cast<const uint8_t*>(resource) + 8,
-            sizeof(native));
-        memcpy(&state, static_cast<const uint8_t*>(resource) + 32,
-            sizeof(state));
-    }
-    if (tag == 0) {
-        snapshot->depth = native;
-        snapshot->depth_state = static_cast<D3D12_RESOURCE_STATES>(state);
-        snapshot->depth_valid = native != nullptr;
-    } else if (tag == 1) {
-        snapshot->motion_vectors = native;
-        snapshot->motion_state = static_cast<D3D12_RESOURCE_STATES>(state);
-        snapshot->motion_vectors_valid = native != nullptr;
-    } else {
-        snapshot->output = native;
-        snapshot->output_valid = native != nullptr;
-    }
-}
-
-bool prepare_streamline_dlss_callback_constants(
-    void* constants,
-    uint32_t routed_eye) {
-    if (constants == nullptr) {
-        return false;
-    }
-    auto* snapshot = acquire_streamline_dlss_evaluate_snapshot(routed_eye);
-    if (snapshot == nullptr) {
-        return false;
-    }
-    auto* values = static_cast<float*>(constants);
-    snapshot->motion_scale_x = values[82];
-    snapshot->motion_scale_y = values[83];
-    snapshot->motion_scale_valid =
-        std::isfinite(snapshot->motion_scale_x) &&
-        std::isfinite(snapshot->motion_scale_y);
-    snapshot->jitter = {};
-    snapshot->jitter_applied_to_streamline = false;
-    // [FIX:DLSS-STREAMLINE-UNIVERSAL V1289 2/8] Streamline reports normalized
-    // MV scale here, before the tagged motion texture is available. Preserve
-    // the original constants and perform the asymmetric-only jitter correction
-    // immediately before the matching public evaluation, once its exact pixel
-    // extent is known.
-    return false;
-}
-
 // [FIX:AER-AFW-EXACT-NATIVE-PROJECTION V1350 1/4] Full-frame native pixels and
 // AFW must use the same two frozen tangent spaces. Streamline exposes the
 // larger shared-envelope projection here. Rebuild the real eye's complete
@@ -9686,129 +9410,6 @@ void capture_puredark_afw_camera(
             captured.render_views_valid ? 1u : 0u,
             captured.exact_render_view_valid ? 1u : 0u);
     }
-}
-
-// [FIX:DLSS-STREAMLINE-CALLBACK V1275 2/4] At evaluation the deferred engine
-// command already owns exact task provenance. Join that identity to the
-// constants captured under the same public Streamline token, restoring the AFW
-// camera and motion-vector scale without guessing from Present parity.
-bool hydrate_streamline_dlss_callback_constants(
-    uint32_t frame_token,
-    uint32_t routed_eye,
-    StreamlineDlssCallbackConstantsSlot* hydrated) {
-    if (!dlss_streamline_evaluate_callback_active() || routed_eye > 1) {
-        return false;
-    }
-    StreamlineDlssCallbackConstantsSlot cached{};
-    {
-        std::scoped_lock lock{g_streamline_dlss_callback_constants_mutex};
-        cached = g_streamline_dlss_callback_constants[
-            streamline_dlss_callback_constants_slot(frame_token, routed_eye)];
-    }
-    if (!cached.valid || cached.frame_token != frame_token ||
-        cached.eye != routed_eye) {
-        if (take_bounded_log_slot(
-                g_streamline_dlss_callback_constants_logs, 32)) {
-            log_line(
-                "V1275 DLSS Streamline constants miss token=%u eye=%u "
-                "cached_token=%u cached_valid=%u tid=%lu present=%llu",
-                frame_token, routed_eye, cached.frame_token,
-                cached.valid ? 1u : 0u,
-                static_cast<unsigned long>(GetCurrentThreadId()),
-                static_cast<unsigned long long>(g_present_count.load()));
-        }
-        return false;
-    }
-    if (hydrated != nullptr) {
-        *hydrated = cached;
-    }
-    auto* snapshot = acquire_streamline_dlss_evaluate_snapshot(routed_eye);
-    if (snapshot == nullptr) {
-        return false;
-    }
-    const auto* values = cached.constants.data();
-    snapshot->motion_scale_x = values[82];
-    snapshot->motion_scale_y = values[83];
-    snapshot->motion_scale_valid =
-        std::isfinite(snapshot->motion_scale_x) &&
-        std::isfinite(snapshot->motion_scale_y);
-    capture_puredark_afw_camera(cached.constants.data(), routed_eye);
-    if (take_bounded_log_slot(
-            g_streamline_dlss_callback_constants_logs, 64)) {
-        log_line(
-            "V1275 DLSS Streamline constants joined token=%u eye=%u "
-            "pair=%llu scale=%.6f,%.6f valid=%u tid=%lu present=%llu",
-            frame_token, routed_eye,
-            static_cast<unsigned long long>(snapshot->route_tag.pair_id),
-            snapshot->motion_scale_x, snapshot->motion_scale_y,
-            snapshot->motion_scale_valid ? 1u : 0u,
-            static_cast<unsigned long>(GetCurrentThreadId()),
-            static_cast<unsigned long long>(g_present_count.load()));
-    }
-    return snapshot->motion_scale_valid;
-}
-
-bool resubmit_streamline_native_asymmetric_dlss_jitter(
-    const StreamlineDlssCallbackConstantsSlot& cached,
-    uint32_t frame_token,
-    uint32_t routed_viewport,
-    uint32_t routed_eye) {
-    auto& snapshot = g_streamline_dlss_evaluate_snapshot;
-    if (!cached.valid || cached.frame_token != frame_token ||
-        cached.eye != routed_eye || !snapshot.route_valid ||
-        !snapshot.motion_vectors_valid || g_sl_set_constants == nullptr) {
-        return false;
-    }
-
-    auto corrected = cached.constants;
-    auto* values = corrected.data();
-    const auto motion_desc = snapshot.motion_vectors->GetDesc();
-    float pixel_scale_x = values[82];
-    float pixel_scale_y = values[83];
-    if (std::fabs(pixel_scale_x) <= 4.0f && motion_desc.Width > 0) {
-        pixel_scale_x *= static_cast<float>(motion_desc.Width);
-    }
-    if (std::fabs(pixel_scale_y) <= 4.0f && motion_desc.Height > 0) {
-        pixel_scale_y *= static_cast<float>(motion_desc.Height);
-    }
-
-    NativeAsymmetricDlssJitterOverride jitter{};
-    if (!prepare_native_asymmetric_dlss_jitter_override_values(
-            values[80], values[81], pixel_scale_x, pixel_scale_y,
-            static_cast<unsigned>(motion_desc.Width), motion_desc.Height,
-            snapshot.route_tag.pair_id, routed_eye, jitter)) {
-        snapshot.jitter = jitter;
-        return false;
-    }
-
-    values[80] = jitter.pure_x;
-    values[81] = jitter.pure_y;
-    // This is not a reconstructed DLSS recipe. It republishes only the exact
-    // cached constants block to the same token and eye viewport immediately
-    // before the game's original slEvaluateFeature call.
-    const int constants_result = g_sl_set_constants(
-        corrected.data(), frame_token, routed_viewport);
-    jitter.applied = true;
-    snapshot.jitter = jitter;
-    snapshot.jitter_applied_to_streamline = true;
-
-    static std::atomic<uint32_t> jitter_logs{};
-    if (take_bounded_log_slot(jitter_logs, 64)) {
-        log_line(
-            "V1289 DLSS public jitter token=%u viewport=%u eye=%u pair=%llu "
-            "raw=%.6f,%.6f pure=%.6f,%.6f scale=%.3f,%.3f "
-            "extent=%llux%u sl_constants=%d reset=%u",
-            frame_token, routed_viewport, routed_eye,
-            static_cast<unsigned long long>(snapshot.route_tag.pair_id),
-            jitter.original_x, jitter.original_y,
-            jitter.pure_x, jitter.pure_y,
-            pixel_scale_x, pixel_scale_y,
-            static_cast<unsigned long long>(motion_desc.Width),
-            motion_desc.Height, constants_result,
-            static_cast<unsigned>(
-                reinterpret_cast<const uint8_t*>(corrected.data())[0x19F]));
-    }
-    return true;
 }
 
 int32_t capture_puredark_afw_dlss_inputs_from_resources(
@@ -13136,6 +12737,10 @@ void load_config() {
         // this manual test gate; a missing file/key keeps normal AFW enabled.
         g_config.puredark_afw_enabled = read_sidecar_ini_bool(
             "puredark_afw.ini", "puredark_afw", "enabled", true);
+        // V1410 explicitly activates the adjacent OptiScaler payload only
+        // through this sidecar. Missing file/key remains safely disabled.
+        g_config.optiscaler_enabled = read_sidecar_ini_bool(
+            "optiscaler_bridge.ini", "optiscaler", "enabled", false);
         const int configured_openxr_mode =
             read_ini_int("openxr", "mode", kOpenXrModeCleanMono);
         // V1360 restores one canonical clean-mono transport at Mode 1. The
@@ -13472,13 +13077,6 @@ void load_config() {
             kRtHistoryMinimumBufferCount,
             kRtHistoryMaximumBufferCount);
         g_config.streamline_force_reset = read_ini_bool("engine", "streamline_force_reset", false);
-        g_config.streamline_split_viewports = read_ini_bool("engine", "streamline_split_viewports", false);
-        g_config.streamline_right_temporal_offset = std::clamp(
-            read_ini_float("engine", "streamline_right_temporal_offset", 0.0f), -1.0f, 1.0f);
-        g_config.streamline_temporal_eye = std::clamp(
-            read_ini_int("engine", "streamline_temporal_eye", 1), 0, 1);
-        g_config.streamline_temporal_clip_correction = std::clamp(
-            read_ini_float("engine", "streamline_temporal_clip_correction", 0.0f), -2.0f, 2.0f);
         g_config.streamline_trace = read_ini_bool("engine", "streamline_trace", false);
         g_config.streamline_trace_start_frame = std::max(
             0, read_ini_int("engine", "streamline_trace_start_frame", 500));
@@ -13486,8 +13084,6 @@ void load_config() {
             "engine", "streamline_taau_bridge", false);
         g_config.ngx_trace = read_ini_bool("engine", "ngx_trace", false);
         g_config.dlss_dlaa = read_ini_bool("engine", "dlss_dlaa", false);
-        g_config.dlss_streamline_evaluate_callback = read_ini_bool(
-            "engine", "dlss_streamline_evaluate_callback", false);
         g_config.low_budget_dlss = read_ini_bool(
             "engine", "low_budget_dlss", false);
         g_config.world_marker_diagnostics = read_ini_bool(
@@ -13565,11 +13161,9 @@ void load_config() {
 
         if (temporal_backend_is_dlss()) {
             g_config.ngx_trace = true;
-            g_config.streamline_split_viewports = true;
             g_config.streamline_taau_bridge = true;
         } else {
             g_config.ngx_trace = false;
-            g_config.streamline_split_viewports = false;
             g_config.streamline_taau_bridge = false;
         }
 
@@ -13593,9 +13187,6 @@ void load_config() {
             g_config.engine_native_projection_shift = false;
             g_config.engine_native_stereo_offset = 0.0f;
             g_config.engine_factory_stereo_offset = 0.0f;
-            g_config.streamline_split_viewports = false;
-            g_config.streamline_right_temporal_offset = 0.0f;
-            g_config.streamline_temporal_clip_correction = 0.0f;
             g_config.reverse_geometry_shift = false;
             g_config.raytracing_enabled = false;
             log_line(
@@ -13660,11 +13251,10 @@ void load_config() {
             g_config.reverse_copy_max_logs,
             g_config.reverse_stereo_probe,
             g_config.reverse_geometry_shift);
-        log_line("Config engine temporal_backend=%s dlss_dlaa=%d dlss_public_streamline=%d legacy_dlss_callback_ini=%d view_probe=%d frame_builder_probe=%d gameplay_entry_probe=%d scene_enqueue_probe=%d view_factory_probe=%d frame_factory_probe=%d dual_render_probe=%d native_stereo_offset=%.3f factory_stereo_offset=%.4f streamline_force_reset=%d streamline_split_viewports=%d streamline_right_temporal_offset=%.4f streamline_temporal_eye=%d streamline_temporal_clip_correction=%.5f streamline_trace=%d streamline_trace_start_frame=%d native_mvec_passthrough=1",
+        log_line("Config engine temporal_backend=%s dlss_dlaa=%d dlss_owner=private_ngx optiscaler=%d view_probe=%d frame_builder_probe=%d gameplay_entry_probe=%d scene_enqueue_probe=%d view_factory_probe=%d frame_factory_probe=%d dual_render_probe=%d native_stereo_offset=%.3f factory_stereo_offset=%.4f streamline_force_reset=%d streamline_viewports=native_single streamline_trace=%d streamline_trace_start_frame=%d native_mvec_passthrough=1",
             temporal_backend_name(),
             g_config.dlss_dlaa,
-            dlss_streamline_evaluate_callback_active() ? 1 : 0,
-            g_config.dlss_streamline_evaluate_callback ? 1 : 0,
+            g_config.optiscaler_enabled ? 1 : 0,
             g_config.engine_view_probe, g_config.engine_frame_builder_probe,
             g_config.engine_gameplay_entry_probe,
             g_config.engine_scene_enqueue_probe,
@@ -13674,10 +13264,6 @@ void load_config() {
             g_config.engine_native_stereo_offset,
             g_config.engine_factory_stereo_offset,
             g_config.streamline_force_reset,
-            g_config.streamline_split_viewports,
-            g_config.streamline_right_temporal_offset,
-            g_config.streamline_temporal_eye,
-            g_config.streamline_temporal_clip_correction,
             g_config.streamline_trace,
             g_config.streamline_trace_start_frame);
         log_line(
@@ -26602,26 +26188,6 @@ void STDMETHODCALLTYPE hook_resource_barrier(
     const bool clean_mode3_fast_path =
         g_clean_mode3_resource_barrier_fast_path &&
         !g_compute_probe_active.load(std::memory_order_relaxed);
-    if (dlss_streamline_evaluate_callback_active() && barriers != nullptr &&
-        g_streamline_dlss_evaluate_snapshot.route_valid) {
-        auto& snapshot = g_streamline_dlss_evaluate_snapshot;
-        for (UINT barrier_index = 0; barrier_index < num_barriers;
-            ++barrier_index) {
-            const auto& barrier = barriers[barrier_index];
-            if (barrier.Type != D3D12_RESOURCE_BARRIER_TYPE_TRANSITION ||
-                barrier.Transition.pResource == nullptr) {
-                continue;
-            }
-            if (snapshot.depth_valid &&
-                barrier.Transition.pResource == snapshot.depth) {
-                snapshot.depth_state = barrier.Transition.StateAfter;
-            }
-            if (snapshot.motion_vectors_valid &&
-                barrier.Transition.pResource == snapshot.motion_vectors) {
-                snapshot.motion_state = barrier.Transition.StateAfter;
-            }
-        }
-    }
     if (!clean_mode3_fast_path &&
         g_config.ngx_trace && barriers != nullptr) {
         for (UINT barrier_index = 0; barrier_index < num_barriers; ++barrier_index) {
@@ -37671,12 +37237,6 @@ void apply_engine_dual_render_transition(
         g_sequential_dlss_command_tags.clear();
     }
     {
-        std::scoped_lock lock{g_streamline_dlss_callback_constants_mutex};
-        for (auto& cached : g_streamline_dlss_callback_constants) {
-            cached = {};
-        }
-    }
-    {
         std::scoped_lock lock{g_streamline_command_list_eye_mutex};
         g_streamline_command_list_routes.clear();
     }
@@ -38395,52 +37955,6 @@ void install_engine_menu_state_probe() {
     }
 }
 
-void multiply_row_major_4x4(const float* left, const float* right, float* out) {
-    float result[16]{};
-    for (size_t row = 0; row < 4; ++row) {
-        for (size_t column = 0; column < 4; ++column) {
-            for (size_t i = 0; i < 4; ++i) {
-                result[row * 4 + column] += left[row * 4 + i] * right[i * 4 + column];
-            }
-        }
-    }
-    memcpy(out, result, sizeof(result));
-}
-
-void apply_right_eye_temporal_offset(void* constants, float offset) {
-    auto* values = static_cast<float*>(constants);
-
-    // Streamline 1.5 sl::Constants, row-major: view-to-clip, clip-to-view,
-    // clip-to-previous clip, and previous-to-current clip matrices.
-    const float* view_to_clip = values;
-    const float* clip_to_view = values + 16;
-    float positive_view_shift[16] = {
-        1.0f, 0.0f, 0.0f, 0.0f,
-        0.0f, 1.0f, 0.0f, 0.0f,
-        0.0f, 0.0f, 1.0f, 0.0f,
-        offset, 0.0f, 0.0f, 1.0f,
-    };
-    float negative_view_shift[16] = {
-        1.0f, 0.0f, 0.0f, 0.0f,
-        0.0f, 1.0f, 0.0f, 0.0f,
-        0.0f, 0.0f, 1.0f, 0.0f,
-        -offset, 0.0f, 0.0f, 1.0f,
-    };
-    float clip_positive[16]{};
-    float clip_negative[16]{};
-    float temporary[16]{};
-
-    multiply_row_major_4x4(clip_to_view, positive_view_shift, temporary);
-    multiply_row_major_4x4(temporary, view_to_clip, clip_positive);
-    multiply_row_major_4x4(clip_to_view, negative_view_shift, temporary);
-    multiply_row_major_4x4(temporary, view_to_clip, clip_negative);
-
-    for (size_t matrix_offset : {size_t{48}, size_t{64}}) {
-        multiply_row_major_4x4(clip_positive, values + matrix_offset, temporary);
-        multiply_row_major_4x4(temporary, clip_negative, values + matrix_offset);
-    }
-}
-
 std::array<float, 12> clean_mono_camera_to_previous_transform(
     const std::array<float, 12>& current,
     const std::array<float, 12>& previous) {
@@ -38910,30 +38424,6 @@ void __fastcall hook_sl_set_constants(void* constants, uint32_t frame_token, uin
             static_cast<const uint8_t*>(constants)[0x19F] != 0);
     }
 
-    if (g_config.streamline_split_viewports &&
-        geometry_stereo_transport_active() &&
-        g_config.engine_factory_stereo_offset != 0.0f) {
-        viewport |= eye;
-    }
-
-    if (constants != nullptr &&
-        g_config.streamline_split_viewports &&
-        g_config.streamline_right_temporal_offset != 0.0f &&
-        eye == static_cast<uint32_t>(g_config.streamline_temporal_eye)) {
-        apply_right_eye_temporal_offset(constants, g_config.streamline_right_temporal_offset);
-    }
-
-    if (constants != nullptr &&
-        g_config.streamline_temporal_clip_correction != 0.0f) {
-        auto* values = static_cast<float*>(constants);
-        // The alternating eye contributes a fixed horizontal baseline to
-        // both inverse reprojection matrices. Remove it only when present.
-        if (values[56] > g_config.streamline_temporal_clip_correction * 0.5f) {
-            values[56] -= g_config.streamline_temporal_clip_correction;
-            values[72] += g_config.streamline_temporal_clip_correction;
-        }
-    }
-
     if (constants != nullptr && g_config.streamline_trace &&
         g_present_count.load() >= static_cast<uint64_t>(g_config.streamline_trace_start_frame) &&
         take_bounded_log_slot(g_streamline_trace_counts[eye], 4)) {
@@ -39018,20 +38508,6 @@ void __fastcall hook_sl_set_constants(void* constants, uint32_t frame_token, uin
         asymmetric_sl.thread_id = GetCurrentThreadId();
     }
 
-    prepare_streamline_dlss_callback_constants(constants, eye);
-    // [FIX:DLSS-STREAMLINE-UNIVERSAL V1289 3/8] Cache the exact unmodified
-    // constants per token and eye. A matching public evaluation may execute on
-    // another thread, and the two eye viewports may share one frame token.
-    if (dlss_streamline_evaluate_callback_active() && constants != nullptr) {
-        std::scoped_lock lock{g_streamline_dlss_callback_constants_mutex};
-        auto& cached = g_streamline_dlss_callback_constants[
-            streamline_dlss_callback_constants_slot(frame_token, eye)];
-        memcpy(cached.constants.data(), constants,
-            kStreamlineDlssCallbackConstantsBytes);
-        cached.frame_token = frame_token;
-        cached.eye = eye;
-        cached.valid = true;
-    }
     if (temporal_backend_is_dlss()) {
         uint32_t jitter_x_bits{};
         uint32_t jitter_y_bits{};
@@ -39105,15 +38581,6 @@ void __fastcall hook_sl_set_constants(void* constants, uint32_t frame_token, uin
     }
 }
 
-uint32_t streamline_viewport_for_eye(uint32_t viewport) {
-    if (!g_config.streamline_split_viewports ||
-        !geometry_stereo_transport_active() ||
-        g_config.engine_factory_stereo_offset == 0.0f) {
-        return viewport;
-    }
-    return viewport | streamline_eye();
-}
-
 // [FIX:DLSS-PACKED 4/10] Copy an eye-specific private result back to the
 // canonical Streamline resource expected by the game's post-processing chain.
 int __fastcall hook_sl_set_tag(const void* resource, uint32_t tag, uint32_t viewport, const void* extent) {
@@ -39131,7 +38598,6 @@ int __fastcall hook_sl_set_tag(const void* resource, uint32_t tag, uint32_t view
         (g_config.logging_enabled || w3vr::route_flight::enabled())) {
         memcpy(&tagged_extent, extent, sizeof(tagged_extent));
     }
-    capture_streamline_dlss_callback_resource(resource, tag, eye);
     capture_clean_mono_dlss_resource(resource, tag);
     if (resource != nullptr && (tag == 0 || tag == 1 || tag == 3) &&
         g_config.ngx_trace &&
@@ -39187,172 +38653,35 @@ int __fastcall hook_sl_set_tag(const void* resource, uint32_t tag, uint32_t view
         g_streamline_output_frame.render_view_valid = g_engine_render_view_valid;
     }
 
-    const uint32_t routed_viewport = streamline_viewport_for_eye(viewport);
-    if (temporal_backend_is_dlss()) {
-        uint32_t state{};
-        if (resource != nullptr) {
-            memcpy(&state,
-                static_cast<const uint8_t*>(resource) + 32,
-                sizeof(state));
-        }
-        const auto& snapshot = g_streamline_dlss_evaluate_snapshot;
-        record_route_flight(
-            w3vr::route_flight::EventCode::DlssTag,
-            static_cast<int32_t>(eye),
-            snapshot.route_valid ? snapshot.route_tag.pair_id : 0,
-            0,
-            snapshot.route_valid ? snapshot.route_tag.generation
-                                 : UINT32_MAX,
-            0,
-            (resource != nullptr ? 0x01u : 0u) |
-                (extent != nullptr ? 0x02u : 0u) |
-                (snapshot.route_valid ? 0x04u : 0u),
-            tag,
-            (viewport & 0xFFFFu) |
-                ((routed_viewport & 0xFFFFu) << 16),
-            state,
-            (tagged_extent.width & 0xFFFFu) |
-                ((tagged_extent.height & 0xFFFFu) << 16));
-    }
-    return g_sl_set_tag(resource, tag, routed_viewport, extent);
+    return g_sl_set_tag(resource, tag, viewport, extent);
 }
 
 int __fastcall hook_sl_set_feature_constants(
     uint32_t feature, const void* constants, uint32_t frame_token, uint32_t viewport) {
-    // Only DLSS owns the per-eye Streamline histories created by Packed mode.
-    // Other features (notably Reflex, feature 3) must keep the game's native
-    // viewport instead of alternating between the two DLSS viewport IDs.
-    const uint32_t routed_viewport =
-        feature == 0 ? streamline_viewport_for_eye(viewport) : viewport;
-    if (feature == 0 && temporal_backend_is_dlss()) {
-        record_route_flight(
-            w3vr::route_flight::EventCode::DlssTag,
-            static_cast<int32_t>(streamline_eye()),
-            g_streamline_dlss_evaluate_snapshot.route_valid
-                ? g_streamline_dlss_evaluate_snapshot.route_tag.pair_id
-                : 0,
-            0,
-            g_streamline_dlss_evaluate_snapshot.route_valid
-                ? g_streamline_dlss_evaluate_snapshot.route_tag.generation
-                : UINT32_MAX,
-            1,
-            constants != nullptr ? 0x01u : 0u,
-            feature, frame_token, viewport, routed_viewport);
-    }
     return g_sl_set_feature_constants(
-        feature, constants, frame_token, routed_viewport);
+        feature, constants, frame_token, viewport);
 }
 
 int __fastcall hook_sl_evaluate_feature(
     void* command_buffer, uint32_t feature, uint32_t frame_token, uint32_t viewport) {
     DlssCpuScope cpu_scope{kDlssCpuSlEvaluateHook};
-    if (feature == 0) {
-        if (g_config.runtime_diagnostics) {
-            g_streamline_dlss_evaluate_calls.fetch_add(
-                1, std::memory_order_relaxed);
-        }
+    if (feature == 0 && g_config.runtime_diagnostics) {
+        g_streamline_dlss_evaluate_calls.fetch_add(
+            1, std::memory_order_relaxed);
     }
     if (g_engine_dual_render_active.load() && feature == 0 &&
         take_bounded_log_slot(g_streamline_dual_evaluate_log_count, 32)) {
-        log_line("Streamline dual evaluate command_list=%p thread_eye=%d present=%llu token=%u viewport=%u",
+        log_line(
+            "V1410 Streamline pass-through command_list=%p thread_eye=%d present=%llu token=%u viewport=%u",
             command_buffer, g_engine_render_eye,
-            static_cast<unsigned long long>(g_present_count.load()), frame_token, viewport);
+            static_cast<unsigned long long>(g_present_count.load()),
+            frame_token, viewport);
     }
     dlss_gpu_profile_mark(
         static_cast<ID3D12GraphicsCommandList*>(command_buffer), 3);
-    const uint32_t routed_viewport =
-        feature == 0 ? streamline_viewport_for_eye(viewport) : viewport;
+
     auto* command_list = static_cast<ID3D12GraphicsCommandList*>(
         command_buffer);
-    const uint32_t eye = streamline_eye();
-    StreamlineDlssCallbackConstantsSlot callback_constants{};
-    bool callback_constants_valid{};
-    if (feature == 0) {
-        callback_constants_valid =
-            hydrate_streamline_dlss_callback_constants(
-                frame_token, eye, &callback_constants);
-    }
-    const bool streamline_completion_active = feature == 0 &&
-        dlss_streamline_evaluate_callback_active() &&
-        command_list != nullptr;
-    const bool streamline_snapshot_active = streamline_completion_active &&
-        streamline_dlss_evaluate_snapshot_matches_current(eye);
-    int32_t puredark_afw_bundle_slot = -1;
-    bool public_jitter_applied{};
-    if (streamline_snapshot_active) {
-        const auto& snapshot = g_streamline_dlss_evaluate_snapshot;
-        record_streamline_command_list_eye(command_list, eye);
-        // [FIX:STREAMLINE-AFW-NATIVE-RECORDING V1365 2/3] The public callback
-        // may carry sl.interposer's wrapper. Resolve the exact native list for
-        // private D3D12 recording while preserving command_buffer for the
-        // original public Streamline call below.
-        ID3D12GraphicsCommandList* const afw_recording_command_list =
-            resolve_native_command_list(command_list);
-        if (callback_constants_valid) {
-            public_jitter_applied =
-                resubmit_streamline_native_asymmetric_dlss_jitter(
-                    callback_constants, frame_token, routed_viewport, eye);
-        }
-        if (snapshot.depth_valid &&
-            snapshot.motion_vectors_valid &&
-            snapshot.output_valid && snapshot.motion_scale_valid) {
-            // [FIX:DLSS-STREAMLINE-MOTION-SCALE V1277 1/1] Public Streamline
-            // constants describe this game's motion field in normalized
-            // texture units (1,1), while the NGX parameters consumed by the
-            // validated AFW path describe it in input pixels. Convert only at
-            // this alternate callback boundary; the common capture helper then
-            // performs its existing input-to-output extent conversion.
-            const auto motion_desc = snapshot.motion_vectors->GetDesc();
-            float ngx_motion_scale_x = snapshot.motion_scale_x;
-            float ngx_motion_scale_y = snapshot.motion_scale_y;
-            if (std::fabs(ngx_motion_scale_x) <= 4.0f &&
-                motion_desc.Width > 0) {
-                ngx_motion_scale_x *= static_cast<float>(motion_desc.Width);
-            }
-            if (std::fabs(ngx_motion_scale_y) <= 4.0f &&
-                motion_desc.Height > 0) {
-                ngx_motion_scale_y *= static_cast<float>(motion_desc.Height);
-            }
-            static std::atomic<uint32_t> streamline_motion_scale_logs{};
-            if (take_bounded_log_slot(streamline_motion_scale_logs, 32)) {
-                log_line(
-                    "V1277 DLSS Streamline motion scale eye=%u pair=%llu "
-                    "raw=%.6f,%.6f ngx=%.6f,%.6f extent=%llux%u",
-                    eye,
-                    static_cast<unsigned long long>(
-                        snapshot.route_tag.pair_id),
-                    snapshot.motion_scale_x, snapshot.motion_scale_y,
-                    ngx_motion_scale_x, ngx_motion_scale_y,
-                    static_cast<unsigned long long>(motion_desc.Width),
-                    motion_desc.Height);
-            }
-            puredark_afw_bundle_slot =
-                capture_puredark_afw_dlss_inputs_from_resources(
-                    afw_recording_command_list,
-                    snapshot.depth, snapshot.depth_state,
-                    snapshot.motion_vectors, snapshot.motion_state,
-                    snapshot.output,
-                    ngx_motion_scale_x, ngx_motion_scale_y,
-                    eye);
-        }
-    }
-    const bool public_bundle_ready = puredark_afw_bundle_slot >= 0;
-    if (feature == 0) {
-        const auto& snapshot = g_streamline_dlss_evaluate_snapshot;
-        record_route_flight(
-            w3vr::route_flight::EventCode::DlssEvaluate,
-            static_cast<int32_t>(eye),
-            snapshot.route_valid ? snapshot.route_tag.pair_id : 0,
-            0,
-            snapshot.route_valid ? snapshot.route_tag.generation
-                                 : UINT32_MAX,
-            0,
-            (streamline_completion_active ? 0x04u : 0u) |
-                (streamline_snapshot_active ? 0x02u : 0u) |
-                (callback_constants_valid ? 0x08u : 0u),
-            frame_token, viewport, routed_viewport,
-            static_cast<uint32_t>(puredark_afw_bundle_slot));
-    }
     CleanMonoDlssTemporalState clean_mono_consumed{};
     const bool clean_mono_dlss_evaluation = feature == 0 &&
         clean_mono_transport_active() && temporal_backend_is_dlss();
@@ -39373,10 +38702,12 @@ int __fastcall hook_sl_evaluate_feature(
                 1, std::memory_order_relaxed);
         }
     }
-    // [FIX:STREAMLINE-AFW-NATIVE-RECORDING V1365 3/3] Streamline still owns
-    // its public wrapper ABI; only our private recording path is unwrapped.
+
+    // Mode 3 is a strict public Streamline pass-through; its completion owner
+    // is the private direct-NGX path. Clean Mono retains only its required
+    // pre-evaluate motion dispatch on the unwrapped native command list.
     const int result = g_sl_evaluate_feature(
-        command_buffer, feature, frame_token, routed_viewport);
+        command_buffer, feature, frame_token, viewport);
     if (clean_mono_dlss_dispatched && result != 0) {
         {
             std::scoped_lock lock{g_clean_mono_dlss_mutex};
@@ -39409,80 +38740,6 @@ int __fastcall hook_sl_evaluate_feature(
                 static_cast<unsigned long long>(
                     g_present_count.load(std::memory_order_relaxed)));
         }
-    }
-    if (streamline_completion_active) {
-        // Witcher uses the historical Streamline bool ABI: non-zero is success.
-        // [FIX:DLSS-STREAMLINE-UNIVERSAL V1289 4/8] This public callback is the
-        // only completion owner, irrespective of the NVIDIA DLL topology.
-        const bool completion_success = result != 0;
-        const NVSDK_NGX_Result completion_result = completion_success
-            ? NVSDK_NGX_Result_Success
-            : NVSDK_NGX_Result_Fail;
-        g_dlss_completion_streamline_owned.fetch_add(
-            1, std::memory_order_relaxed);
-        finalize_puredark_afw_dlss_submission(
-            command_list, puredark_afw_bundle_slot, completion_result);
-        finalize_dlss_cache_submission(command_list, completion_result);
-        if (completion_success && public_jitter_applied) {
-            commit_native_asymmetric_dlss_input(
-                g_streamline_dlss_evaluate_snapshot.jitter);
-            commit_streamline_native_asymmetric_dlss_input(
-                g_streamline_dlss_evaluate_snapshot.route_tag);
-        } else if (completion_success && streamline_snapshot_active &&
-                   !mode3_aer_presentation_active()) {
-            // [FIX:DLSS-STREAMLINE-STRICT-FINAL-PROOF V1290 1/1] The public
-            // evaluation already completed for this exact routed eye. Strict
-            // Stereo only needs that final proof before publishing the pair;
-            // do not make it depend on whether this eye required jitter repair.
-            commit_streamline_native_asymmetric_dlss_input(
-                g_streamline_dlss_evaluate_snapshot.route_tag);
-        }
-        const uint32_t log_index = g_dlss_completion_auto_logs.fetch_add(
-            1, std::memory_order_relaxed);
-        if (g_config.runtime_diagnostics && log_index < 64) {
-            const auto& snapshot = g_streamline_dlss_evaluate_snapshot;
-            log_line(
-                "V1289 DLSS public completion sample=%u raw_sl=%d success=%u "
-                "bundle=%u jitter=%u constants=%u snapshot=%u "
-                "resources=%u,%u,%u,%u eye=%u pair=%llu "
-                "command_list=%p token=%u viewport=%u",
-                log_index, result, completion_success ? 1u : 0u,
-                public_bundle_ready ? 1u : 0u,
-                public_jitter_applied ? 1u : 0u,
-                callback_constants_valid ? 1u : 0u,
-                streamline_snapshot_active ? 1u : 0u,
-                snapshot.depth_valid ? 1u : 0u,
-                snapshot.motion_vectors_valid ? 1u : 0u,
-                snapshot.output_valid ? 1u : 0u,
-                snapshot.motion_scale_valid ? 1u : 0u,
-                eye,
-                static_cast<unsigned long long>(
-                    snapshot.route_valid ? snapshot.route_tag.pair_id : 0),
-                command_list, frame_token, routed_viewport);
-        }
-        const auto& snapshot = g_streamline_dlss_evaluate_snapshot;
-        record_route_flight(
-            w3vr::route_flight::EventCode::DlssEvaluate,
-            static_cast<int32_t>(eye),
-            snapshot.route_valid ? snapshot.route_tag.pair_id : 0,
-            0,
-            snapshot.route_valid ? snapshot.route_tag.generation
-                                 : UINT32_MAX,
-            1,
-            (completion_success ? 0x01u : 0u) |
-                (streamline_snapshot_active ? 0x02u : 0u) |
-                (streamline_completion_active ? 0x04u : 0u) |
-                (callback_constants_valid ? 0x08u : 0u) |
-                (public_jitter_applied ? 0x10u : 0u) |
-                (public_bundle_ready ? 0x20u : 0u) |
-                (snapshot.depth_valid ? 0x40u : 0u) |
-                (snapshot.motion_vectors_valid ? 0x80u : 0u) |
-                (snapshot.output_valid ? 0x100u : 0u) |
-                (snapshot.motion_scale_valid ? 0x200u : 0u) |
-                (mode3_aer_presentation_active() ? 0x800u : 0x400u),
-            frame_token, viewport, routed_viewport,
-            static_cast<uint32_t>(result));
-        g_streamline_dlss_evaluate_snapshot = {};
     }
     dlss_gpu_profile_mark(
         static_cast<ID3D12GraphicsCommandList*>(command_buffer), 4);
@@ -39690,26 +38947,48 @@ bool prepare_native_asymmetric_dlss_jitter_override_values(
     }
     override_state.center_x = descriptor.redengine_center_offset_px_x;
     override_state.center_y = descriptor.redengine_center_offset_px_y;
-    const float centered_residual_x =
-        override_state.original_x - override_state.center_x;
-    const float centered_residual_y =
-        override_state.original_y + override_state.center_y;
-    const bool centered_input =
-        fabsf(centered_residual_x) <= 1.0f &&
-        fabsf(centered_residual_y) <= 1.0f;
-    const bool already_pure = fabsf(override_state.original_x) <= 1.0f &&
-        fabsf(override_state.original_y) <= 1.0f;
-    if (centered_input) {
-        override_state.pure_x = centered_residual_x;
-        override_state.pure_y = centered_residual_y;
-        override_state.source_was_centered = true;
-    } else if (already_pure) {
-        override_state.pure_x = override_state.original_x;
-        override_state.pure_y = override_state.original_y;
-    } else {
+
+    // [FIX:OPTISCALER-FSR-JITTER V21008] REDengine occasionally defers an
+    // eye-1 NGX command with the shared parameter table still carrying eye 0's
+    // projection centre. Native DLSS has intentionally failed closed on this
+    // ambiguity since V1136. FidelityFX consumes the numeric jitter directly,
+    // so permit the exact peer centre only for the explicit OptiScaler route
+    // and only when that peer was recorded for this same pair/generation.
+    w3vr::openxr_eye_geometry::AsymmetricProjectionDescriptor
+        peer_descriptor{};
+    XrFovf peer_fov{};
+    const uint32_t peer_eye = eye ^ 1u;
+    const uint8_t peer_bit = static_cast<uint8_t>(1u << peer_eye);
+    const bool peer_center_available = g_config.optiscaler_enabled &&
+        (override_state.factory_mask & peer_bit) != 0 &&
+        (override_state.temporal_mask & peer_bit) != 0 &&
+        snapshot_native_asymmetric_pair_fov(pair_id, peer_eye, peer_fov) &&
+        w3vr::openxr_eye_geometry::derive_asymmetric_projection_descriptor(
+            peer_fov, override_state.extent_width,
+            override_state.extent_height, peer_descriptor) &&
+        pair_slot->pair_id.load(std::memory_order_acquire) == pair_id &&
+        pair_slot->generation.load(std::memory_order_acquire) ==
+            override_state.generation;
+    const auto normalized = w3vr::optiscaler_jitter::normalize(
+        override_state.original_x, override_state.original_y,
+        override_state.center_x, override_state.center_y,
+        peer_center_available,
+        peer_descriptor.redengine_center_offset_px_x,
+        peer_descriptor.redengine_center_offset_px_y);
+    if (!normalized.valid) {
         override_state.reason = 8;
         return false;
     }
+    override_state.pure_x = normalized.x;
+    override_state.pure_y = normalized.y;
+    override_state.applied_center_x = normalized.applied_center_x;
+    override_state.applied_center_y = normalized.applied_center_y;
+    override_state.source_was_centered =
+        normalized.source ==
+            w3vr::optiscaler_jitter::Source::ExpectedCenter ||
+        normalized.source == w3vr::optiscaler_jitter::Source::PeerCenter;
+    override_state.source_used_peer_center =
+        normalized.source == w3vr::optiscaler_jitter::Source::PeerCenter;
 
     override_state.valid = true;
     return true;
@@ -39822,39 +39101,6 @@ bool commit_native_asymmetric_dlss_input(
         return false;
     }
     pair_slot.dlss_input_mask.fetch_or(eye_bit, std::memory_order_release);
-    return true;
-}
-
-bool commit_streamline_native_asymmetric_dlss_input(
-    const EngineFrameTag& route_tag) {
-    if (!dlss_streamline_evaluate_callback_active() ||
-        !native_asymmetric_noaa_route_active() || route_tag.eye > 1 ||
-        route_tag.pair_id == 0 || route_tag.pair_id == UINT64_MAX) {
-        return false;
-    }
-    std::scoped_lock slot_lock{g_native_asymmetric_pair_slot_mutex};
-    auto& pair_slot = g_native_asymmetric_pair_slots[
-        route_tag.pair_id % kNativeAsymmetricPairSlotCount];
-    const uint8_t eye_bit = static_cast<uint8_t>(1u << route_tag.eye);
-    if (pair_slot.pair_id.load(std::memory_order_acquire) !=
-            route_tag.pair_id ||
-        pair_slot.generation.load(std::memory_order_acquire) !=
-            route_tag.generation ||
-        (pair_slot.factory_mask.load(std::memory_order_acquire) & eye_bit) == 0 ||
-        (pair_slot.temporal_mask.load(std::memory_order_acquire) & eye_bit) == 0) {
-        return false;
-    }
-    const uint8_t input_mask = pair_slot.dlss_input_mask.fetch_or(
-        eye_bit, std::memory_order_release) | eye_bit;
-    static std::atomic<uint32_t> streamline_completion_logs{};
-    if (take_bounded_log_slot(streamline_completion_logs, 32)) {
-        log_line(
-            "V1277 DLSS Streamline Stereo completion eye=%u pair=%llu "
-            "generation=%u input_mask=0x%X",
-            route_tag.eye,
-            static_cast<unsigned long long>(route_tag.pair_id),
-            route_tag.generation, input_mask);
-    }
     return true;
 }
 
@@ -40240,11 +39486,6 @@ NVSDK_NGX_Result NVSDK_CONV hook_ngx_evaluate_feature(
     const NVSDK_NGX_Parameter* parameters,
     PFN_NVSDK_NGX_ProgressCallback callback) {
     g_ngx_dlss_evaluate_calls.fetch_add(1, std::memory_order_relaxed);
-    // [FIX:DLSS-COMPLETION-AUTO V1287 4/8] A matching public evaluation marks
-    // this exact command list before calling Streamline. That observation is
-    // valid even if the driver invokes NGX from a different thread.
-    const auto completion_auto =
-        mark_dlss_completion_auto_ngx_entry(command_list);
     const uint32_t asymmetric_entry_eye = streamline_eye();
     // [TRIAL:NATIVE-STEREO-DLSS V1136] A deferred NGX command may execute after
     // the REDengine render TLS has advanced.  Only the command-scoped Streamline
@@ -40261,11 +39502,9 @@ NVSDK_NGX_Result NVSDK_CONV hook_ngx_evaluate_feature(
         ? static_cast<uint32_t>(g_streamline_forced_eye)
         : UINT32_MAX;
     NativeAsymmetricDlssJitterOverride native_dlss_jitter{};
-    if (!completion_auto.public_jitter_applied) {
-        prepare_native_asymmetric_dlss_jitter_override(
-            parameters, native_dlss_pair, native_dlss_eye,
-            native_dlss_jitter);
-    }
+    prepare_native_asymmetric_dlss_jitter_override(
+        parameters, native_dlss_pair, native_dlss_eye,
+        native_dlss_jitter);
     AsymmetricNgxEntryAuditScope asymmetric_entry_audit{
         command_list, handle, parameters,
         g_streamline_dlss_pair_id, asymmetric_entry_eye,
@@ -40278,19 +39517,13 @@ NVSDK_NGX_Result NVSDK_CONV hook_ngx_evaluate_feature(
             g_engine_menu_state.load(std::memory_order_relaxed) == 0};
     const auto result = hook_ngx_evaluate_feature_impl(
         command_list, handle, parameters, callback,
-        completion_auto.use_public_bundle);
-    mark_dlss_completion_auto_ngx_result(
-        command_list, result == NVSDK_NGX_Result_Success);
-    bool native_dlss_restore_ok = true;
-    bool native_dlss_committed{};
-    if (!completion_auto.public_jitter_applied) {
-        native_dlss_restore_ok =
-            restore_native_asymmetric_dlss_jitter_override(
-                parameters, native_dlss_jitter);
-        native_dlss_committed =
-            result == NVSDK_NGX_Result_Success && native_dlss_restore_ok &&
-            commit_native_asymmetric_dlss_input(native_dlss_jitter);
-    }
+        false);
+    const bool native_dlss_restore_ok =
+        restore_native_asymmetric_dlss_jitter_override(
+            parameters, native_dlss_jitter);
+    const bool native_dlss_committed =
+        result == NVSDK_NGX_Result_Success && native_dlss_restore_ok &&
+        commit_native_asymmetric_dlss_input(native_dlss_jitter);
     if (native_dlss_jitter.required && g_config.runtime_diagnostics) {
         const uint32_t log_index =
             g_native_asymmetric_dlss_input_logs.fetch_add(
@@ -40302,9 +39535,11 @@ NVSDK_NGX_Result NVSDK_CONV hook_ngx_evaluate_feature(
                 ? pair_slot->dlss_input_mask.load(std::memory_order_acquire)
                 : 0;
             log_line(
-                "V1136 native DLSS private jitter sample=%u pair=%llu "
-                "generation=%u eye=%u valid=%u centered=%u reason=%u "
+                "V21008 private NGX jitter sample=%u pair=%llu "
+                "generation=%u eye=%u valid=%u centered=%u peer_center=%u "
+                "reason=%u "
                 "source=%.9g,%.9g center=%.9g,%.9g pure=%.9g,%.9g "
+                "applied_center=%.9g,%.9g "
                 "extent=%ux%u factory_mask=0x%X temporal_mask=0x%X "
                 "input_mask=0x%X result=0x%08X restored=%u committed=%u",
                 log_index,
@@ -40314,6 +39549,7 @@ NVSDK_NGX_Result NVSDK_CONV hook_ngx_evaluate_feature(
                 native_dlss_jitter.eye,
                 native_dlss_jitter.valid ? 1u : 0u,
                 native_dlss_jitter.source_was_centered ? 1u : 0u,
+                native_dlss_jitter.source_used_peer_center ? 1u : 0u,
                 native_dlss_jitter.reason,
                 native_dlss_jitter.original_x,
                 native_dlss_jitter.original_y,
@@ -40321,6 +39557,8 @@ NVSDK_NGX_Result NVSDK_CONV hook_ngx_evaluate_feature(
                 native_dlss_jitter.center_y,
                 native_dlss_jitter.pure_x,
                 native_dlss_jitter.pure_y,
+                native_dlss_jitter.applied_center_x,
+                native_dlss_jitter.applied_center_y,
                 native_dlss_jitter.extent_width,
                 native_dlss_jitter.extent_height,
                 native_dlss_jitter.factory_mask,
@@ -40392,6 +39630,10 @@ NVSDK_NGX_Result NVSDK_CONV hook_ngx_create_feature(
         }
         if (peer_result == NVSDK_NGX_Result_Success &&
             peer_handle != nullptr) {
+            {
+                std::scoped_lock lock{g_sequential_dlss_handle_mutex};
+                g_sequential_dlss_peer_histories[*handle] = peer_handle;
+            }
             log_dlss_sequential_startup(
                 "Sequential DLSS history candidates created generation=%llu "
                 "owner_eye=%u owner=%p peer_eye=%u peer=%p "
@@ -40416,20 +39658,186 @@ NVSDK_NGX_Result NVSDK_CONV hook_ngx_create_feature(
     return result;
 }
 
+NVSDK_NGX_Result NVSDK_CONV hook_ngx_release_feature(
+    NVSDK_NGX_Handle* handle) {
+    NVSDK_NGX_Handle* peer_handle{};
+    {
+        std::scoped_lock lock{g_sequential_dlss_handle_mutex};
+        const auto peer = g_sequential_dlss_peer_histories.find(handle);
+        if (peer != g_sequential_dlss_peer_histories.end()) {
+            peer_handle = peer->second;
+            g_sequential_dlss_peer_histories.erase(peer);
+        }
+        for (uint32_t eye = 0; eye < 2; ++eye) {
+            auto& bindings = g_sequential_dlss_source_histories[eye];
+            for (auto binding = bindings.begin(); binding != bindings.end();) {
+                if (binding->first == handle || binding->first == peer_handle ||
+                    binding->second.history == handle ||
+                    binding->second.history == peer_handle) {
+                    binding = bindings.erase(binding);
+                } else {
+                    ++binding;
+                }
+            }
+            if (g_sequential_dlss_latest_histories[eye] == handle ||
+                g_sequential_dlss_latest_histories[eye] == peer_handle) {
+                g_sequential_dlss_latest_histories[eye] = nullptr;
+                g_sequential_dlss_latest_history_generations[eye] = 0;
+                g_sequential_dlss_latest_history_needs_reset[eye] = false;
+            }
+        }
+    }
+
+    NVSDK_NGX_Result peer_result = NVSDK_NGX_Result_Success;
+    if (peer_handle != nullptr && peer_handle != handle) {
+        peer_result = g_ngx_release_feature(peer_handle);
+    }
+    const auto result = g_ngx_release_feature(handle);
+    if (peer_handle != nullptr) {
+        log_dlss_sequential_startup(
+            "Sequential DLSS histories released owner=%p owner_result=0x%08X "
+            "peer=%p peer_result=0x%08X",
+            handle, static_cast<unsigned>(result), peer_handle,
+            static_cast<unsigned>(peer_result));
+    }
+    return result;
+}
+
+bool initialize_optiscaler_backend() {
+    if (!g_config.optiscaler_enabled) {
+        return true;
+    }
+    if (g_optiscaler_module != nullptr) {
+        return true;
+    }
+
+    wchar_t module_path[MAX_PATH]{};
+    const DWORD path_length = GetModuleFileNameW(
+        nullptr, module_path, static_cast<DWORD>(std::size(module_path)));
+    wchar_t* slash = path_length != 0 && path_length < std::size(module_path)
+        ? wcsrchr(module_path, L'\\')
+        : nullptr;
+    if (slash == nullptr ||
+        wcscpy_s(slash + 1,
+            std::size(module_path) - static_cast<size_t>(slash + 1 - module_path),
+            L"OptiScaler.dll") != 0) {
+        log_line("V21008 OptiScaler backend failed: executable path unavailable");
+        return false;
+    }
+
+    HMODULE module = LoadLibraryW(module_path);
+    auto* create = module != nullptr
+        ? GetProcAddress(module, "NVSDK_NGX_D3D12_CreateFeature")
+        : nullptr;
+    auto* evaluate = module != nullptr
+        ? GetProcAddress(module, "NVSDK_NGX_D3D12_EvaluateFeature")
+        : nullptr;
+    auto* release = module != nullptr
+        ? GetProcAddress(module, "NVSDK_NGX_D3D12_ReleaseFeature")
+        : nullptr;
+    if (module == nullptr || create == nullptr || evaluate == nullptr ||
+        release == nullptr) {
+        log_line(
+            "V21008 OptiScaler backend failed path=%ls error=%lu create=%p "
+            "evaluate=%p release=%p fallback=none",
+            module_path, static_cast<unsigned long>(GetLastError()), create,
+            evaluate, release);
+        if (module != nullptr) {
+            FreeLibrary(module);
+        }
+        return false;
+    }
+
+    g_optiscaler_module = module;
+    log_line(
+        "V21008 OptiScaler backend loaded explicitly path=%ls module=%p "
+        "proxy_autoload=disabled",
+        module_path, module);
+    return true;
+}
+
 void install_ngx_dlss_hook() {
-    if (!temporal_backend_is_dlss()) {
+    if (!temporal_backend_is_dlss() ||
+        (!g_config.ngx_trace && !asymmetric_authority_audit_active() &&
+            !puredark_afw_mode3_aer_dlss_route_configured() &&
+            !dlss_submitted_cache_route_active()) ||
+        g_ngx_evaluate_feature != nullptr) {
         return;
     }
-    if (!g_dlss_completion_auto_hook_logged.exchange(
-            true, std::memory_order_relaxed)) {
-        // [FIX:DLSS-STREAMLINE-UNIVERSAL V1289 5/8] Do not even resolve the
-        // private exports. In particular, CreateFeature must not clone a peer
-        // history while EvaluateFeature completes through a public override.
-        log_line(
-            "V1289 DLSS owner=public_streamline ngx_evaluate_hook=disabled "
-            "ngx_create_hook=disabled split_viewport_history=enabled "
-            "token_eye_constants=enabled legacy_public_bool_success=nonzero");
+
+    std::scoped_lock install_lock{g_ngx_dlss_hook_mutex};
+    if (g_ngx_evaluate_feature != nullptr) {
+        return;
     }
+
+    HMODULE module = g_config.optiscaler_enabled
+        ? g_optiscaler_module
+        : GetModuleHandleW(L"nvngx_dlss.dll");
+    auto* evaluate_target = module != nullptr
+        ? GetProcAddress(module, "NVSDK_NGX_D3D12_EvaluateFeature")
+        : nullptr;
+    auto* create_target = module != nullptr
+        ? GetProcAddress(module, "NVSDK_NGX_D3D12_CreateFeature")
+        : nullptr;
+    auto* release_target = module != nullptr
+        ? GetProcAddress(module, "NVSDK_NGX_D3D12_ReleaseFeature")
+        : nullptr;
+    if (create_target == nullptr || evaluate_target == nullptr ||
+        release_target == nullptr) {
+        return;
+    }
+
+    const MH_STATUS create_status = MH_CreateHook(
+        create_target, reinterpret_cast<void*>(&hook_ngx_create_feature),
+        reinterpret_cast<void**>(&g_ngx_create_feature));
+    const MH_STATUS evaluate_status = create_status == MH_OK
+        ? MH_CreateHook(
+            evaluate_target,
+            reinterpret_cast<void*>(&hook_ngx_evaluate_feature),
+            reinterpret_cast<void**>(&g_ngx_evaluate_feature))
+        : MH_ERROR_NOT_CREATED;
+    const MH_STATUS release_status = evaluate_status == MH_OK
+        ? MH_CreateHook(
+            release_target,
+            reinterpret_cast<void*>(&hook_ngx_release_feature),
+            reinterpret_cast<void**>(&g_ngx_release_feature))
+        : MH_ERROR_NOT_CREATED;
+    const MH_STATUS create_queued = release_status == MH_OK
+        ? MH_QueueEnableHook(create_target)
+        : MH_ERROR_NOT_CREATED;
+    const MH_STATUS evaluate_queued = create_queued == MH_OK
+        ? MH_QueueEnableHook(evaluate_target)
+        : MH_ERROR_NOT_CREATED;
+    const MH_STATUS release_queued = evaluate_queued == MH_OK
+        ? MH_QueueEnableHook(release_target)
+        : MH_ERROR_NOT_CREATED;
+    const MH_STATUS apply_status = release_queued == MH_OK
+        ? MH_ApplyQueued()
+        : MH_ERROR_NOT_CREATED;
+    if (apply_status != MH_OK) {
+        MH_RemoveHook(create_target);
+        MH_RemoveHook(evaluate_target);
+        MH_RemoveHook(release_target);
+        g_ngx_create_feature = nullptr;
+        g_ngx_evaluate_feature = nullptr;
+        g_ngx_release_feature = nullptr;
+        log_line(
+            "V21008 private NGX owner hook failed backend=%s create=%s "
+            "evaluate=%s release=%s apply=%s fallback=none",
+            g_config.optiscaler_enabled ? "optiscaler" : "native",
+            MH_StatusToString(create_status),
+            MH_StatusToString(evaluate_status),
+            MH_StatusToString(release_status),
+            MH_StatusToString(apply_status));
+        return;
+    }
+
+    log_line(
+        "V21008 DLSS owner=private_direct_ngx backend=%s "
+        "streamline=pass_through viewport=native_single histories=two "
+        "create=%p evaluate=%p release=%p",
+        g_config.optiscaler_enabled ? "optiscaler" : "native",
+        create_target, evaluate_target, release_target);
 }
 
 // ForceDLAA follows the proven DLSSTweaks approach: keep a supported quality
@@ -40660,9 +40068,7 @@ void install_streamline_hook() {
         return;
     }
 
-    if ((!g_config.streamline_force_reset && !g_config.streamline_split_viewports &&
-            g_config.streamline_right_temporal_offset == 0.0f &&
-            g_config.streamline_temporal_clip_correction == 0.0f &&
+    if ((!g_config.streamline_force_reset &&
             !g_config.streamline_taau_bridge &&
             !g_config.ngx_trace &&
             !asymmetric_authority_audit_active() &&
@@ -41113,6 +40519,10 @@ void ensure_initialized() {
         }
         initialize_renderdoc_capture_api();
         MH_Initialize();
+        initialize_optiscaler_backend();
+        if (temporal_backend_is_dlss()) {
+            install_ngx_dlss_hook();
+        }
         install_renderdoc_d3d12_create_device_bridge();
         log_renderdoc_capture_api_status();
         initialize_focus_projection_shader_file();
@@ -41172,10 +40582,10 @@ void ensure_initialized() {
                 "focus_fire_b1=stereo_and_aer_centered_draw_proven "
                 "aer_taau_hud=scene_and_retained_pair_fail_open");
             log_line(
-                "witcher3vr dxgi proxy initialized build=V1409 base=V1408_plus_V18021_foliage_fixed_only "
+                "witcher3vr dxgi proxy initialized build=V1410 base=V1409_plus_V21008_optiscaler_clean "
                 "anchor_smoothing_ini=%d anchor_smoothing_seconds=%.4f "
                 "first_person_strafe_ini=%d mode3_aer_presentation=%d raytracing_enabled=%d raytracing_history_buffers=%d "
-                "aer_afw_enabled=%d persistent_registry=%d dlss_public_streamline=%d "
+                "aer_afw_enabled=%d persistent_registry=%d optiscaler_enabled=%d "
                 "force_aer_afw_submitted_hud_join=%d",
                 g_config.engine_first_person_anchor_smoothing ? 1 : 0,
                 g_config.engine_first_person_anchor_smoothing_seconds,
@@ -41185,7 +40595,7 @@ void ensure_initialized() {
                 g_config.raytracing_history_buffers,
                 g_config.puredark_afw_enabled ? 1 : 0,
                 focus_projection_shader_registry_enabled() ? 1 : 0,
-                dlss_streamline_evaluate_callback_active() ? 1 : 0,
+                g_config.optiscaler_enabled ? 1 : 0,
                 kForceMode3AerAfwSubmittedHudJoinBuild ? 1 : 0);
             log_line("V1234 AFW common_transport=dlss_and_taau projection_transport=symmetric_asymmetric_identical final_color=exact_submitted_temporal queue_admission=exact_command_list_any_hooked_queue taau_motion=normalized_rg16f_previous_minus_current afw_projection=packet_owned_camera_fov mode3_afw_bundle_fifo=exact_submitted_temporal mode3_afw_order=temporal_bundle_then_shared_xr_evaluate_copy_draw strict_dlss_smoke_eye=exact_deferred_command_tag aer_presentation_size=final_openxr_scaled_fov_source_extent rt_identity=order_independent_open_transactions rt_ingress_packet=removed rt_flight=removed rt_gpu_history=exact_previous_pair_configurable_4_to_16_default_8 afw_visual_debug=F6 camera_follow=launcher_script_dynamic static_hud=launcher_script_dynamic");
             log_line(
@@ -41204,14 +40614,6 @@ void ensure_initialized() {
                 "V1285 retained HUD timing=preexecute_snapshot_publish pointer_exact_readiness_matched gpu_work=unchanged");
             log_line(
                 "V1286 RenderDoc Streamline D3D12CreateDevice bridge=explicit_opt_in default_off full_d3d12_capture=requires_bridge");
-            log_line(
-                "V1287 DLSS completion=per_command_list_auto owner_probe=ngx_or_streamline single_afw_producer=1 legacy_callback_ini=ignored");
-            log_line(
-                "V1288 DLSS private hook=nvngx_dlss_only wrapper_exports=sl_common_and__nvngx_rejected public_fallback=automatic");
-            log_line(
-                "V1289 DLSS owner=public_streamline mode3_aer_and_stereo=1 ngx_evaluate_create_hooks=disabled per_eye_history=split_viewports constants_cache=token_plus_eye asymmetric_jitter=late_exact_resubmit recipe_reconstruction=0 override_compatible=1");
-            log_line(
-                "V1290 strict Stereo final DLSS proof=successful_exact_public_evaluate_per_eye intermediate_dlss=unchanged aer=unchanged");
             log_line(
                 "V1291 AER TAAU presentation=source_resolution_fixed_100_percent slider=fov_only scale1_legacy_cover_crop=bypassed dlss_stereo_unchanged=1");
             log_line(
@@ -41238,8 +40640,6 @@ void ensure_initialized() {
                 "V1363 dlss_scene_history_reset=removed_rejected_V1340 projection_switch_reset=V1331_only");
             log_line(
                 "V1364 strict_stereo_dlss_constants=original_builder_per_eye guard=state_0x6c peer_payload_replay=0 aer=unchanged route_flight=always_on_ram_f3");
-            log_line(
-                "V1365 streamline_afw_recording=native_unwrapped public_sl_evaluate=wrapper fail_closed_non_native=1");
             // [FIX:CROSS-QUEUE-RETAINED-HUD-OWNERSHIP V1366 6/6]
             log_line(
                 "V1366 retained_hud_ownership=exact_ordered_submission cross_queue_gpu_wait=1 same_queue_fast_path=1 queue_topology_independent=1");
@@ -41259,7 +40659,7 @@ void ensure_initialized() {
             log_line(
                 "V1409 foliage=V18021_net_port_from_V1361 owners=5E2E73E55B072A74_7FC495F2BB36CAC0,F9282625E62BCC6A_5B6F5C6CA86B8C9D delivery=immutable_replacement_pso fixed=always_on runtime_ab=absent");
             log_line(
-                "V1279 DLSS compatibility=public_streamline_aer_private_history_ngx_stereo legacy_module_agnostic_discovery=disabled_by_V1288");
+                "V1410 optiscaler=V21008_net_port_from_V1369 clean_integration=1 streamline=pass_through viewport=native_single histories=two private_ngx_lifetime=create_evaluate_release optiscaler_gate=sidecar_default_off fsr_jitter=exact_peer_center audit=absent f4_capture=absent fallback=none clean_mono_pre_evaluate_motion=preserved");
             log_line(
                 "V1144 native temporal terrain family source=V15018 validated_via=V15017 terrain_match=exact_vs_ds_two_hs_pso_contract material_ps=wildcard terrain_hs=5B33D68BABD52A7E,9ABE7F60D2CFC2EB mode3_taau_native_full_motion=1 taau_terrain_replay=aer_and_stereo native_temporal_terrain_motion=1 diagnostic_independent=1 diagnostic_off_log_io=none locator_code=absent camera_binding=ds_b1_to_ps_b6_alias motion_formula=current_ndc_minus_history_ndc velocity_target=rt3_only overlay_psos=inherit_base_motion afw_compatible=1");
         }
@@ -49560,7 +48960,7 @@ void handle_f3_capture_hotkey(IDXGISwapChain* swapchain) {
     if (w3vr::pipeline_flight::enabled()) {
         w3vr::pipeline_flight::dump_last_ten_seconds();
     }
-    w3vr::route_flight::dump_last_seconds("V1409", 15);
+    w3vr::route_flight::dump_last_seconds("V1410", 15);
     trigger_renderdoc_capture(
         g_game_swapchain != nullptr ? g_game_swapchain : swapchain);
 }
@@ -49777,19 +49177,11 @@ HRESULT STDMETHODCALLTYPE hook_present(IDXGISwapChain* swapchain, UINT sync_inte
     }
     if (g_config.runtime_diagnostics && g_config.ngx_trace &&
         frame % 120 == 0) {
-        log_line("DLSS routing totals present=%llu bridge=%llu sl_eval=%llu ngx_hook=%llu auto_owner=%s auto_ngx=%llu auto_streamline=%llu auto_switch=%llu",
+        log_line("DLSS routing totals present=%llu owner=private_ngx bridge=%llu sl_eval_passthrough=%llu ngx_hook=%llu",
             static_cast<unsigned long long>(frame),
             static_cast<unsigned long long>(g_streamline_taau_bridge_matches.load(std::memory_order_relaxed)),
             static_cast<unsigned long long>(g_streamline_dlss_evaluate_calls.load(std::memory_order_relaxed)),
-            static_cast<unsigned long long>(g_ngx_dlss_evaluate_calls.load(std::memory_order_relaxed)),
-            dlss_completion_owner_name(
-                g_dlss_completion_owner.load(std::memory_order_relaxed)),
-            static_cast<unsigned long long>(
-                g_dlss_completion_ngx_owned.load(std::memory_order_relaxed)),
-            static_cast<unsigned long long>(
-                g_dlss_completion_streamline_owned.load(std::memory_order_relaxed)),
-            static_cast<unsigned long long>(
-                g_dlss_completion_owner_switches.load(std::memory_order_relaxed)));
+            static_cast<unsigned long long>(g_ngx_dlss_evaluate_calls.load(std::memory_order_relaxed)));
     }
     const auto bootstrap_until =
         g_taau_descriptor_bootstrap_until_present.load(std::memory_order_relaxed);

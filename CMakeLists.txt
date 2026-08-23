@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(witcher3vr VERSION 0.1409.0 LANGUAGES C CXX RC)
+project(witcher3vr VERSION 0.1410.0 LANGUAGES C CXX RC)
 
 include(CTest)
 
@@ -73,6 +73,13 @@ set_target_properties(witcher3vr_dxgi PROPERTIES OUTPUT_NAME dxgi)
 target_link_options(witcher3vr_dxgi PRIVATE /MAP)
 
 if(BUILD_TESTING)
+    add_executable(w3vr_optiscaler_jitter_policy_tests
+        tests/optiscaler_jitter_policy_tests.cpp
+    )
+    target_include_directories(w3vr_optiscaler_jitter_policy_tests PRIVATE src)
+    add_test(NAME renderer_optiscaler_jitter_policy
+        COMMAND w3vr_optiscaler_jitter_policy_tests)
+
     add_executable(w3vr_shadow_cascade_authority_policy_tests
         tests/shadow_cascade_authority_policy_tests.cpp
     )
@@ -378,10 +385,11 @@ if(BUILD_TESTING)
     )
 
     add_test(
-        NAME renderer_streamline_afw_native_command_list_contract
+        NAME renderer_optiscaler_direct_ngx_contract
         COMMAND "${CMAKE_COMMAND}"
             "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
-            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/streamline_afw_native_command_list_contract.cmake"
+            "-DOPTISCALER_BRIDGE_INI=${CMAKE_CURRENT_SOURCE_DIR}/optiscaler_bridge.ini"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/optiscaler_direct_ngx_contract.cmake"
     )
 
     add_test(

@@ -60,7 +60,7 @@ endforeach()
 string(FIND "${dxgi_proxy}"
     "void capture_puredark_afw_camera(" capture_begin)
 string(FIND "${dxgi_proxy}"
-    "bool hydrate_streamline_dlss_callback_constants(" capture_end)
+    "int32_t capture_puredark_afw_dlss_inputs_from_resources(" capture_end)
 if(capture_begin EQUAL -1 OR capture_end EQUAL -1 OR
         NOT capture_begin LESS capture_end)
     message(FATAL_ERROR "Could not isolate the direct AFW camera capture")
