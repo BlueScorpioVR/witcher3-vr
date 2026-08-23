@@ -34,6 +34,10 @@
 #include "shadow_cascade_authority_policy.h"
 #include "taau_submission_policy.h"
 
+// V1365 unwraps Streamline's public command-list wrapper before V1352 records
+// its private AFW motion-normalization compute work. The public wrapper remains
+// the owner of slEvaluateFeature; raw D3D12 trampolines receive only a proven
+// native runtime command list and fail closed otherwise.
 // V1364 re-enters REDengine's original DLSS constants builder only when strict
 // Stereo has produced the exact current eye-1 constants but eye 0 is still
 // missing. It forwards only the engine-owned reset bit; no constants payload,
@@ -3485,6 +3489,7 @@ std::atomic<uint32_t> g_final_present_missing_route_logs{};
 // one place per map and is a no-op for already-native lists.
 ID3D12GraphicsCommandList* resolve_native_command_list(
     ID3D12GraphicsCommandList* command_list);
+bool command_list_is_d3d12_runtime(const void* object);
 
 void record_streamline_command_list_eye(
     ID3D12GraphicsCommandList* wrapped_command_list,
@@ -10039,8 +10044,16 @@ bool record_puredark_afw_motion_normalization_locked(
     uint32_t input_kind,
     w3vr::puredark_afw::TextureDesc& destination,
     std::wstring& error) {
-    if (command_list == nullptr ||
-        bundle_slot >= kPuredarkAfwBundleRingSize ||
+    // [FIX:STREAMLINE-AFW-NATIVE-RECORDING V1365 1/3] Every operation in this
+    // function is recorded either through a raw native D3D12 trampoline or
+    // directly on the same object. A public Streamline wrapper is therefore
+    // never a valid recording target, even if its virtual forwarding methods
+    // happen to work for other calls.
+    if (!command_list_is_d3d12_runtime(command_list)) {
+        error = L"AFW motion normalization requires a native D3D12 command list";
+        return false;
+    }
+    if (bundle_slot >= kPuredarkAfwBundleRingSize ||
         depth == nullptr || motion_vectors == nullptr ||
         destination.texture == nullptr ||
         (motion_format != DXGI_FORMAT_R16G16_FLOAT &&
@@ -37895,6 +37908,12 @@ int __fastcall hook_sl_evaluate_feature(
     if (streamline_snapshot_active) {
         const auto& snapshot = g_streamline_dlss_evaluate_snapshot;
         record_streamline_command_list_eye(command_list, eye);
+        // [FIX:STREAMLINE-AFW-NATIVE-RECORDING V1365 2/3] The public callback
+        // may carry sl.interposer's wrapper. Resolve the exact native list for
+        // private D3D12 recording while preserving command_buffer for the
+        // original public Streamline call below.
+        ID3D12GraphicsCommandList* const afw_recording_command_list =
+            resolve_native_command_list(command_list);
         if (callback_constants_valid) {
             public_jitter_applied =
                 resubmit_streamline_native_asymmetric_dlss_jitter(
@@ -37935,7 +37954,7 @@ int __fastcall hook_sl_evaluate_feature(
             }
             puredark_afw_bundle_slot =
                 capture_puredark_afw_dlss_inputs_from_resources(
-                    command_list,
+                    afw_recording_command_list,
                     snapshot.depth, snapshot.depth_state,
                     snapshot.motion_vectors, snapshot.motion_state,
                     snapshot.output,
@@ -37960,6 +37979,8 @@ int __fastcall hook_sl_evaluate_feature(
             frame_token, viewport, routed_viewport,
             static_cast<uint32_t>(puredark_afw_bundle_slot));
     }
+    // [FIX:STREAMLINE-AFW-NATIVE-RECORDING V1365 3/3] Streamline still owns
+    // its public wrapper ABI; only our private recording path is unwrapped.
     const int result = g_sl_evaluate_feature(
         command_buffer, feature, frame_token, routed_viewport);
     if (streamline_completion_active) {
@@ -39724,7 +39745,7 @@ void ensure_initialized() {
                 "focus_fire_b1=stereo_and_aer_centered_draw_proven "
                 "aer_taau_hud=scene_and_retained_pair_fail_open");
             log_line(
-                "witcher3vr dxgi proxy initialized build=V1364 base=V1363_dlss_per_eye_constants_builder "
+                "witcher3vr dxgi proxy initialized build=V1365 base=V1364_streamline_afw_native_command_list "
                 "anchor_smoothing_ini=%d anchor_smoothing_seconds=%.4f "
                 "first_person_strafe_ini=%d mode3_aer_presentation=%d raytracing_enabled=%d raytracing_history_buffers=%d "
                 "aer_afw_enabled=%d persistent_registry=%d dlss_public_streamline=%d "
@@ -39790,6 +39811,8 @@ void ensure_initialized() {
                 "V1363 dlss_scene_history_reset=removed_rejected_V1340 projection_switch_reset=V1331_only");
             log_line(
                 "V1364 strict_stereo_dlss_constants=original_builder_per_eye guard=state_0x6c peer_payload_replay=0 aer=unchanged route_flight=always_on_ram_f3");
+            log_line(
+                "V1365 streamline_afw_recording=native_unwrapped public_sl_evaluate=wrapper fail_closed_non_native=1");
             log_line(
                 "V1279 DLSS compatibility=public_streamline_aer_private_history_ngx_stereo legacy_module_agnostic_discovery=disabled_by_V1288");
             log_line(
@@ -47762,7 +47785,7 @@ void handle_f3_capture_hotkey(IDXGISwapChain* swapchain) {
     if (w3vr::pipeline_flight::enabled()) {
         w3vr::pipeline_flight::dump_last_ten_seconds();
     }
-    w3vr::route_flight::dump_last_seconds("V1364", 15);
+    w3vr::route_flight::dump_last_seconds("V1365", 15);
     trigger_renderdoc_capture(
         g_game_swapchain != nullptr ? g_game_swapchain : swapchain);
 }
