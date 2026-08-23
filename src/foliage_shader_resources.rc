@@ -1,0 +1,6 @@
+#include "foliage_shader_resources.h"
+
+IDR_W3VR_FOLIAGE_DISTANT_B12_VS RCDATA
+    "shaders\\foliage_distant_b12_orientation.dxil"
+IDR_W3VR_FOLIAGE_FROND_B12_VS RCDATA
+    "shaders\\foliage_frond_b12_orientation.dxil"

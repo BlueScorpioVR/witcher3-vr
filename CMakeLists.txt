@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(witcher3vr VERSION 0.1408.0 LANGUAGES C CXX)
+project(witcher3vr VERSION 0.1409.0 LANGUAGES C CXX RC)
 
 include(CTest)
 
@@ -44,6 +44,7 @@ add_library(witcher3vr_dxgi SHARED
     src/aer_scheduler.cpp
     src/dxgi_proxy.cpp
     src/dxgi_proxy.def
+    src/foliage_shader_resources.rc
     src/openxr_eye_geometry.cpp
     src/pipeline_flight_recorder.cpp
     src/route_flight_recorder.cpp
@@ -289,6 +290,36 @@ if(BUILD_TESTING)
         NAME renderer_cbv_descriptor_cache_policy
         COMMAND w3vr_cbv_descriptor_cache_policy_tests
     )
+
+    add_executable(w3vr_foliage_shader_orientation_policy_tests
+        tests/foliage_shader_orientation_policy_tests.cpp
+    )
+    target_include_directories(
+        w3vr_foliage_shader_orientation_policy_tests PRIVATE src)
+    add_test(
+        NAME renderer_foliage_shader_orientation_policy
+        COMMAND w3vr_foliage_shader_orientation_policy_tests
+    )
+
+    add_test(
+        NAME renderer_foliage_fixed_only_contract
+        COMMAND "${CMAKE_COMMAND}"
+            "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/foliage_fixed_only_contract.cmake"
+    )
+
+    set(W3VR_DXC_EXECUTABLE
+        "C:/Program Files (x86)/Windows Kits/10/bin/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/x64/dxc.exe")
+    if(EXISTS "${W3VR_DXC_EXECUTABLE}")
+        add_test(
+            NAME renderer_foliage_dxil_b12_load_contract
+            COMMAND "${CMAKE_COMMAND}"
+                "-DDXC_EXECUTABLE=${W3VR_DXC_EXECUTABLE}"
+                "-DDISTANT_SHADER=${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/foliage_distant_b12_orientation.dxil"
+                "-DFROND_SHADER=${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/foliage_frond_b12_orientation.dxil"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/foliage_dxil_b12_load_contract.cmake"
+        )
+    endif()
 
     add_test(
         NAME hud_editor_subtitle_preview_nudge_contract

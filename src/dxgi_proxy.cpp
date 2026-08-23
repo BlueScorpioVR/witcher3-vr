@@ -18,6 +18,8 @@
 #include "aer_scheduler.h"
 #include "cbv_descriptor_cache_policy.h"
 #include "cinema_aspect.h"
+#include "foliage_shader_orientation_policy.h"
+#include "foliage_shader_resources.h"
 #include "openxr_eye_geometry.h"
 #include "puredark_afw_bridge.h"
 #include "puredark_afw_camera.h"
@@ -34,6 +36,9 @@
 #include "shadow_cascade_authority_policy.h"
 #include "taau_submission_policy.h"
 
+// V1409 adds V18021's fixed-only foliage orientation replacement to V1408.
+// The two immutable corrected PSOs are always selected on an OpenXR HMD-
+// freelook route; the superseded V18020 runtime A/B is physically absent.
 // V1408 ports the complete V19005 clean-Mono route and its Mono-first launcher
 // onto V1391. Presentation Size retains V1391's final-OpenXR-only ownership;
 // no V1357/V19005 producer or swapchain slider dependency is restored.
@@ -289,6 +294,7 @@ HMODULE g_real_dxgi{};
 HMODULE g_real_d3d12{};
 HMODULE g_openxr_loader{};
 HMODULE g_dxcompiler{};
+HMODULE g_proxy_module{};
 HMODULE g_renderdoc_module{};
 RENDERDOC_API_1_6_0* g_renderdoc_api{};
 std::mutex g_renderdoc_api_mutex{};
@@ -1023,8 +1029,14 @@ bool common_renderer_pipeline_hooks_needed() {
     return supported_projection_transport_active();
 }
 
+bool foliage_shader_orientation_route_active() {
+    return w3vr::foliage_shader_orientation::route_active(
+        g_config.openxr_enabled, g_config.hmd_freelook);
+}
+
 bool renderer_hook_installation_needed() {
     return common_renderer_pipeline_hooks_needed() ||
+        foliage_shader_orientation_route_active() ||
         descriptor_metadata_hooks_needed() || graphics_binding_hooks_needed() ||
         temporal_compute_hooks_needed();
 }
@@ -3791,6 +3803,21 @@ struct PipelineInfo {
     BOOL front_counter_clockwise{};
     BOOL depth_clip_enable{};
 };
+
+// V18021/V1409 replaces the two exact foliage vertex shaders once at PSO
+// creation. Draw-time routing only swaps the immutable PSO pointer already
+// being bound; it performs no CBV read/copy, descriptor allocation, heap
+// switch or root-table replay.
+constexpr size_t kFoliageOrientationPipelineTableSize = 64;
+constexpr uintptr_t kFoliageOrientationPipelineClaimed = ~uintptr_t{};
+struct FoliageOrientationPipelineSlot {
+    std::atomic<uintptr_t> original{};
+    std::atomic<ID3D12PipelineState*> replacement{};
+};
+std::array<FoliageOrientationPipelineSlot,
+    kFoliageOrientationPipelineTableSize> g_foliage_orientation_pipelines{};
+std::atomic<uint32_t> g_foliage_orientation_creation_failure_logs{};
+std::atomic<uint32_t> g_foliage_orientation_route_logs{};
 
 // [FIX:NATIVE-TEMPORAL-TERRAIN-FAMILY V15018] The validated floors share one
 // exact VS/DS and PSO contract, use two known HS variants, and can vary their
@@ -14183,6 +14210,158 @@ void create_native_temporal_terrain_motion_replay_pso(
         original, replay, desc.pRootSignature, camera_source, camera_target);
 }
 
+size_t foliage_orientation_pipeline_slot_index(
+    ID3D12PipelineState* original) {
+    const auto bits = reinterpret_cast<uintptr_t>(original);
+    return ((bits >> 4) ^ (bits >> 13)) &
+        (kFoliageOrientationPipelineTableSize - 1);
+}
+
+bool map_foliage_orientation_pipeline(
+    ID3D12PipelineState* original,
+    ID3D12PipelineState* replacement) {
+    if (original == nullptr || replacement == nullptr) {
+        return false;
+    }
+    const auto key = reinterpret_cast<uintptr_t>(original);
+    const size_t base = foliage_orientation_pipeline_slot_index(original);
+    for (size_t probe = 0;
+         probe < kFoliageOrientationPipelineTableSize; ++probe) {
+        auto& slot = g_foliage_orientation_pipelines[
+            (base + probe) & (kFoliageOrientationPipelineTableSize - 1)];
+        auto current = slot.original.load(std::memory_order_acquire);
+        if (current == key) {
+            slot.replacement.store(replacement, std::memory_order_release);
+            return true;
+        }
+        if (current == kFoliageOrientationPipelineClaimed) {
+            YieldProcessor();
+            --probe;
+            continue;
+        }
+        if (current != 0 || !slot.original.compare_exchange_strong(
+                current, kFoliageOrientationPipelineClaimed,
+                std::memory_order_acq_rel, std::memory_order_acquire)) {
+            continue;
+        }
+        slot.replacement.store(replacement, std::memory_order_release);
+        slot.original.store(key, std::memory_order_release);
+        return true;
+    }
+    return false;
+}
+
+ID3D12PipelineState* lookup_foliage_orientation_pipeline(
+    ID3D12PipelineState* original) {
+    if (original == nullptr) {
+        return nullptr;
+    }
+    const auto key = reinterpret_cast<uintptr_t>(original);
+    const size_t base = foliage_orientation_pipeline_slot_index(original);
+    for (size_t probe = 0;
+         probe < kFoliageOrientationPipelineTableSize; ++probe) {
+        const auto& slot = g_foliage_orientation_pipelines[
+            (base + probe) & (kFoliageOrientationPipelineTableSize - 1)];
+        const auto current = slot.original.load(std::memory_order_acquire);
+        if (current == key) {
+            return slot.replacement.load(std::memory_order_acquire);
+        }
+        if (current == 0 || current == kFoliageOrientationPipelineClaimed) {
+            return nullptr;
+        }
+    }
+    return nullptr;
+}
+
+bool load_foliage_orientation_vertex_shader(
+    w3vr::foliage_shader_orientation::Owner owner,
+    D3D12_SHADER_BYTECODE& bytecode) {
+    int resource_id{};
+    switch (owner) {
+    case w3vr::foliage_shader_orientation::Owner::DistantTrees:
+        resource_id = IDR_W3VR_FOLIAGE_DISTANT_B12_VS;
+        break;
+    case w3vr::foliage_shader_orientation::Owner::NearFronds:
+        resource_id = IDR_W3VR_FOLIAGE_FROND_B12_VS;
+        break;
+    default:
+        return false;
+    }
+    if (g_proxy_module == nullptr) {
+        return false;
+    }
+    const auto resource = FindResourceW(
+        g_proxy_module, MAKEINTRESOURCEW(resource_id), MAKEINTRESOURCEW(10));
+    if (resource == nullptr) {
+        return false;
+    }
+    const auto size = SizeofResource(g_proxy_module, resource);
+    const auto loaded = LoadResource(g_proxy_module, resource);
+    const auto* data = loaded != nullptr ? LockResource(loaded) : nullptr;
+    if (data == nullptr || size == 0) {
+        return false;
+    }
+    bytecode = D3D12_SHADER_BYTECODE{data, size};
+    return true;
+}
+
+void create_foliage_orientation_pipeline(
+    ID3D12Device* device,
+    ID3D12PipelineState* original,
+    const D3D12_GRAPHICS_PIPELINE_STATE_DESC& desc,
+    const PipelineInfo& info,
+    w3vr::foliage_shader_orientation::Owner owner) {
+    if (device == nullptr || original == nullptr ||
+        owner == w3vr::foliage_shader_orientation::Owner::None) {
+        return;
+    }
+
+    D3D12_SHADER_BYTECODE replacement_vertex_shader{};
+    if (!load_foliage_orientation_vertex_shader(
+            owner, replacement_vertex_shader)) {
+        if (g_foliage_orientation_creation_failure_logs.fetch_add(
+                1, std::memory_order_relaxed) < 4) {
+            log_line(
+                "V1409 foliage embedded vertex shader unavailable owner=%u",
+                static_cast<unsigned>(owner));
+        }
+        return;
+    }
+
+    auto replacement_desc = desc;
+    replacement_desc.VS = replacement_vertex_shader;
+    replacement_desc.CachedPSO = {};
+    ID3D12PipelineState* replacement{};
+    const auto create_hr = g_create_graphics_pipeline_state(
+        device, &replacement_desc, IID_PPV_ARGS(&replacement));
+    if (FAILED(create_hr) || replacement == nullptr) {
+        if (g_foliage_orientation_creation_failure_logs.fetch_add(
+                1, std::memory_order_relaxed) < 4) {
+            log_line(
+                "V1409 foliage replacement PSO creation failed owner=%u hr=0x%08X",
+                static_cast<unsigned>(owner),
+                static_cast<unsigned>(create_hr));
+        }
+        return;
+    }
+    if (!map_foliage_orientation_pipeline(original, replacement)) {
+        replacement->Release();
+        if (g_foliage_orientation_creation_failure_logs.fetch_add(
+                1, std::memory_order_relaxed) < 4) {
+            log_line("V1409 foliage replacement PSO table full");
+        }
+        return;
+    }
+    {
+        std::scoped_lock lock{g_reverse_mutex};
+        g_pipeline_infos[replacement] = info;
+    }
+    log_line(
+        "V1409 foliage replacement PSO created owner=%u original=%p replacement=%p vs_bytes=%zu loads=b12_rows_4_6_yz,b12_row9_xyz draw_overhead=pointer_substitution",
+        static_cast<unsigned>(owner), original, replacement,
+        replacement_vertex_shader.BytecodeLength);
+}
+
 struct NativeTemporalTerrainCameraRestore {
     uint32_t kind{};
     uint32_t root{};
@@ -19773,7 +19952,9 @@ HRESULT STDMETHODCALLTYPE hook_create_graphics_pipeline_state(
     REFIID riid,
     void** pipeline_state) {
     const auto hr = g_create_graphics_pipeline_state(device, desc, riid, pipeline_state);
-    if ((!common_renderer_pipeline_hooks_needed() && !reverse_enabled()) ||
+    if ((!common_renderer_pipeline_hooks_needed() &&
+            !foliage_shader_orientation_route_active() &&
+            !reverse_enabled()) ||
         FAILED(hr) || desc == nullptr || pipeline_state == nullptr ||
         *pipeline_state == nullptr) {
         return hr;
@@ -19810,6 +19991,25 @@ HRESULT STDMETHODCALLTYPE hook_create_graphics_pipeline_state(
     // Create the motion-only correction beside the exact original terrain PSO.
     // Generated PSOs call the real function pointer and cannot recurse here.
     create_native_temporal_terrain_motion_replay_pso(device, pso, *desc);
+
+    const auto foliage_owner =
+        w3vr::foliage_shader_orientation::classify_owner(
+            info.vs_hash, info.ps_hash,
+            desc->HS.pShaderBytecode != nullptr &&
+                desc->HS.BytecodeLength != 0,
+            desc->DS.pShaderBytecode != nullptr &&
+                desc->DS.BytecodeLength != 0,
+            desc->GS.pShaderBytecode != nullptr &&
+                desc->GS.BytecodeLength != 0,
+            desc->PrimitiveTopologyType ==
+                D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE,
+            desc->DepthStencilState.DepthEnable != FALSE);
+    if (foliage_shader_orientation_route_active() &&
+        foliage_owner !=
+            w3vr::foliage_shader_orientation::Owner::None) {
+        create_foliage_orientation_pipeline(
+            device, pso, *desc, info, foliage_owner);
+    }
 
     const auto stereo_dump_candidate =
         (info.vs_hash == 0xEDFD76797EB58077ull && info.ps_hash == 0xBB5967B70E8594BFull) ||
@@ -21547,7 +21747,27 @@ void STDMETHODCALLTYPE hook_set_pipeline_state(
         }
     }
 
-    if (common_renderer_pipeline_hooks_needed() || reverse_enabled()) {
+    // V1409 always selects V18021's corrected immutable replacement. Native
+    // heaps, tables, CBVs and command-list resources remain untouched.
+    if (foliage_shader_orientation_route_active() &&
+        pipeline_state != nullptr) {
+        if (auto* replacement =
+                lookup_foliage_orientation_pipeline(pipeline_state)) {
+            bound_pipeline_state = replacement;
+            if (g_config.runtime_diagnostics &&
+                g_foliage_orientation_route_logs.fetch_add(
+                    1, std::memory_order_relaxed) < 16) {
+                log_line(
+                    "V1409 foliage replacement routed original=%p replacement=%p present=%llu",
+                    pipeline_state, replacement,
+                    static_cast<unsigned long long>(
+                        g_present_count.load(std::memory_order_relaxed)));
+            }
+        }
+    }
+
+    if (common_renderer_pipeline_hooks_needed() ||
+        foliage_shader_orientation_route_active() || reverse_enabled()) {
         const bool stored = store_command_list_pipeline(command_list, bound_pipeline_state);
         const bool legacy_pipeline_tracking =
             g_config.reverse_cbv_probe || g_config.reverse_stereo_probe ||
@@ -40952,7 +41172,7 @@ void ensure_initialized() {
                 "focus_fire_b1=stereo_and_aer_centered_draw_proven "
                 "aer_taau_hud=scene_and_retained_pair_fail_open");
             log_line(
-                "witcher3vr dxgi proxy initialized build=V1408 base=V1391_plus_V19005_clean_mono "
+                "witcher3vr dxgi proxy initialized build=V1409 base=V1408_plus_V18021_foliage_fixed_only "
                 "anchor_smoothing_ini=%d anchor_smoothing_seconds=%.4f "
                 "first_person_strafe_ini=%d mode3_aer_presentation=%d raytracing_enabled=%d raytracing_history_buffers=%d "
                 "aer_afw_enabled=%d persistent_registry=%d dlss_public_streamline=%d "
@@ -41036,6 +41256,8 @@ void ensure_initialized() {
                 "V1391 presentation_size=final_openxr_only producer_fov=raw_runtime temporal_dlss_afw=slider_independent swapchain_size=slider_independent final_presenter_hook=retained");
             log_line(
                 "V1408 clean_mono=V19005_net_port_from_V1357 launcher=mono_first schema=15 presentation_size=final_openxr_only mode3_v1391_preserved=1");
+            log_line(
+                "V1409 foliage=V18021_net_port_from_V1361 owners=5E2E73E55B072A74_7FC495F2BB36CAC0,F9282625E62BCC6A_5B6F5C6CA86B8C9D delivery=immutable_replacement_pso fixed=always_on runtime_ab=absent");
             log_line(
                 "V1279 DLSS compatibility=public_streamline_aer_private_history_ngx_stereo legacy_module_agnostic_discovery=disabled_by_V1288");
             log_line(
@@ -49338,7 +49560,7 @@ void handle_f3_capture_hotkey(IDXGISwapChain* swapchain) {
     if (w3vr::pipeline_flight::enabled()) {
         w3vr::pipeline_flight::dump_last_ten_seconds();
     }
-    w3vr::route_flight::dump_last_seconds("V1408", 15);
+    w3vr::route_flight::dump_last_seconds("V1409", 15);
     trigger_renderdoc_capture(
         g_game_swapchain != nullptr ? g_game_swapchain : swapchain);
 }
@@ -50402,6 +50624,7 @@ extern "C" HRESULT WINAPI DXGIDisableVBlankVirtualization() {
 
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, void* reserved) {
     if (reason == DLL_PROCESS_ATTACH) {
+        g_proxy_module = module;
         DisableThreadLibraryCalls(module);
     } else if (reason == DLL_PROCESS_DETACH) {
         // At process termination dependency teardown order is unspecified and
