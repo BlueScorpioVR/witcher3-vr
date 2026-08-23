@@ -34,6 +34,9 @@
 #include "shadow_cascade_authority_policy.h"
 #include "taau_submission_policy.h"
 
+// V1369 carries every private RT AO/SIGMA/REBLUR history use across its exact
+// submitting queue. Readers wait on the last physical owner, and pair metadata
+// becomes visible only with the post-Execute fence that produced its pixels.
 // V1368 publishes packed scene captures only after their exact command list is
 // submitted and transfers the producing queue's GPU ownership to OpenXR. Ring
 // reuse follows the last producer or packed-cache consumer fence carried by
@@ -4638,6 +4641,34 @@ struct RtHistoryTransaction {
     bool current_camera_valid{};
     bool private_ready{};
 };
+enum class RtPrivateHistoryFamily : uint8_t {
+    Ao,
+    Shadow,
+    Specular,
+};
+struct RtPrivateHistoryGpuOwner {
+    ID3D12CommandQueue* queue{};
+    ID3D12Fence* fence{};
+    uint64_t fence_value{};
+    uint32_t generation{};
+    uint64_t pair_id{};
+};
+// [FIX:CROSS-QUEUE-RT-HISTORY-OWNERSHIP V1369 1/7] Every recorded read or
+// write carries its exact private slot. Execute resolves the preceding physical
+// owner, queues any cross-queue wait, then publishes the new owner only after
+// the real submission has a producer timeline.
+struct RtPrivateHistoryPendingUse {
+    RtPrivateHistoryFamily family{RtPrivateHistoryFamily::Ao};
+    uint32_t eye{UINT32_MAX};
+    size_t slot{kRtInvalidHistorySlot};
+    uint32_t generation{};
+    uint64_t pair_id{};
+    bool publish_pair{};
+};
+std::mutex g_rt_private_history_submission_mutex{};
+std::unordered_map<ID3D12CommandList*,
+    std::vector<RtPrivateHistoryPendingUse>>
+    g_rt_private_history_pending_uses{};
 constexpr std::array<UINT, kRtAoHistoryPlaneCount>
     kRtAoHistorySrvOffsets{3, 4, 6};
 constexpr std::array<UINT, kRtAoPermanentPlaneCount>
@@ -4659,6 +4690,8 @@ std::array<DXGI_FORMAT, kRtAoHistoryPlaneCount>
 uint32_t g_rt_ao_history_generation{};
 std::array<std::array<uint64_t, kRtHistorySlotCapacity>, 2>
     g_rt_ao_history_pairs{};
+std::array<std::array<RtPrivateHistoryGpuOwner,
+    kRtHistorySlotCapacity>, 2> g_rt_ao_history_owners{};
 std::array<RtHistoryTransaction, 2> g_rt_ao_history_transactions{};
 struct RtAoCameraHistory {
     std::array<float, 16> current_world_to_view{};
@@ -4696,6 +4729,8 @@ DXGI_FORMAT g_rt_shadow_history_view_format{DXGI_FORMAT_UNKNOWN};
 uint32_t g_rt_shadow_history_generation{};
 std::array<std::array<uint64_t, kRtHistorySlotCapacity>, 2>
     g_rt_shadow_history_pairs{};
+std::array<std::array<RtPrivateHistoryGpuOwner,
+    kRtHistorySlotCapacity>, 2> g_rt_shadow_history_owners{};
 std::array<RtHistoryTransaction, 2> g_rt_shadow_history_transactions{};
 // The 208C REBLUR reader consumes four permanent predecessor planes at
 // t3/t4/t5/t7.
@@ -4725,6 +4760,8 @@ std::array<DXGI_FORMAT, kRtSpecularHistoryPlaneCount>
 uint32_t g_rt_specular_history_generation{};
 std::array<std::array<uint64_t, kRtHistorySlotCapacity>, 2>
     g_rt_specular_history_pairs{};
+std::array<std::array<RtPrivateHistoryGpuOwner,
+    kRtHistorySlotCapacity>, 2> g_rt_specular_history_owners{};
 uint32_t g_rt_specular_last_eye{UINT32_MAX};
 uint64_t g_rt_specular_last_pair{};
 uint32_t g_rt_specular_last_generation{};
@@ -6369,6 +6406,35 @@ size_t select_rt_history_write_slot(
     return oldest_slot;
 }
 
+// [FIX:CROSS-QUEUE-RT-HISTORY-OWNERSHIP V1369 5/7] CPU pair lineage admits a
+// private read only when the pixels carry the matching submitted GPU owner.
+bool rt_private_history_owner_matches(
+    const RtPrivateHistoryGpuOwner& owner,
+    uint32_t generation,
+    uint64_t pair_id) {
+    return owner.queue != nullptr && owner.fence != nullptr &&
+        owner.fence_value != 0 && owner.fence_value != UINT64_MAX &&
+        owner.generation == generation && owner.pair_id == pair_id;
+}
+
+void track_rt_private_history_use(
+    ID3D12GraphicsCommandList* command_list,
+    RtPrivateHistoryFamily family,
+    uint32_t eye,
+    size_t slot,
+    uint32_t generation,
+    uint64_t pair_id,
+    bool publish_pair) {
+    if (command_list == nullptr || eye > 1 ||
+        slot >= rt_history_slot_count() || pair_id == 0 ||
+        pair_id == UINT64_MAX) {
+        return;
+    }
+    std::scoped_lock lock{g_rt_private_history_submission_mutex};
+    g_rt_private_history_pending_uses[command_list].push_back({
+        family, eye, slot, generation, pair_id, publish_pair});
+}
+
 bool ensure_rt_ao_eye_histories_locked(
     const std::array<ResourceDescriptorInfo,
         kRtAoHistoryPlaneCount>& sources) {
@@ -7336,7 +7402,10 @@ bool dispatch_rt_symmetric_dlss_per_eye_ao_output_publish(
             : nullptr;
         const bool texture_ready =
             previous_history_slot < rt_history_slot_count() &&
-            private_pair == camera_previous_pair;
+            private_pair == camera_previous_pair &&
+            rt_private_history_owner_matches(
+                g_rt_ao_history_owners[eye][previous_history_slot],
+                generation, camera_previous_pair);
         auto& transaction = g_rt_ao_history_transactions[eye];
         transaction = {};
         transaction.pair_id = pair_id;
@@ -7533,6 +7602,20 @@ bool dispatch_rt_symmetric_dlss_per_eye_ao_output_publish(
         D3D12_GPU_DESCRIPTOR_HANDLE{private_gpu.ptr +
             static_cast<UINT64>(kTiledCullingUavOffset) *
                 g_tiled_culling_descriptor_increment});
+    if (reader) {
+        // Hide the destination's old logical pair while this command list
+        // overwrites its permanent planes. The exact submitted use will own
+        // the physical resource even before the later AO output copy publishes
+        // the complete pair.
+        g_rt_ao_history_pairs[eye][current_history_slot] = UINT64_MAX;
+        track_rt_private_history_use(
+            command_list, RtPrivateHistoryFamily::Ao,
+            eye, previous_history_slot, generation,
+            g_rt_ao_history_transactions[eye].previous_pair_id, false);
+        track_rt_private_history_use(
+            command_list, RtPrivateHistoryFamily::Ao,
+            eye, current_history_slot, generation, pair_id, false);
+    }
     g_dispatch(command_list, x, y, z);
 
     if (reader) {
@@ -7608,7 +7691,12 @@ bool dispatch_rt_symmetric_dlss_per_eye_ao_output_publish(
             restore_after_copy.data());
         const uint64_t previous_private_pair =
             g_rt_ao_history_pairs[eye][current_history_slot];
-        g_rt_ao_history_pairs[eye][current_history_slot] = pair_id;
+        // [FIX:CROSS-QUEUE-RT-HISTORY-OWNERSHIP V1369 2/7] CPU pair metadata
+        // is no longer ahead of its CopyResource. Execute publishes the pair
+        // together with the exact producer fence.
+        track_rt_private_history_use(
+            command_list, RtPrivateHistoryFamily::Ao,
+            eye, current_history_slot, generation, pair_id, true);
         // [DIAG:RT-LINEAGE-CENSUS V1165 4/5] Prove whether 0607 actually
         // seeds/advances the private t6 plane after a lifecycle gap.
         if (g_config.runtime_diagnostics &&
@@ -7798,7 +7886,10 @@ bool dispatch_rt_symmetric_dlss_per_eye_sigma_shadow_history(
             : 0;
         const bool texture_ready =
             previous_history_slot < rt_history_slot_count() &&
-            private_pair == camera.previous_pair_id;
+            private_pair == camera.previous_pair_id &&
+            rt_private_history_owner_matches(
+                g_rt_shadow_history_owners[eye][previous_history_slot],
+                generation, camera.previous_pair_id);
         const bool camera_ready = camera.initialized &&
             camera.translation_valid &&
             camera.generation == generation && camera.pair_id == pair_id &&
@@ -7921,6 +8012,11 @@ bool dispatch_rt_symmetric_dlss_per_eye_sigma_shadow_history(
             D3D12_GPU_DESCRIPTOR_HANDLE{private_gpu.ptr +
                 static_cast<UINT64>(kTiledCullingUavOffset) *
                     g_tiled_culling_descriptor_increment});
+        g_rt_shadow_history_pairs[eye][current_history_slot] = UINT64_MAX;
+        track_rt_private_history_use(
+            command_list, RtPrivateHistoryFamily::Shadow,
+            eye, previous_history_slot, generation,
+            transaction.previous_pair_id, false);
         g_dispatch(command_list, x, y, z);
 
         D3D12_RESOURCE_BARRIER to_write = to_read;
@@ -8165,7 +8261,9 @@ bool dispatch_rt_symmetric_dlss_per_eye_sigma_shadow_history(
     command_list->ResourceBarrier(
         static_cast<UINT>(restore_after_copy.size()),
         restore_after_copy.data());
-    g_rt_shadow_history_pairs[eye][current_history_slot] = pair_id;
+    track_rt_private_history_use(
+        command_list, RtPrivateHistoryFamily::Shadow,
+        eye, current_history_slot, generation, pair_id, true);
 
     record_rt_flight(
         w3vr::rt_flight::EventCode::ShadowWriterComplete,
@@ -8390,8 +8488,10 @@ bool dispatch_rt_symmetric_dlss_per_eye_specular_history(
         command_list->ResourceBarrier(
             static_cast<UINT>(restore_after_copy.size()),
             restore_after_copy.data());
-        g_rt_specular_history_pairs[completed_eye]
-            [completed_history_slot] = g_rt_specular_last_pair;
+        track_rt_private_history_use(
+            command_list, RtPrivateHistoryFamily::Specular,
+            completed_eye, completed_history_slot, generation,
+            g_rt_specular_last_pair, true);
     }
 
     RtAoCameraHistory camera{};
@@ -8405,6 +8505,9 @@ bool dispatch_rt_symmetric_dlss_per_eye_specular_history(
     const size_t current_history_slot = select_rt_history_write_slot(
         g_rt_specular_history_pairs[eye], pair_id,
         previous_history_slot);
+    if (current_history_slot < rt_history_slot_count()) {
+        g_rt_specular_history_pairs[eye][current_history_slot] = UINT64_MAX;
+    }
 
     // Same-eye duplicates do not create a new stable public owner. Older
     // slots stay physically intact, but their exact pair IDs make them
@@ -8422,7 +8525,10 @@ bool dispatch_rt_symmetric_dlss_per_eye_specular_history(
         : 0;
     const bool texture_ready =
         previous_history_slot < rt_history_slot_count() &&
-        private_pair == camera.previous_pair_id;
+        private_pair == camera.previous_pair_id &&
+        rt_private_history_owner_matches(
+            g_rt_specular_history_owners[eye][previous_history_slot],
+            generation, camera.previous_pair_id);
     const bool camera_ready = camera.initialized &&
         camera.translation_valid && camera.generation == generation &&
         camera.pair_id == pair_id &&
@@ -8562,6 +8668,10 @@ bool dispatch_rt_symmetric_dlss_per_eye_specular_history(
         D3D12_GPU_DESCRIPTOR_HANDLE{private_gpu.ptr +
             static_cast<UINT64>(kTiledCullingUavOffset) *
                 g_tiled_culling_descriptor_increment});
+    track_rt_private_history_use(
+        command_list, RtPrivateHistoryFamily::Specular,
+        eye, previous_history_slot, generation,
+        camera.previous_pair_id, false);
     g_dispatch(command_list, x, y, z);
 
     std::array<D3D12_RESOURCE_BARRIER, kRtSpecularHistoryPlaneCount>
@@ -18796,6 +18906,179 @@ void publish_streamline_capture_submissions(
     }
 }
 
+std::vector<RtPrivateHistoryPendingUse>
+take_rt_private_history_submissions(
+    UINT num_command_lists,
+    ID3D12CommandList* const* command_lists) {
+    std::vector<RtPrivateHistoryPendingUse> uses{};
+    if (command_lists == nullptr) {
+        return uses;
+    }
+    std::scoped_lock lock{g_rt_private_history_submission_mutex};
+    for (UINT index = 0; index < num_command_lists; ++index) {
+        const auto found = g_rt_private_history_pending_uses.find(
+            command_lists[index]);
+        if (found == g_rt_private_history_pending_uses.end()) {
+            continue;
+        }
+        uses.insert(uses.end(), found->second.begin(), found->second.end());
+        g_rt_private_history_pending_uses.erase(found);
+    }
+    return uses;
+}
+
+bool snapshot_rt_private_history_owner(
+    const RtPrivateHistoryPendingUse& use,
+    RtPrivateHistoryGpuOwner& owner) {
+    if (use.eye > 1 || use.slot >= rt_history_slot_count()) {
+        return false;
+    }
+    switch (use.family) {
+    case RtPrivateHistoryFamily::Ao: {
+        std::scoped_lock lock{g_rt_ao_history_mutex};
+        owner = g_rt_ao_history_owners[use.eye][use.slot];
+        break;
+    }
+    case RtPrivateHistoryFamily::Shadow: {
+        std::scoped_lock lock{g_rt_shadow_history_mutex};
+        owner = g_rt_shadow_history_owners[use.eye][use.slot];
+        break;
+    }
+    case RtPrivateHistoryFamily::Specular: {
+        std::scoped_lock lock{g_rt_specular_history_mutex};
+        owner = g_rt_specular_history_owners[use.eye][use.slot];
+        break;
+    }
+    default:
+        return false;
+    }
+    return owner.queue != nullptr && owner.fence != nullptr &&
+        owner.fence_value != 0 && owner.fence_value != UINT64_MAX;
+}
+
+// [FIX:CROSS-QUEUE-RT-HISTORY-OWNERSHIP V1369 3/7] Queue waits are attached
+// to the consumer's real Execute call, not to recording order. Every use waits
+// on the last physical owner of that slot; same-queue FIFO remains the fast
+// path and independent queues receive an exact GPU dependency.
+bool order_rt_private_history_submission(
+    ID3D12CommandQueue* consumer_queue,
+    const std::vector<RtPrivateHistoryPendingUse>& uses) {
+    if (uses.empty()) {
+        return true;
+    }
+    if (consumer_queue == nullptr) {
+        return false;
+    }
+    std::vector<std::pair<ID3D12Fence*, uint64_t>> queued_waits{};
+    for (const auto& use : uses) {
+        RtPrivateHistoryGpuOwner owner{};
+        if (!snapshot_rt_private_history_owner(use, owner) ||
+            owner.queue == consumer_queue) {
+            continue;
+        }
+        const bool already_covered = std::any_of(
+            queued_waits.begin(), queued_waits.end(),
+            [&](const auto& wait) {
+                return wait.first == owner.fence &&
+                    wait.second >= owner.fence_value;
+            });
+        if (already_covered) {
+            continue;
+        }
+        const HRESULT wait_result = consumer_queue->Wait(
+            owner.fence, owner.fence_value);
+        if (FAILED(wait_result)) {
+            log_line(
+                "V1369 RT history cross-queue wait failed consumer=%p "
+                "producer=%p fence=%p value=%llu hr=0x%08X",
+                consumer_queue, owner.queue, owner.fence,
+                static_cast<unsigned long long>(owner.fence_value),
+                static_cast<unsigned>(wait_result));
+            return false;
+        }
+        queued_waits.emplace_back(owner.fence, owner.fence_value);
+    }
+    if (!queued_waits.empty()) {
+        static std::atomic<uint64_t> wait_count{};
+        const uint64_t count = wait_count.fetch_add(
+            queued_waits.size(), std::memory_order_relaxed) +
+            queued_waits.size();
+        if (count <= 32 || (count % 240) < queued_waits.size()) {
+            log_line(
+                "V1369 RT history cross-queue waits total=%llu "
+                "consumer=%p waits=%zu uses=%zu",
+                static_cast<unsigned long long>(count), consumer_queue,
+                queued_waits.size(), uses.size());
+        }
+    }
+    return true;
+}
+
+// [FIX:CROSS-QUEUE-RT-HISTORY-OWNERSHIP V1369 6/7] Pair readiness and physical
+// ownership are one post-Execute publication. A recording-time pair can no
+// longer escape before the private copy/dispatch which produced it.
+void publish_rt_private_history_submissions(
+    ID3D12CommandQueue* producer_queue,
+    const std::vector<RtPrivateHistoryPendingUse>& uses,
+    bool submission_ordered,
+    ID3D12Fence* producer_fence,
+    uint64_t producer_fence_value) {
+    if (uses.empty()) {
+        return;
+    }
+    const bool owner_valid = submission_ordered && producer_queue != nullptr &&
+        producer_fence != nullptr && producer_fence_value != 0;
+    if (!owner_valid) {
+        log_line(
+            "V1369 RT history publication rejected producer=%p "
+            "ordered=%u fence=%p value=%llu uses=%zu",
+            producer_queue, submission_ordered ? 1u : 0u,
+            producer_fence,
+            static_cast<unsigned long long>(producer_fence_value),
+            uses.size());
+        return;
+    }
+    const RtPrivateHistoryGpuOwner make_owner_base{
+        producer_queue, producer_fence, producer_fence_value, 0, 0};
+    for (const auto& use : uses) {
+        if (use.eye > 1 || use.slot >= rt_history_slot_count()) {
+            continue;
+        }
+        auto owner = make_owner_base;
+        owner.generation = use.generation;
+        owner.pair_id = use.pair_id;
+        switch (use.family) {
+        case RtPrivateHistoryFamily::Ao: {
+            std::scoped_lock lock{g_rt_ao_history_mutex};
+            g_rt_ao_history_owners[use.eye][use.slot] = owner;
+            if (use.publish_pair &&
+                g_rt_ao_history_generation == use.generation) {
+                g_rt_ao_history_pairs[use.eye][use.slot] = use.pair_id;
+            }
+            break;
+        }
+        case RtPrivateHistoryFamily::Shadow: {
+            std::scoped_lock lock{g_rt_shadow_history_mutex};
+            g_rt_shadow_history_owners[use.eye][use.slot] = owner;
+            if (use.publish_pair &&
+                g_rt_shadow_history_generation == use.generation) {
+                g_rt_shadow_history_pairs[use.eye][use.slot] = use.pair_id;
+            }
+            break;
+        }
+        case RtPrivateHistoryFamily::Specular: {
+            std::scoped_lock lock{g_rt_specular_history_mutex};
+            g_rt_specular_history_owners[use.eye][use.slot] = owner;
+            if (use.publish_pair &&
+                g_rt_specular_history_generation == use.generation) {
+                g_rt_specular_history_pairs[use.eye][use.slot] = use.pair_id;
+            }
+            break;
+        }
+        }
+    }
+}
+
 void STDMETHODCALLTYPE hook_execute_command_lists(
     ID3D12CommandQueue* queue,
     UINT num_command_lists,
@@ -18849,6 +19132,11 @@ void STDMETHODCALLTYPE hook_execute_command_lists(
     // their command-list identity before post-submit ownership is attached.
     auto streamline_capture_pending = take_streamline_capture_submissions(
         num_command_lists, command_lists);
+    auto rt_private_history_uses = take_rt_private_history_submissions(
+        num_command_lists, command_lists);
+    const bool rt_history_dependencies_ordered =
+        order_rt_private_history_submission(
+            queue, rt_private_history_uses);
     const bool deferred_cross_queue_hud_publication =
         queue != g_command_queue && !aer_afw_hud_pending.empty();
     // [PERF:AER-AFW-HUD-PREEXECUTE-PUBLISH V1285 1/4] Pointer-exact labels
@@ -18890,11 +19178,17 @@ void STDMETHODCALLTYPE hook_execute_command_lists(
         publish_taau_cache_submissions(taau_cache_pending);
         ID3D12Fence* capture_fence{};
         uint64_t capture_fence_value{};
-        const bool capture_ordered = streamline_capture_pending.empty() ||
+        const bool capture_ordered =
+            (streamline_capture_pending.empty() &&
+                rt_private_history_uses.empty()) ||
             signal_private_resource_queue_timeline(
                 queue, capture_fence, capture_fence_value);
         publish_streamline_capture_submissions(
             queue, streamline_capture_pending, capture_ordered,
+            capture_fence, capture_fence_value);
+        publish_rt_private_history_submissions(
+            queue, rt_private_history_uses,
+            capture_ordered && rt_history_dependencies_ordered,
             capture_fence, capture_fence_value);
         return;
     }
@@ -19093,12 +19387,17 @@ void STDMETHODCALLTYPE hook_execute_command_lists(
     ID3D12Fence* private_resource_fence{};
     uint64_t private_resource_fence_value{};
     const bool private_resource_ordered =
-        (taau_slot_uses.empty() && streamline_capture_pending.empty()) ||
+        (taau_slot_uses.empty() && streamline_capture_pending.empty() &&
+            rt_private_history_uses.empty()) ||
         signal_private_resource_queue_timeline(
             queue, private_resource_fence,
             private_resource_fence_value);
     publish_streamline_capture_submissions(
         queue, streamline_capture_pending, private_resource_ordered,
+        private_resource_fence, private_resource_fence_value);
+    publish_rt_private_history_submissions(
+        queue, rt_private_history_uses,
+        private_resource_ordered && rt_history_dependencies_ordered,
         private_resource_fence, private_resource_fence_value);
     if (!taau_slot_uses.empty()) {
         // [FIX:PER-QUEUE-PRIVATE-SLOT-RETIREMENT V1367 3/5] This signal is
@@ -20499,6 +20798,14 @@ HRESULT STDMETHODCALLTYPE hook_reset_command_list(
             }
             g_streamline_capture_pending_publications.erase(found);
         }
+    }
+    // [FIX:CROSS-QUEUE-RT-HISTORY-OWNERSHIP V1369 4/7] A Reset without
+    // Execute owns no GPU history use and therefore cannot publish a fence or
+    // pair. Any destination already hidden with UINT64_MAX remains safely
+    // unavailable until a later complete transaction rewrites it.
+    {
+        std::scoped_lock lock{g_rt_private_history_submission_mutex};
+        g_rt_private_history_pending_uses.erase(command_list);
     }
     // [FIX:AER-CINEMA-EXACT-EYE-CONTRACT V1214 6/12] A recycled command
     // list cannot inherit the render identity of its preceding recording.
@@ -40182,7 +40489,7 @@ void ensure_initialized() {
                 "focus_fire_b1=stereo_and_aer_centered_draw_proven "
                 "aer_taau_hud=scene_and_retained_pair_fail_open");
             log_line(
-                "witcher3vr dxgi proxy initialized build=V1368 base=V1367_cross_queue_scene_capture_ownership "
+                "witcher3vr dxgi proxy initialized build=V1369 base=V1368_cross_queue_rt_history_ownership "
                 "anchor_smoothing_ini=%d anchor_smoothing_seconds=%.4f "
                 "first_person_strafe_ini=%d mode3_aer_presentation=%d raytracing_enabled=%d raytracing_history_buffers=%d "
                 "aer_afw_enabled=%d persistent_registry=%d dlss_public_streamline=%d "
@@ -40259,6 +40566,9 @@ void ensure_initialized() {
             // [FIX:CROSS-QUEUE-SCENE-CAPTURE-OWNERSHIP V1368 7/7]
             log_line(
                 "V1368 scene_capture_ownership=post_execute_publication producer_to_primary_wait=exact per_resource_last_use_fence=1 ring_reuse=retired_only failure=closed");
+            // [FIX:CROSS-QUEUE-RT-HISTORY-OWNERSHIP V1369 7/7]
+            log_line(
+                "V1369 rt_private_history_ownership=per_slot_last_submitted_queue cross_queue_consumer_wait=exact pair_publication=post_execute ao_sigma_reblur=1 failure=closed");
             log_line(
                 "V1279 DLSS compatibility=public_streamline_aer_private_history_ngx_stereo legacy_module_agnostic_discovery=disabled_by_V1288");
             log_line(
@@ -48390,7 +48700,7 @@ void handle_f3_capture_hotkey(IDXGISwapChain* swapchain) {
     if (w3vr::pipeline_flight::enabled()) {
         w3vr::pipeline_flight::dump_last_ten_seconds();
     }
-    w3vr::route_flight::dump_last_seconds("V1368", 15);
+    w3vr::route_flight::dump_last_seconds("V1369", 15);
     trigger_renderdoc_capture(
         g_game_swapchain != nullptr ? g_game_swapchain : swapchain);
 }
