@@ -283,7 +283,7 @@ void UpdateModeControls() {
     }
     EnableWindow(Item(IdRayTracing), ray_tracing_available);
     const bool native_stereo_available = selected_valid &&
-        w3vr::ModeUsesStereo(selected_mode);
+        w3vr::ModeSupportsAsymmetricProjection(selected_mode);
     EnableWindow(Item(IdNativeStereo), native_stereo_available);
     EnableWindow(Item(IdPresentationScale), TRUE);
     UpdateTrackLabels();
@@ -982,9 +982,9 @@ void CreateInterface(HWND window) {
 
     AddTooltip(AddControl(L"BUTTON", L"Startup rendering", BS_GROUPBOX,
         20, 18, 680, 142),
-        L"Select the stereo producer, headset render resolution, DLSS quality, and the safe Ray Tracing route used at game startup.");
+        L"Select the render route, headset render resolution, DLSS quality, and the safe Ray Tracing route used at game startup.");
     AddTooltips(
-        L"AER + AFW uses PureDark AFW to generate the missing eye from alternating real eyes. It is the highest-performance route with minimal artifacts. Stereo renders both eyes and is steadier, but costs more GPU time.",
+        L"AER + AFW uses PureDark AFW to generate the missing eye from alternating real eyes. Stereo renders both eyes. Mono uses one clean cyclopean producer for both headset views, without eye separation, stereo tick locks, or AFW.",
         {AddLabel(L"Render mode", 38, 40, 150, 22),
          AddCombo(190, 36, 260, IdMode)});
     AddTooltips(
@@ -1094,7 +1094,7 @@ void CreateInterface(HWND window) {
     AddTooltip(AddControl(L"BUTTON", L"Asymmetric Projection (Experimental)",
         BS_AUTOCHECKBOX | WS_TABSTOP, 38, 562, 610, 26,
         IdNativeStereo),
-        L"Improves image quality at zero performance cost by matching the projection to your headset. The improvement depends on the headset and may be minimal or negligible on some models. Because it is experimental, it may cause visual artifacts or duplicated shader effects. It works with both AER + AFW and Stereo.");
+        L"Matches presentation to each headset view's optical field of view. It is available with AER + AFW, Stereo, and Mono; Mono remains a single cyclopean producer and applies the per-view optical FOV only at submit. The improvement depends on the headset and may be minimal on some models. Because it is experimental, it may cause visual artifacts or duplicated shader effects.");
     AddTooltip(AddControl(L"BUTTON", L"Diagnostic Logging",
         BS_AUTOCHECKBOX | WS_TABSTOP, 38, 594, 300, 26,
         IdDiagnosticLogging),

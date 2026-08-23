@@ -146,11 +146,12 @@ The bundled Fast Transitions DLC remains installed, while the launcher option
 enable flag. It is enabled by default and can be disabled without removing or
 renaming any files; the change applies on the next game launch.
 
-The launcher exposes only the implemented **AER + AFW - TAAU** and
-**AER + AFW - DLSS** routes; AER without AA is omitted because PureDark AFW is
-not implemented for that backend. AER + AFW uses PureDark alternating-eye
-frame generation for the highest-performance route with minimal artifacts,
-while Stereo renders both eyes for the most stable result.
+The launcher exposes two **AER + AFW** routes, three **Stereo** routes, and
+three **Mono** routes, with No AA / FXAA, TAAU, or DLSS wherever supported.
+AER without AA is omitted because PureDark AFW is not implemented for that
+backend. AER + AFW uses PureDark alternating-eye frame generation, Stereo
+renders both eyes, and Mono uses one clean cyclopean producer for both headset
+views without eye separation, stereo tick locks, or AFW.
 
 The **Ray Tracing** option owns both REDengine's master switch and the
 Witcher 3 VR renderer flag. It can be enabled with **AER + AFW - TAAU** or
@@ -165,9 +166,12 @@ current recommended per-eye dimensions and writes that exact resolution to
 both REDengine and `witcher3vr.ini`. The saved dimensions remain visible while
 the manual dropdown is disabled. Cinema defaults to 5:4 framing and can be
 switched to 4:3. Older INIs receive a one-time configuration update
-that preserves the selected rendering mode, resolution, Full VR cutscene
-choice, and unrelated custom settings. Later manual tuning is not overwritten
-at launcher startup.
+that preserves the effective rendering route, resolution, Full VR cutscene
+choice, and unrelated custom settings. In particular, old Mode 1 migrates to
+Mode-3 AER, an explicit Mode 2 from schemas V8-V14 migrates to the new clean
+Mode-1 Mono route, and old Mode 4 migrates to Mode-3 Stereo. Earlier schemas
+retain their historical Mode 1/2-to-AER migration. Later manual tuning is not
+overwritten at launcher startup.
 
 Disable **AUTO** to use the three manual resolution presets intended for
 Quest 3 with Virtual Desktop, or select **Custom**. If the runtime returns a
@@ -190,11 +194,11 @@ close to the lenses, the borders are practically invisible.
 
 The presentation controls remain independent:
 
-- **Asymmetric Projection** enables native off-axis stereo geometry for every
-  AER + AFW and Stereo No AA/TAAU/DLSS choice. Presentation Size remains adjustable: the
-  renderer scales each eye's off-axis FOV around its optical center and submits
-  that exact scaled FOV through the same presentation path. It is enabled by
-  default.
+- **Asymmetric Projection** uses each OpenXR view's optical FOV for every AER
+  + AFW, Stereo, and Mono choice. Presentation Size remains adjustable: the
+  renderer scales each view's FOV around its optical center and submits it
+  through the same presentation path. Mono remains a single cyclopean producer;
+  ASYM does not turn it into per-eye geometry. It is enabled by default.
 - **Fullscreen Projection** changes the presentation method for every render
   mode. It defaults to off, so all modes use the validated legacy presenter.
 

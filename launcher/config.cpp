@@ -16,7 +16,10 @@
 namespace w3vr {
 namespace {
 
-constexpr std::array<ModeSettings, 5> kModes{{
+constexpr std::array<ModeSettings, 8> kModes{{
+    {1, false, false, "none", 0, false},
+    {1, false, false, "taau", 3, false},
+    {1, false, false, "dlss", 6, true},
     {3, true, true, "taau", 3, false},
     {3, true, true, "dlss", 6, true},
     {3, true, false, "none", 0, false},
@@ -24,7 +27,7 @@ constexpr std::array<ModeSettings, 5> kModes{{
     {3, true, false, "dlss", 6, true},
 }};
 
-constexpr int kCurrentConfigVersion = 14;
+constexpr int kCurrentConfigVersion = 15;
 constexpr char kDefaultRayTracingHistoryBuffers[] = "8";
 constexpr float kCinemaHudReferenceScale = 1.30f;
 constexpr int kCinemaHudReferenceShift = -72;
@@ -322,29 +325,31 @@ void MigrateConfigurationToV11(IniDocument& ini) {
 }
 
 void NormalizeLauncherOwnedConfiguration(IniDocument& ini) {
-    // Every supported launcher mode now uses the validated Mode-3 dual-render
-    // producer. Repair stale route fragments left by older launchers without
-    // touching user-owned resolution, HUD or renderer-tuning values.
+    // The launcher owns the complete route tuple. Mode 1 is clean Mono and
+    // Mode 3 is the validated dual-render producer used by AER and Stereo.
+    // Repair stale fragments without touching user-owned resolution, HUD or
+    // renderer-tuning values.
     auto backend = ReadString(ini, "engine", "temporal_backend", "none");
     if (backend == "dlss_packed") backend = "dlss";
     if (backend != "none" && backend != "taau" && backend != "dlss") {
         backend = "none";
     }
-    bool aer = ReadBool(
+    const bool mono = ReadInt(ini, "openxr", "mode", 3) == 1;
+    bool aer = !mono && ReadBool(
         ini, "openxr", "mode3_aer_presentation", false);
     if (backend == "none") aer = false;
 
     ini.Set("openxr", "enabled", "1");
-    ini.Set("openxr", "mode", "3");
+    ini.Set("openxr", "mode", mono ? "1" : "3");
     ini.Set("openxr", "mode3_aer_presentation", aer ? "1" : "0");
     ini.Set("openxr", "resolution_auto",
         ReadBool(ini, "openxr", "resolution_auto", true) ? "1" : "0");
     ini.Set("engine", "temporal_backend", backend);
-    ini.Set("engine", "dual_render_probe", "1");
-    ini.Set("engine", "dual_render_start", "1");
+    ini.Set("engine", "dual_render_probe", mono ? "0" : "1");
+    ini.Set("engine", "dual_render_start", mono ? "0" : "1");
     ini.Set("engine", "menu_state_probe", "1");
 
-    const bool ray_tracing = aer &&
+    const bool ray_tracing = !mono && aer &&
         (backend == "taau" || backend == "dlss") && ReadBool(
         ini, "engine", "raytracing_enabled", false);
     ini.Set("engine", "raytracing_enabled", ray_tracing ? "1" : "0");
@@ -435,6 +440,32 @@ void MigrateConfigurationToV14(IniDocument& ini) {
     // Desktop foveated rendering. Remove its launcher-owned key; the normal
     // Presentation Size and advanced Fullscreen Projection paths stay intact.
     RemoveObsoleteSettings(ini);
+    ini.Set("meta", "config_version", "14");
+}
+
+void MigrateConfigurationToV15(IniDocument& ini, int legacy_mode) {
+    // V1357's effective runtime meanings differed from the old launcher's
+    // normalization: Mode 1 was redirected to Mode-3 AER, while Mode 2 was
+    // the surviving Mono branch. Preserve both before V15 assigns clean Mono
+    // to Mode 1 and retires Mode 2.
+    if (legacy_mode == 1) {
+        ini.Set("openxr", "mode", "3");
+        ini.Set("openxr", "mode3_aer_presentation", "1");
+        ini.Set("engine", "dual_render_probe", "1");
+        ini.Set("engine", "dual_render_start", "1");
+    } else if (legacy_mode == 2) {
+        ini.Set("openxr", "mode", "1");
+        ini.Set("openxr", "mode3_aer_presentation", "0");
+        ini.Set("engine", "dual_render_probe", "0");
+        ini.Set("engine", "dual_render_start", "0");
+    } else if (legacy_mode == 4) {
+        // Mode 4 was the retired strict-Stereo value.
+        ini.Set("openxr", "mode", "3");
+        ini.Set("openxr", "mode3_aer_presentation", "0");
+        ini.Set("engine", "dual_render_probe", "1");
+        ini.Set("engine", "dual_render_start", "1");
+    }
+    RemoveObsoleteSettings(ini);
     ini.Set("meta", "config_version", std::to_string(kCurrentConfigVersion));
 }
 
@@ -482,10 +513,17 @@ RenderMode BestEffortMode(
     int xr_mode,
     bool mode3_aer_presentation,
     const std::string& backend) {
-    const bool aer = mode3_aer_presentation || xr_mode == 1 || xr_mode == 2;
-    if (backend == "taau") return aer ? RenderMode::AerAfwTaau : RenderMode::StereoTaau;
-    if (backend == "dlss_packed") return RenderMode::StereoDlssSequential;
-    if (backend == "dlss") return aer ? RenderMode::AerAfwDlss : RenderMode::StereoDlssSequential;
+    const bool mono = xr_mode == 1;
+    const bool aer = !mono && mode3_aer_presentation;
+    if (backend == "taau") {
+        if (mono) return RenderMode::MonoTaau;
+        return aer ? RenderMode::AerAfwTaau : RenderMode::StereoTaau;
+    }
+    if (backend == "dlss" || backend == "dlss_packed") {
+        if (mono) return RenderMode::MonoDlss;
+        return aer ? RenderMode::AerAfwDlss : RenderMode::StereoDlssSequential;
+    }
+    if (mono) return RenderMode::MonoNone;
     // AER without AA has no AFW implementation and is intentionally retired.
     // Keep the same AA family while falling back to full Stereo.
     return RenderMode::StereoNone;
@@ -1011,6 +1049,7 @@ const ModeSettings& SettingsForMode(RenderMode mode) {
 
 const wchar_t* ModeDisplayName(RenderMode mode) {
     constexpr const wchar_t* names[]{
+        L"Mono - No AA / FXAA", L"Mono - TAAU", L"Mono - DLSS",
         L"AER + AFW - TAAU", L"AER + AFW - DLSS",
         L"Stereo - No AA / FXAA", L"Stereo - TAAU",
         L"Stereo - DLSS"};
@@ -1019,17 +1058,27 @@ const wchar_t* ModeDisplayName(RenderMode mode) {
 
 bool ModeUsesDlss(RenderMode mode) {
     return mode == RenderMode::AerAfwDlss ||
-        mode == RenderMode::StereoDlssSequential;
+        mode == RenderMode::StereoDlssSequential ||
+        mode == RenderMode::MonoDlss;
 }
 
 bool ModeUsesStereo(RenderMode mode) {
-    // Both launcher families now use Mode-3 geometry stereo. AER changes only
-    // producer/publication cadence, so native stereo remains available to all.
+    // AER and strict Stereo use Mode-3 geometry stereo. Clean Mono stays a
+    // single cyclopean producer and is intentionally excluded here.
     return mode == RenderMode::AerAfwTaau ||
         mode == RenderMode::AerAfwDlss ||
         mode == RenderMode::StereoNone ||
         mode == RenderMode::StereoTaau ||
         mode == RenderMode::StereoDlssSequential;
+}
+
+bool ModeSupportsAsymmetricProjection(RenderMode mode) {
+    // ASYM controls OpenXR presentation with each view's optical FOV. Mono
+    // still has one cyclopean producer; it does not become per-eye geometry.
+    return ModeUsesStereo(mode) ||
+        mode == RenderMode::MonoNone ||
+        mode == RenderMode::MonoTaau ||
+        mode == RenderMode::MonoDlss;
 }
 
 bool ModeSupportsRayTracing(RenderMode mode) {
@@ -1179,6 +1228,13 @@ bool EnsureVrConfiguration(const ConfigPaths& paths,
         if (existing_version < 14) {
             MigrateConfigurationToV14(migrated);
         }
+        if (existing_version < 15) {
+            // Read the route after V8-V14 have applied their historical
+            // meanings. Thus pre-V8 Mode 1/2 is already Mode-3 AER, while an
+            // explicit Mode 2 surviving in V8-V14 remains the old Mono route.
+            MigrateConfigurationToV15(
+                migrated, ReadInt(migrated, "openxr", "mode", 3));
+        }
         // This is deliberately independent from version migration: extending
         // the default template must heal a partial current-version INI on the
         // very next launcher start, without overwriting manual tuning.
@@ -1312,35 +1368,49 @@ LoadResult LoadConfiguration(const ConfigPaths& paths) {
         return result;
     }
 
+    const int config_version = ReadInt(*vr, "meta", "config_version", 0);
     const int xr_mode = ReadInt(*vr, "openxr", "mode", 3);
-    const bool mode3_aer_presentation = ReadBool(
-        *vr, "openxr", "mode3_aer_presentation",
-        xr_mode == 1 || xr_mode == 2);
+    // Before V15, V1357 effectively redirected Mode 1 to AER. A Mode 2 that
+    // survived in schemas V8-V14 was Mono; older schemas first migrate 1/2 to
+    // Mode-3 AER. Interpret that history before assigning clean Mono to Mode 1.
+    const bool legacy_aer_mode = config_version < 15 &&
+        (xr_mode == 1 || (config_version < 8 && xr_mode == 2));
+    const bool legacy_mono_mode = config_version >= 8 &&
+        config_version < 15 && xr_mode == 2;
+    const bool mode3_aer_presentation = legacy_aer_mode || ReadBool(
+        *vr, "openxr", "mode3_aer_presentation", false);
     const bool dual_probe = ReadBool(*vr, "engine", "dual_render_probe", true);
     const bool dual_start = ReadBool(*vr, "engine", "dual_render_start", true);
-    const auto backend = ReadString(*vr, "engine", "temporal_backend", "none");
+    auto backend = ReadString(*vr, "engine", "temporal_backend", "none");
+    if (backend == "dlss_packed") backend = "dlss";
     const bool dlss_dlaa = ReadBool(*vr, "engine", "dlss_dlaa", false);
     const int aa_mode = ReadInt(*game, "PostProcess", "AAMode", 0);
     const bool allow_dlss = ReadBool(*game, "Rendering", "AllowDLSS", false);
-    // Legacy Mode 1/2 is represented as Mode-3 AER in memory even if a user
-    // bypassed the V8 migration writer.
-    const bool legacy_aer_mode = xr_mode == 1 || xr_mode == 2;
-    const int launcher_xr_mode = legacy_aer_mode ? 3 : xr_mode;
-    const bool launcher_dual_probe = legacy_aer_mode ? true : dual_probe;
-    const bool launcher_dual_start = legacy_aer_mode ? true : dual_start;
+    const int launcher_xr_mode = legacy_aer_mode
+        ? 3
+        : (legacy_mono_mode ? 1 : xr_mode);
+    const bool launcher_dual_probe = legacy_aer_mode
+        ? true
+        : (legacy_mono_mode ? false : dual_probe);
+    const bool launcher_dual_start = legacy_aer_mode
+        ? true
+        : (legacy_mono_mode ? false : dual_start);
+    const bool launcher_aer = legacy_aer_mode
+        ? true
+        : (legacy_mono_mode ? false : mode3_aer_presentation);
     if (const auto exact = ExactMode(
             launcher_xr_mode, launcher_dual_probe, launcher_dual_start,
-            mode3_aer_presentation, backend, aa_mode, allow_dlss)) {
+            launcher_aer, backend, aa_mode, allow_dlss)) {
         result.state.mode = *exact;
     } else {
         result.state.mode = BestEffortMode(
-            xr_mode, mode3_aer_presentation, backend);
+            launcher_xr_mode, launcher_aer, backend);
         const bool retired_aer_no_aa =
-            (mode3_aer_presentation || legacy_aer_mode) && backend == "none";
+            launcher_aer && backend == "none";
         result.warning = retired_aer_no_aa
             ? L"AER + AFW has no No AA implementation. Stereo - No AA / FXAA "
                 L"is selected; no files are changed until Save."
-            : L"The current AA/stereo settings are inconsistent. The closest "
+            : L"The current render/AA settings are inconsistent. The closest "
                 L"mode is displayed; no files are changed until Save.";
     }
 
@@ -1466,11 +1536,10 @@ bool BuildUpdatedDocuments(const ConfigPaths& paths, const LauncherState& state,
         state.resolution_auto ? "1" : "0");
     vr_ini.Set("openxr", "render_width", std::to_string(state.width));
     vr_ini.Set("openxr", "render_height", std::to_string(state.height));
-    // Native asymmetric geometry is independent from the presentation route,
-    // but uses the same user-selected angular presentation size as symmetric
-    // geometry in every supported stereo mode.
+    // ASYM OpenXR presentation is independent from producer eye count. Mono
+    // keeps one cyclopean producer and applies each view's optical FOV at submit.
     const bool native_stereo_active =
-        state.native_stereo && ModeUsesStereo(state.mode);
+        state.native_stereo && ModeSupportsAsymmetricProjection(state.mode);
     vr_ini.Set("openxr", "native_stereo",
         native_stereo_active ? "1" : "0");
     vr_ini.Set("openxr", "fullscreen_projection",

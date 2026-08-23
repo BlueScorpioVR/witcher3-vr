@@ -10,6 +10,9 @@
 namespace w3vr {
 
 enum class RenderMode {
+    MonoNone,
+    MonoTaau,
+    MonoDlss,
     AerAfwTaau,
     AerAfwDlss,
     StereoNone,
@@ -126,6 +129,7 @@ const ModeSettings& SettingsForMode(RenderMode mode);
 const wchar_t* ModeDisplayName(RenderMode mode);
 bool ModeUsesDlss(RenderMode mode);
 bool ModeUsesStereo(RenderMode mode);
+bool ModeSupportsAsymmetricProjection(RenderMode mode);
 bool ModeSupportsRayTracing(RenderMode mode);
 std::optional<int> DlssNearSquareCompatibleWidth(const LauncherState& state);
 int CinemaHudConvergenceShift(float hud_scale, int offset);

@@ -34,6 +34,9 @@
 #include "shadow_cascade_authority_policy.h"
 #include "taau_submission_policy.h"
 
+// V1408 ports the complete V19005 clean-Mono route and its Mono-first launcher
+// onto V1391. Presentation Size retains V1391's final-OpenXR-only ownership;
+// no V1357/V19005 producer or swapchain slider dependency is restored.
 // V1391 removes Presentation Size from every producer and swapchain-sizing
 // decision. The setting remains readable only by the final OpenXR presenter.
 // V1369 carries every private RT AO/SIGMA/REBLUR history use across its exact
@@ -343,7 +346,7 @@ constexpr int kRtHistoryMaximumBufferCount = 16;
 
 struct Config {
     bool openxr_enabled{true};
-    int openxr_mode{2};
+    int openxr_mode{1};
     // V12033 keeps both launcher families on the proven Mode-3 producer.
     // This flag changes only its cadence: false is original strict Stereo,
     // true is per-eye AER old+new publication.
@@ -546,6 +549,26 @@ struct Config {
 };
 
 Config g_config{};
+constexpr int kOpenXrModeCleanMono = 1;
+constexpr int kOpenXrModeStereo = 3;
+
+bool clean_mono_mode(int mode) {
+    return mode == kOpenXrModeCleanMono;
+}
+
+bool clean_mono_transport_active() {
+    return clean_mono_mode(g_config.openxr_mode);
+}
+
+bool supported_projection_transport_active() {
+    return clean_mono_transport_active() ||
+        g_config.openxr_mode == kOpenXrModeStereo;
+}
+
+bool selected_resolution_full_image_transport_active() {
+    return supported_projection_transport_active();
+}
+
 // The INI selects the projection used at startup. Strict Stereo can switch the
 // producer safely at a Present boundary without mutating the user's file or
 // racing worker-thread reads of Config.
@@ -630,7 +653,7 @@ bool stereo_icon_policy_transport_active();
 bool mode3_aer_presentation_active();
 
 bool geometry_stereo_transport_active() {
-    return g_config.openxr_mode == 3;
+    return g_config.openxr_mode == kOpenXrModeStereo;
 }
 
 bool dlss_sequential_mode_active() {
@@ -671,7 +694,7 @@ bool mode3_stereo_transport_active() {
     // presentation transport for every AA backend. Temporal work remains
     // backend-specific, but scene/HUD separation and completed-pair camera
     // authority must not disappear merely because NGX is not selected.
-    return g_config.openxr_mode == 3;
+    return g_config.openxr_mode == kOpenXrModeStereo;
 }
 
 bool mode3_aer_presentation_active() {
@@ -928,7 +951,7 @@ bool real_smoke_center_fix_route_configured() {
 
 bool real_smoke_world_up_route_active() {
     return g_config.openxr_enabled &&
-        g_config.openxr_mode == 3 &&
+        supported_projection_transport_active() &&
         g_config.hmd_freelook;
 }
 
@@ -997,7 +1020,7 @@ bool taau_compute_hooks_needed() {
 }
 
 bool common_renderer_pipeline_hooks_needed() {
-    return g_config.openxr_mode == 2 || g_config.openxr_mode == 3;
+    return supported_projection_transport_active();
 }
 
 bool renderer_hook_installation_needed() {
@@ -1607,7 +1630,12 @@ UINT g_streamline_capture_height{};
 // perspective can never use two different scale calculations.
 float runtime_presentation_cover_fraction(UINT source_width = 0) {
     float cover_fraction = 1.0f;
-    if (g_config.openxr_mono_eye_shift_auto && g_xr_views.size() >= 2) {
+    // Clean mono has no configurable pixel shift. Its centered producer still
+    // needs the runtime-derived union envelope so ASYM tangent subimages remain
+    // reciprocal. Preserve the legacy flag behavior only outside Mode 1.
+    if ((clean_mono_transport_active() ||
+            g_config.openxr_mono_eye_shift_auto) &&
+        g_xr_views.size() >= 2) {
         for (uint32_t eye = 0; eye < 2; ++eye) {
             const float tan_left = tanf(g_xr_views[eye].fov.angleLeft);
             const float tan_right = tanf(g_xr_views[eye].fov.angleRight);
@@ -1645,7 +1673,8 @@ float runtime_presentation_cover_fraction(UINT source_width = 0) {
 
 float producer_render_fov_scale() {
     const float cover_fraction = runtime_presentation_cover_fraction();
-    if (mode3_stereo_transport_active()) {
+    if (mode3_stereo_transport_active() ||
+        clean_mono_transport_active()) {
         return w3vr::mode3_transport::symmetric_producer_fov_scale(
             cover_fraction);
     }
@@ -3099,8 +3128,23 @@ uint64_t g_taau_latest_submission_serial{};
 uint64_t g_taau_consumed_submission_serial{};
 std::atomic<uint32_t> g_taau_submission_logs{};
 std::atomic<uint32_t> g_taau_present_authority_logs{};
-XrView g_mono_dlss_render_views[2]{{XR_TYPE_VIEW}, {XR_TYPE_VIEW}};
-bool g_mono_dlss_render_views_valid{};
+// One REDengine camera/source owns clean mono. These views retain only the
+// producer pose/FOV metadata; both OpenXR slices always sample the same final
+// backbuffer and never acquire independent temporal or geometry ownership.
+XrView g_clean_mono_render_views[2]{{XR_TYPE_VIEW}, {XR_TYPE_VIEW}};
+bool g_clean_mono_render_views_valid{};
+// V19005 keeps clean Mono's pre-game frontend in VIEW space until the first
+// valid gameplay HMD camera has been published. Later pause/inventory menus
+// retain V19002's LOCAL world-locked anchor.
+// V19004 extends V1122's native-FOV render-proxy distance authority to clean
+// Mono. One cyclopean producer still owns geometry and temporal state; this
+// changes only REDengine's maximum-distance culling/LOD multiplier.
+// V19003 restores the validated V209/V210 Mono-DLSS ownership contract. The
+// temporal output carries the render views belonging to the exact Streamline
+// token it consumed; ordinary task completion may not relabel that output with
+// a newer camera.
+XrView g_clean_mono_dlss_render_views[2]{{XR_TYPE_VIEW}, {XR_TYPE_VIEW}};
+bool g_clean_mono_dlss_render_views_valid{};
 SlSetConstantsFn g_sl_set_constants{};
 SlSetTagFn g_sl_set_tag{};
 SlSetFeatureConstantsFn g_sl_set_feature_constants{};
@@ -3359,6 +3403,38 @@ std::array<StreamlineDlssCallbackConstantsSlot,
     g_streamline_dlss_callback_constants{};
 std::atomic<uint32_t> g_streamline_dlss_callback_constants_logs{};
 std::atomic<bool> g_dlss_completion_auto_hook_logged{};
+
+struct CleanMonoDlssTemporalState {
+    std::array<float, 12> matched_camera{};
+    std::array<XrView, 2> render_views{{{XR_TYPE_VIEW}, {XR_TYPE_VIEW}}};
+    float projection[4]{};
+    bool matched_camera_valid{};
+    bool render_views_valid{};
+    bool valid{};
+};
+
+struct CleanMonoDlssResources {
+    ID3D12Resource* depth{};
+    ID3D12Resource* motion_vectors{};
+    D3D12_RESOURCE_STATES depth_state{
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE};
+    D3D12_RESOURCE_STATES motion_state{
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE};
+};
+
+std::mutex g_clean_mono_dlss_mutex{};
+std::unordered_map<uint32_t, CleanMonoDlssTemporalState>
+    g_clean_mono_dlss_temporal_tokens{};
+CleanMonoDlssResources g_clean_mono_dlss_resources{};
+std::array<float, 12> g_clean_mono_dlss_previous_camera{};
+bool g_clean_mono_dlss_previous_camera_valid{};
+std::atomic<uint64_t> g_clean_mono_dlss_dispatches{};
+std::atomic<uint64_t> g_clean_mono_dlss_ready_misses{};
+ID3D12DescriptorHeap* g_clean_mono_dlss_mvec_heap{};
+ID3D12RootSignature* g_clean_mono_dlss_mvec_root_signature{};
+ID3D12PipelineState* g_clean_mono_dlss_mvec_pipeline{};
+UINT g_clean_mono_dlss_mvec_descriptor_increment{};
+std::once_flag g_clean_mono_dlss_mvec_pipeline_once{};
 
 size_t streamline_dlss_callback_constants_slot(
     uint32_t frame_token,
@@ -4281,6 +4357,12 @@ std::atomic<ID3D12PipelineState*> g_auto_cinema_hud_composite_eye0_pso{};
 std::atomic<ID3D12PipelineState*> g_auto_cinema_hud_composite_eye1_pso{};
 std::atomic<ID3D12PipelineState*> g_full_vr_hud_composite_eye0_pso{};
 std::atomic<ID3D12PipelineState*> g_full_vr_hud_composite_eye1_pso{};
+// Clean Mono owns one cyclopean HUD transform. These variants correct Cinema
+// aspect/scale without inheriting Mode 3's per-eye convergence or retained-HUD
+// lifecycle.
+std::atomic<ID3D12PipelineState*> g_clean_mono_cinema_hud_pso{};
+std::atomic<ID3D12PipelineState*> g_clean_mono_auto_cinema_hud_pso{};
+std::atomic<ID3D12PipelineState*> g_clean_mono_full_vr_hud_pso{};
 std::atomic<ID3D12PipelineState*> g_mode3_scene_only_pso{};
 struct HudCompositePsoRecipe {
     D3D12_GRAPHICS_PIPELINE_STATE_DESC desc{};
@@ -4468,11 +4550,6 @@ bool mode3_scene_only_output_pair_ready(uint64_t pair_id) {
         g_mode3_scene_only_output_pairs.end(), pair_id) !=
         g_mode3_scene_only_output_pairs.end();
 }
-ID3D12DescriptorHeap* g_mono_hud_rtv_heap{};
-ID3D12Resource* g_mono_hud_outputs[2]{};
-D3D12_CPU_DESCRIPTOR_HANDLE g_mono_hud_rtvs[2]{};
-bool g_mono_hud_output_copy_source[2]{};
-std::atomic<bool> g_mono_hud_outputs_valid{};
 struct TaauUavWriter {
     ID3D12GraphicsCommandList* command_list{};
     ID3D12PipelineState* pipeline{};
@@ -5520,7 +5597,7 @@ bool taau_matrix_warmup_ready(uint64_t present) {
         }
         ++recent_samples[pair.eye];
     }
-    if (g_config.openxr_mode == 2) {
+    if (clean_mono_transport_active()) {
         return recent_samples[0] >= 2;
     }
     return recent_samples[0] >= 2 && recent_samples[1] >= 2;
@@ -5545,7 +5622,7 @@ void update_taau_auto_activation(uint64_t present) {
         g_taau_native_last_seen_present.load(std::memory_order_relaxed);
     const bool taau_recent = last_seen != UINT64_MAX &&
         present >= last_seen && present - last_seen <= 4;
-    const bool render_route_ready = g_config.openxr_mode == 2 ||
+    const bool render_route_ready = clean_mono_transport_active() ||
         g_engine_dual_render_active.load(std::memory_order_relaxed);
     const bool renderer_ready = taau_recent && render_route_ready &&
         g_hmd_pose_valid.load(std::memory_order_relaxed) &&
@@ -13033,15 +13110,17 @@ void load_config() {
         g_config.puredark_afw_enabled = read_sidecar_ini_bool(
             "puredark_afw.ini", "puredark_afw", "enabled", true);
         const int configured_openxr_mode =
-            read_ini_int("openxr", "mode", 2);
-        // Modes 1 and 4 were retired in V1196. Preserve old installations by
-        // migrating either value to the canonical Mode-3 transport; unknown
-        // values fall back to Mono Mode 2.
+            read_ini_int("openxr", "mode", kOpenXrModeCleanMono);
+        // V1360 restores one canonical clean-mono transport at Mode 1. The
+        // retired numeric Mode 2 is accepted only as an input migration and
+        // immediately converges to Mode 1; Mode 4 remains a legacy spelling
+        // of the unchanged Mode-3 stereo transport. Unknown values fail safe
+        // to clean mono, so no second mono runtime path can remain active.
         g_config.openxr_mode =
-            configured_openxr_mode == 3 || configured_openxr_mode == 1 ||
+            configured_openxr_mode == kOpenXrModeStereo ||
                 configured_openxr_mode == 4
-            ? 3
-            : 2;
+            ? kOpenXrModeStereo
+            : kOpenXrModeCleanMono;
         g_config.mode3_aer_presentation = read_ini_bool(
             "openxr", "mode3_aer_presentation", false);
         g_config.resolution_scale = std::clamp(read_ini_float("openxr", "resolution_scale", 1.0f), 0.25f, 2.0f);
@@ -13467,6 +13546,36 @@ void load_config() {
             g_config.streamline_taau_bridge = false;
         }
 
+        if (clean_mono_transport_active()) {
+            // Stale stereo-era INI values may select Mode 1, but they may not
+            // reactivate a second REDengine view, an eye clock, an eye-local
+            // history, AFW/RT work, or a pixel-space separation mechanism.
+            // native_stereo deliberately survives: in clean mono it controls
+            // only the reciprocal OpenXR tangent-subimage presentation.
+            if (!native_stereo_key_present) {
+                g_config.native_stereo = true;
+                g_runtime_native_stereo.store(
+                    true, std::memory_order_release);
+            }
+            g_config.mode3_aer_presentation = false;
+            g_config.fullscreen_projection = false;
+            g_config.engine_dual_render_probe = false;
+            g_config.engine_dual_render_start = false;
+            g_config.engine_sync_swap_eyes = false;
+            g_config.engine_taau_reverse_eye_order = false;
+            g_config.engine_native_projection_shift = false;
+            g_config.engine_native_stereo_offset = 0.0f;
+            g_config.engine_factory_stereo_offset = 0.0f;
+            g_config.streamline_split_viewports = false;
+            g_config.streamline_right_temporal_offset = 0.0f;
+            g_config.streamline_temporal_clip_correction = 0.0f;
+            g_config.reverse_geometry_shift = false;
+            g_config.raytracing_enabled = false;
+            log_line(
+                "V1360 clean Mode1 hardening applied: one producer, "
+                "no stereo offsets/dual render/AFW/RT/per-eye history");
+        }
+
         const bool mode3_non_taau_backend =
             g_config.openxr_mode == 3 &&
             (g_config.temporal_backend == TemporalBackend::None ||
@@ -13506,7 +13615,8 @@ void load_config() {
             g_config.presentation_scale,
             native_stereo_runtime_enabled() ? 1 : 0,
             g_config.fullscreen_projection ? 1 : 0,
-            g_config.openxr_mono_eye_shift_px,
+            clean_mono_transport_active()
+                ? 0 : g_config.openxr_mono_eye_shift_px,
             g_config.reverse_enabled,
             g_config.reverse_scan_periodic,
             g_config.reverse_scan_unmap,
@@ -14999,11 +15109,13 @@ void STDMETHODCALLTYPE hook_create_srv(
              resource_desc.Format == DXGI_FORMAT_R32G8X24_TYPELESS)) &&
         (resource_desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) != 0;
     const bool taau_bootstrap_candidate = taau_motion_candidate || taau_depth_candidate;
-    // V12036's broad descriptor bootstrap was not part of the Mode-3 fix.
-    // Preserve it byte-for-behavior for the strict Stereo route, but keep Mode 3 on
-    // its targeted Depth/MVec/runtime registry.
+    // V12036's broad descriptor bootstrap is not part of either selected-
+    // resolution transport. Mode 3 and clean Mode 1 use the targeted
+    // Depth/MVec/runtime registry; only retired/unsupported routes retain the
+    // compatibility bootstrap.
     const bool legacy_taau_descriptor_bootstrap =
-        taau_functional_hooks_needed() && g_config.openxr_mode != 3;
+        taau_functional_hooks_needed() &&
+        !selected_resolution_full_image_transport_active();
     if (!taau_bootstrap_candidate && !legacy_taau_descriptor_bootstrap &&
         !rt_temporal_descriptor_candidate &&
         !g_config.runtime_diagnostics &&
@@ -15118,7 +15230,8 @@ void STDMETHODCALLTYPE hook_create_uav(
         view_format == resource_desc.Format &&
         rt_temporal_history_descriptor_format(view_format);
     const bool legacy_taau_descriptor_bootstrap =
-        taau_functional_hooks_needed() && g_config.openxr_mode != 3;
+        taau_functional_hooks_needed() &&
+        !selected_resolution_full_image_transport_active();
     if ((!taau_metadata_hooks_needed() &&
             !rt_temporal_descriptor_candidate) ||
         (!legacy_taau_descriptor_bootstrap &&
@@ -15392,6 +15505,11 @@ bool ensure_real_smoke_projection_psos() {
     if (!real_smoke_world_up_route_active()) {
         return false;
     }
+    if (clean_mono_transport_active() &&
+        g_real_smoke_center_pipelines[2].load(
+            std::memory_order_acquire) != nullptr) {
+        return true;
+    }
     if (g_real_smoke_center_pipelines[0].load(
             std::memory_order_acquire) != nullptr &&
         g_real_smoke_center_pipelines[1].load(
@@ -15425,6 +15543,12 @@ bool ensure_real_smoke_projection_psos() {
     bool created_any{};
     for (uint32_t variant_index = 0;
          variant_index < variants.size(); ++variant_index) {
+        // Mode 1 has one centered producer and can only consume the immutable
+        // zero-centre world-up correction. Never prepare eye-local optical
+        // centre variants merely because the runtime exposes two views.
+        if (clean_mono_transport_active() && variant_index != 2) {
+            continue;
+        }
         const bool need_variant =
             g_real_smoke_center_pipelines[variant_index].load(
                 std::memory_order_acquire) == nullptr;
@@ -15491,6 +15615,10 @@ bool ensure_real_smoke_projection_psos() {
                 std::memory_order_relaxed),
             g_real_smoke_center_pipelines[2].load(
                 std::memory_order_relaxed));
+    }
+    if (clean_mono_transport_active()) {
+        return g_real_smoke_center_pipelines[2].load(
+            std::memory_order_acquire) != nullptr;
     }
     return g_real_smoke_center_pipelines[0].load(
             std::memory_order_acquire) != nullptr &&
@@ -18089,18 +18217,13 @@ void install_command_list_hooks() {
         }
     }
 
-    if ((compute_hooks || g_config.openxr_mode == 2) &&
+    if (compute_hooks &&
         g_om_set_render_targets == nullptr) {
         auto target = method<void*>(command_list, 46);
         if (MH_CreateHook(target, reinterpret_cast<void*>(&hook_om_set_render_targets),
                 reinterpret_cast<void**>(&g_om_set_render_targets)) == MH_OK) {
             g_om_render_targets_hook_target = target;
-            if (g_config.openxr_mode == 2) {
-                MH_EnableHook(target);
-                log_line("Reverse hooked ID3D12GraphicsCommandList::OMSetRenderTargets for mono HUD at %p", target);
-            } else {
-                log_line("Reverse created disabled ID3D12GraphicsCommandList::OMSetRenderTargets hook at %p", target);
-            }
+            log_line("Reverse created disabled ID3D12GraphicsCommandList::OMSetRenderTargets hook at %p", target);
         }
     }
 
@@ -19806,6 +19929,27 @@ HRESULT STDMETHODCALLTYPE hook_create_graphics_pipeline_state(
                     -g_config.cinema_hud_stereo_shift_px,
                     g_config.hud_size * 1.30f,
                     g_config.cinema_aspect_ratio);
+            // Clean Mono must preserve one identical cyclopean composite. It
+            // still needs the same Cinema aspect/size pre-compensation as the
+            // stereo route, but never either eye's convergence shift.
+            IDxcBlob* clean_mono_cinema_shader =
+                clean_mono_transport_active()
+                ? compile_hud_composite_pixel_shader(
+                    0,
+                    g_config.hud_size * g_config.manual_cinema_hud_scale,
+                    g_config.cinema_aspect_ratio)
+                : nullptr;
+            IDxcBlob* clean_mono_auto_cinema_shader =
+                clean_mono_transport_active()
+                ? compile_hud_composite_pixel_shader(
+                    0, g_config.hud_size * 1.30f,
+                    g_config.cinema_aspect_ratio)
+                : nullptr;
+            IDxcBlob* clean_mono_full_vr_shader =
+                clean_mono_transport_active()
+                ? compile_hud_composite_pixel_shader(
+                    0, g_config.hud_size * g_config.full_vr_hud_scale)
+                : nullptr;
             IDxcBlob* scene_shader = retained_hud_projection_route_configured()
                 ? compile_mode3_scene_only_pixel_shader()
                 : nullptr;
@@ -19819,7 +19963,38 @@ HRESULT STDMETHODCALLTYPE hook_create_graphics_pipeline_state(
             ID3D12PipelineState* auto_cinema_eye1_pso{};
             ID3D12PipelineState* full_vr_eye0_pso{};
             ID3D12PipelineState* full_vr_eye1_pso{};
+            ID3D12PipelineState* clean_mono_cinema_pso{};
+            ID3D12PipelineState* clean_mono_auto_cinema_pso{};
+            ID3D12PipelineState* clean_mono_full_vr_pso{};
             ID3D12PipelineState* scene_pso{};
+            const auto create_clean_mono_hud_pso =
+                [&](IDxcBlob* shader, const char* label) {
+                    ID3D12PipelineState* variant{};
+                    if (shader == nullptr) {
+                        return variant;
+                    }
+                    auto variant_desc = *desc;
+                    variant_desc.PS = {
+                        shader->GetBufferPointer(), shader->GetBufferSize()};
+                    const auto variant_hr = g_create_graphics_pipeline_state(
+                        device, &variant_desc, IID_PPV_ARGS(&variant));
+                    if (FAILED(variant_hr)) {
+                        if (variant != nullptr) {
+                            variant->Release();
+                            variant = nullptr;
+                        }
+                        log_line(
+                            "V19002 clean Mono %s HUD PSO creation failed hr=0x%08X",
+                            label, static_cast<unsigned>(variant_hr));
+                    }
+                    return variant;
+                };
+            clean_mono_cinema_pso = create_clean_mono_hud_pso(
+                clean_mono_cinema_shader, "Cinema");
+            clean_mono_auto_cinema_pso = create_clean_mono_hud_pso(
+                clean_mono_auto_cinema_shader, "automatic Cinema");
+            clean_mono_full_vr_pso = create_clean_mono_hud_pso(
+                clean_mono_full_vr_shader, "Full VR");
             if (eye0_shader != nullptr && eye1_shader != nullptr) {
                 auto shifted_desc = *desc;
                 shifted_desc.PS = {
@@ -20015,6 +20190,15 @@ HRESULT STDMETHODCALLTYPE hook_create_graphics_pipeline_state(
             if (auto_cinema_eye1_shader != nullptr) {
                 auto_cinema_eye1_shader->Release();
             }
+            if (clean_mono_cinema_shader != nullptr) {
+                clean_mono_cinema_shader->Release();
+            }
+            if (clean_mono_auto_cinema_shader != nullptr) {
+                clean_mono_auto_cinema_shader->Release();
+            }
+            if (clean_mono_full_vr_shader != nullptr) {
+                clean_mono_full_vr_shader->Release();
+            }
             if (scene_shader != nullptr) scene_shader->Release();
             const bool scene_ready = !retained_hud_projection_route_configured() ||
                 scene_pso != nullptr;
@@ -20047,6 +20231,15 @@ HRESULT STDMETHODCALLTYPE hook_create_graphics_pipeline_state(
                     if (full_vr_eye1_pso != nullptr) {
                         g_pipeline_infos[full_vr_eye1_pso] = info;
                     }
+                    if (clean_mono_cinema_pso != nullptr) {
+                        g_pipeline_infos[clean_mono_cinema_pso] = info;
+                    }
+                    if (clean_mono_auto_cinema_pso != nullptr) {
+                        g_pipeline_infos[clean_mono_auto_cinema_pso] = info;
+                    }
+                    if (clean_mono_full_vr_pso != nullptr) {
+                        g_pipeline_infos[clean_mono_full_vr_pso] = info;
+                    }
                     if (scene_pso != nullptr) {
                         g_pipeline_infos[scene_pso] = info;
                     }
@@ -20069,6 +20262,12 @@ HRESULT STDMETHODCALLTYPE hook_create_graphics_pipeline_state(
                     full_vr_eye0_pso, std::memory_order_relaxed);
                 g_full_vr_hud_composite_eye1_pso.store(
                     full_vr_eye1_pso, std::memory_order_relaxed);
+                g_clean_mono_cinema_hud_pso.store(
+                    clean_mono_cinema_pso, std::memory_order_relaxed);
+                g_clean_mono_auto_cinema_hud_pso.store(
+                    clean_mono_auto_cinema_pso, std::memory_order_relaxed);
+                g_clean_mono_full_vr_hud_pso.store(
+                    clean_mono_full_vr_pso, std::memory_order_relaxed);
                 g_mode3_scene_only_pso.store(
                     scene_pso, std::memory_order_relaxed);
                 g_hud_composite_original_pso.store(pso, std::memory_order_release);
@@ -20100,6 +20299,16 @@ HRESULT STDMETHODCALLTYPE hook_create_graphics_pipeline_state(
                     asymmetric_source_shifts_y[1],
                     g_config.hud_stereo_shift_px,
                     g_game_render_width, g_game_render_height);
+                if (clean_mono_transport_active()) {
+                    log_line(
+                        "V19002 clean Mono HUD PSOs cinema=%p auto_cinema=%p full_vr=%p shift=0 aspect=%.4f manual_scale=%.3f full_vr_scale=%.3f",
+                        clean_mono_cinema_pso,
+                        clean_mono_auto_cinema_pso,
+                        clean_mono_full_vr_pso,
+                        g_config.cinema_aspect_ratio,
+                        g_config.manual_cinema_hud_scale,
+                        g_config.full_vr_hud_scale);
+                }
             } else {
                 if (eye0_pso != nullptr) eye0_pso->Release();
                 if (eye1_pso != nullptr) eye1_pso->Release();
@@ -20122,6 +20331,15 @@ HRESULT STDMETHODCALLTYPE hook_create_graphics_pipeline_state(
                 }
                 if (full_vr_eye1_pso != nullptr) {
                     full_vr_eye1_pso->Release();
+                }
+                if (clean_mono_cinema_pso != nullptr) {
+                    clean_mono_cinema_pso->Release();
+                }
+                if (clean_mono_auto_cinema_pso != nullptr) {
+                    clean_mono_auto_cinema_pso->Release();
+                }
+                if (clean_mono_full_vr_pso != nullptr) {
+                    clean_mono_full_vr_pso->Release();
                 }
                 if (scene_pso != nullptr) scene_pso->Release();
             }
@@ -20999,6 +21217,19 @@ void STDMETHODCALLTYPE hook_set_pipeline_state(
             (cinema_active ||
                 g_automatic_full_vr_camera_active.load(
                     std::memory_order_acquire));
+        const bool clean_mono_manual_cinema_hud =
+            clean_mono_transport_active() && cinema_active &&
+            g_force_mono_cinema.load(std::memory_order_relaxed);
+        const bool clean_mono_automatic_cinema_hud =
+            clean_mono_transport_active() && cinema_active &&
+            !g_force_mono_cinema.load(std::memory_order_relaxed) &&
+            !g_config.cinema_full_vr;
+        const bool clean_mono_automatic_full_vr_hud =
+            clean_mono_transport_active() && g_config.cinema_full_vr &&
+            !g_force_mono_cinema.load(std::memory_order_relaxed) &&
+            (cinema_active ||
+                g_automatic_full_vr_camera_active.load(
+                    std::memory_order_acquire));
         const bool strict_stereo_asymmetric_gameplay_hud =
             native_asymmetric_noaa_route_active() &&
             !mode3_aer_presentation_active() && !cinema_active &&
@@ -21006,8 +21237,10 @@ void STDMETHODCALLTYPE hook_set_pipeline_state(
         // Fullscreen menus are submitted as one world-locked quad visible to
         // both eyes. Applying the gameplay -16/+16 variants while REDengine
         // still records its two serial views can bake two displaced UI copies
-        // into that single texture. Keep menus and Mono cinema on the original
-        // zero-shift route. Normal stereo cinema now has unequivocal matching
+        // into that single texture. Keep menus on the original route. Clean
+        // Mono uses dedicated zero-shift Cinema variants so aspect/scale is
+        // corrected without adding eye separation. Normal stereo cinema has
+        // unequivocal matching
         // projection slices, so it can safely bake one configured HUD shift
         // into each authoritative REDengine eye.
         // [FIX:MONO-DLSS-SINGLE-HUD 1/2] V210 submitted the native final
@@ -21015,9 +21248,39 @@ void STDMETHODCALLTYPE hook_set_pipeline_state(
         // of the later alternating left/right gameplay variants.
         if (!native_loading_video &&
             g_engine_menu_state.load(std::memory_order_relaxed) == 0 &&
+            (clean_mono_manual_cinema_hud ||
+                clean_mono_automatic_cinema_hud ||
+                clean_mono_automatic_full_vr_hud)) {
+            auto* clean_mono_hud = clean_mono_manual_cinema_hud
+                ? g_clean_mono_cinema_hud_pso.load(
+                    std::memory_order_acquire)
+                : (clean_mono_automatic_cinema_hud
+                    ? g_clean_mono_auto_cinema_hud_pso.load(
+                        std::memory_order_acquire)
+                    : g_clean_mono_full_vr_hud_pso.load(
+                        std::memory_order_acquire));
+            if (clean_mono_hud != nullptr) {
+                bound_pipeline_state = clean_mono_hud;
+            }
+            static std::atomic<uint32_t> clean_mono_hud_route_logs{};
+            if (clean_mono_hud_route_logs.fetch_add(
+                    1, std::memory_order_relaxed) < 24) {
+                log_line(
+                    "V19002 clean Mono HUD route kind=%s pso=%p aspect=%.4f present=%llu",
+                    clean_mono_manual_cinema_hud ? "manual_cinema" :
+                        (clean_mono_automatic_cinema_hud
+                            ? "automatic_cinema" : "full_vr"),
+                    clean_mono_hud,
+                    g_config.cinema_aspect_ratio,
+                    static_cast<unsigned long long>(
+                        g_present_count.load(std::memory_order_relaxed)));
+            }
+        }
+        if (!native_loading_video &&
+            g_engine_menu_state.load(std::memory_order_relaxed) == 0 &&
             (!cinema_active || normal_stereo_cinema_hud ||
                 automatic_full_vr_hud) &&
-            !(g_config.openxr_mode == 2 && temporal_backend_is_dlss())) {
+            mode3_stereo_transport_active()) {
             int hud_eye = g_engine_render_eye;
             const char* hud_eye_authority = "render_tls";
             if (hud_eye < 0 || hud_eye > 1) {
@@ -22059,139 +22322,6 @@ void STDMETHODCALLTYPE hook_draw_indexed_instanced(
         start_instance_location);
 }
 
-bool ensure_mono_hud_outputs() {
-    if (g_mono_hud_outputs[0] != nullptr &&
-        g_mono_hud_outputs[1] != nullptr &&
-        g_mono_hud_rtv_heap != nullptr) {
-        return true;
-    }
-    if (g_d3d12_device == nullptr || g_game_swapchain == nullptr) {
-        return false;
-    }
-    ID3D12Resource* backbuffer{};
-    if (FAILED(g_game_swapchain->GetBuffer(0, IID_PPV_ARGS(&backbuffer))) ||
-        backbuffer == nullptr) {
-        return false;
-    }
-    const auto desc = backbuffer->GetDesc();
-    backbuffer->Release();
-
-    D3D12_DESCRIPTOR_HEAP_DESC heap_desc{};
-    heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-    heap_desc.NumDescriptors = 2;
-    if (FAILED(g_d3d12_device->CreateDescriptorHeap(
-            &heap_desc, IID_PPV_ARGS(&g_mono_hud_rtv_heap))) ||
-        g_mono_hud_rtv_heap == nullptr) {
-        return false;
-    }
-    const UINT increment = g_d3d12_device->GetDescriptorHandleIncrementSize(
-        D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
-    const auto first = g_mono_hud_rtv_heap->GetCPUDescriptorHandleForHeapStart();
-    D3D12_HEAP_PROPERTIES heap_properties{};
-    heap_properties.Type = D3D12_HEAP_TYPE_DEFAULT;
-    heap_properties.CreationNodeMask = 1;
-    heap_properties.VisibleNodeMask = 1;
-    for (uint32_t eye = 0; eye < 2; ++eye) {
-        if (FAILED(g_d3d12_device->CreateCommittedResource(
-                &heap_properties, D3D12_HEAP_FLAG_NONE, &desc,
-                D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr,
-                IID_PPV_ARGS(&g_mono_hud_outputs[eye]))) ||
-            g_mono_hud_outputs[eye] == nullptr) {
-            return false;
-        }
-        g_mono_hud_rtvs[eye] = {
-            first.ptr + static_cast<SIZE_T>(eye) * increment};
-        g_d3d12_device->CreateRenderTargetView(
-            g_mono_hud_outputs[eye], nullptr, g_mono_hud_rtvs[eye]);
-    }
-    log_line("Mono dual HUD outputs created size=%llux%u format=%u",
-        static_cast<unsigned long long>(desc.Width), desc.Height,
-        static_cast<unsigned>(desc.Format));
-    return true;
-}
-
-bool replay_mono_hud_composites(
-    ID3D12GraphicsCommandList* command_list,
-    UINT vertex_count_per_instance,
-    UINT instance_count,
-    UINT start_vertex_location,
-    UINT start_instance_location) {
-    if (g_config.openxr_mode != 2 ||
-        // [FIX:MONO-DLSS-SINGLE-HUD 2/2] The V210-style final-backbuffer route
-        // already contains the native zero-shift HUD. Do not record the later
-        // left/right replay outputs when OpenXR deliberately ignores them.
-        temporal_backend_is_dlss() ||
-        // [FIX:POST-LOADING-INIT-TRANSACTION 3/8] V974 protected the original
-        // HUD PSO selection but this after-draw replay was still able to render
-        // the loading-video viewport into the retained left/right outputs.
-        g_engine_loading_screen_video_active.load(
-            std::memory_order_acquire) ||
-        g_engine_menu_state.load(std::memory_order_relaxed) != 0 ||
-        g_cinema_mode_active.load(std::memory_order_relaxed) ||
-        load_command_list_pipeline(command_list) !=
-            g_hud_composite_original_pso.load(std::memory_order_acquire) ||
-        !ensure_mono_hud_outputs()) {
-        return false;
-    }
-    ID3D12PipelineState* eye_psos[2] = {
-        g_hud_composite_eye0_pso.load(std::memory_order_acquire),
-        g_hud_composite_eye1_pso.load(std::memory_order_acquire)};
-    if (eye_psos[0] == nullptr || eye_psos[1] == nullptr) {
-        return false;
-    }
-    CommandListInfo snapshot{};
-    {
-        std::scoped_lock lock{g_reverse_mutex};
-        const auto found = g_command_list_infos.find(command_list);
-        if (found == g_command_list_infos.end()) {
-            return false;
-        }
-        snapshot = found->second;
-    }
-    if (snapshot.active_rtv_count == 0) {
-        return false;
-    }
-
-    for (uint32_t eye = 0; eye < 2; ++eye) {
-        if (g_mono_hud_output_copy_source[eye]) {
-            D3D12_RESOURCE_BARRIER to_render_target{};
-            to_render_target.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-            to_render_target.Transition.pResource = g_mono_hud_outputs[eye];
-            to_render_target.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
-            to_render_target.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
-            to_render_target.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-            g_resource_barrier(command_list, 1, &to_render_target);
-        }
-        g_om_set_render_targets(command_list, 1, &g_mono_hud_rtvs[eye], FALSE, nullptr);
-        g_set_pipeline_state(command_list, eye_psos[eye]);
-        g_draw_instanced(command_list, vertex_count_per_instance, instance_count,
-            start_vertex_location, start_instance_location);
-        D3D12_RESOURCE_BARRIER to_copy_source{};
-        to_copy_source.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        to_copy_source.Transition.pResource = g_mono_hud_outputs[eye];
-        to_copy_source.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
-        to_copy_source.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
-        to_copy_source.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        g_resource_barrier(command_list, 1, &to_copy_source);
-        g_mono_hud_output_copy_source[eye] = true;
-    }
-    const auto* dsv = snapshot.active_dsv_handle.ptr != 0
-        ? &snapshot.active_dsv_handle
-        : nullptr;
-    g_om_set_render_targets(command_list, snapshot.active_rtv_count,
-        snapshot.active_rtv_handles.data(), FALSE, dsv);
-    g_set_pipeline_state(command_list,
-        g_hud_composite_original_pso.load(std::memory_order_acquire));
-    g_mono_hud_outputs_valid.store(true, std::memory_order_release);
-    static std::atomic<uint32_t> replay_logs{};
-    if (replay_logs.fetch_add(1) < 4) {
-        log_line("Mono dual HUD composite replayed outputs=%p,%p present=%llu",
-            g_mono_hud_outputs[0], g_mono_hud_outputs[1],
-            static_cast<unsigned long long>(g_present_count.load()));
-    }
-    return true;
-}
-
 bool mode3_early_hud_desc_matches(
     const D3D12_RESOURCE_DESC& left,
     const D3D12_RESOURCE_DESC& right) {
@@ -22315,17 +22445,25 @@ void service_mode3_hud_generation_drain() {
 
 void reset_loading_video_presentation_state(uint64_t present) {
     // [FIX:POST-LOADING-INIT-TRANSACTION 2/8] Loading video is a hard content
-    // boundary. Mono HUD replays and completed Mode-3 pairs belong to the
-    // preceding scene and must not become the first projection after the
-    // native player disappears. Keep the expensive resources allocated, but
-    // atomically revoke every retained publication identity at Present.
+    // boundary. Completed Mode-3 pairs and mono producer-pose metadata belong
+    // to the preceding scene and must not become the first projection after
+    // the native player disappears.
     const uint32_t generation =
         g_streamline_capture_generation.load(std::memory_order_acquire);
     const uint64_t pair_floor =
         g_engine_pair_sequence.load(std::memory_order_acquire) + 1;
     g_loading_video_scene_pair_floor.store(
         pair_floor, std::memory_order_release);
-    g_mono_hud_outputs_valid.store(false, std::memory_order_release);
+    {
+        std::scoped_lock view_lock{g_engine_completed_view_mutex};
+        g_clean_mono_render_views_valid = false;
+        g_clean_mono_dlss_render_views_valid = false;
+    }
+    {
+        std::scoped_lock dlss_lock{g_clean_mono_dlss_mutex};
+        g_clean_mono_dlss_temporal_tokens.clear();
+        g_clean_mono_dlss_previous_camera_valid = false;
+    }
     g_streamline_capture_latest_slot[0].store(
         UINT32_MAX, std::memory_order_release);
     g_streamline_capture_latest_slot[1].store(
@@ -23332,9 +23470,6 @@ void STDMETHODCALLTYPE hook_draw_instanced(
             g_streamline_capture_generation.load(std::memory_order_acquire);
     }
     publish_mode3_hud_source(command_list);
-    replay_mono_hud_composites(command_list,
-        vertex_count_per_instance, instance_count,
-        start_vertex_location, start_instance_location);
 }
 
 bool ensure_taau_matrix_fallback_resources() {
@@ -24529,7 +24664,7 @@ bool dispatch_taau_inplace_marker(
     uint64_t expected_pair_id = tls_render_pair_id;
     uint32_t expected_generation = tls_render_generation;
     bool identity_recovered = false;
-    if (g_config.openxr_mode == 2) {
+    if (clean_mono_transport_active()) {
         // A mono resolve always belongs to eye 0, including callbacks recorded
         // immediately after the producer TLS lifetime has ended. Keep that eye
         // identity and its private-history transaction authoritative even when
@@ -24655,7 +24790,7 @@ bool dispatch_taau_inplace_marker(
         identity_recovered);
 
     std::unique_lock<std::mutex> history_transaction_lock{};
-    if (g_config.openxr_mode == 2) {
+    if (clean_mono_transport_active()) {
         history_transaction_lock = std::unique_lock<std::mutex>{
             g_taau_eye_transaction_mutex[0]};
     } else if (taau_stereo_route_active() &&
@@ -24805,7 +24940,7 @@ bool dispatch_taau_inplace_marker(
     const bool resolve_diagnostics =
         taau_resolve_runtime_diagnostics_active() ||
         taau_drop_diagnostics_active();
-    if (g_config.openxr_mode == 2 ||
+    if (clean_mono_transport_active() ||
         (taau_stereo_route_active() &&
             expected_eye >= 0 && expected_eye <= 1)) {
         std::scoped_lock lock{g_taau_eye_history_mutex};
@@ -25067,7 +25202,7 @@ bool dispatch_taau_inplace_marker(
             }
         }
     }
-    if (g_config.openxr_mode == 2) {
+    if (clean_mono_transport_active()) {
         constexpr uint64_t kMonoTaauStaleCameraAge = 4;
         constexpr uint64_t kMonoTaauFreshCameraAge = 2;
         constexpr uint32_t kMonoTaauFreshCameraFrames = 3;
@@ -26583,64 +26718,6 @@ void STDMETHODCALLTYPE hook_resource_barrier(
         }
     }
 
-    if (g_config.openxr_mode == 2 && !g_packed_capture_internal &&
-        barriers != nullptr) {
-        for (UINT index = 0; index < num_barriers; ++index) {
-            const auto& barrier = barriers[index];
-            if (barrier.Type != D3D12_RESOURCE_BARRIER_TYPE_TRANSITION ||
-                barrier.Transition.pResource == nullptr ||
-                barrier.Transition.StateAfter != D3D12_RESOURCE_STATE_PRESENT) {
-                continue;
-            }
-            const auto desc = barrier.Transition.pResource->GetDesc();
-            static std::atomic<uint32_t> mono_present_barrier_logs{};
-            const auto barrier_log = mono_present_barrier_logs.fetch_add(1);
-            if (barrier_log < 16) {
-                size_t queue_depth{};
-                g_engine_completed_tag_queue_mutex.lock();
-                queue_depth = g_engine_completed_tag_queue.size();
-                g_engine_completed_tag_queue_mutex.unlock();
-                log_line(
-                    "Mono route PRESENT barrier resource=%p size=%llux%u expected=%ux%u "
-                    "queue_depth=%zu present=%llu",
-                    barrier.Transition.pResource,
-                    static_cast<unsigned long long>(desc.Width), desc.Height,
-                    g_game_render_width, g_game_render_height, queue_depth,
-                    static_cast<unsigned long long>(g_present_count.load()));
-            }
-            if (desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
-                desc.Width != g_game_render_width ||
-                desc.Height != g_game_render_height) {
-                continue;
-            }
-            size_t queue_depth{};
-            g_engine_completed_tag_queue_mutex.lock();
-            queue_depth = g_engine_completed_tag_queue.size();
-            if (!g_engine_completed_tag_queue.empty()) {
-                packed_route_tag = g_engine_completed_tag_queue.front();
-                g_engine_completed_tag_queue.pop_front();
-                packed_route_valid = packed_route_tag.render_view_valid;
-            }
-            g_engine_completed_tag_queue_mutex.unlock();
-            static std::atomic<uint32_t> mono_present_match_logs{};
-            if (mono_present_match_logs.fetch_add(1) < 16) {
-                log_line(
-                    "Mono route PRESENT match resource=%p queue_before=%zu routed=%d "
-                    "id=%llu valid=%d generation=%u current_generation=%u present=%llu",
-                    barrier.Transition.pResource, queue_depth,
-                    packed_route_tag.pair_id != 0 ? 1 : 0,
-                    static_cast<unsigned long long>(packed_route_tag.pair_id),
-                    packed_route_tag.render_view_valid ? 1 : 0,
-                    packed_route_tag.generation,
-                    g_streamline_capture_generation.load(),
-                    static_cast<unsigned long long>(g_present_count.load()));
-            }
-            if (packed_route_valid) {
-                tagged_backbuffer = barrier.Transition.pResource;
-            }
-            break;
-        }
-    }
     g_resource_barrier(command_list, num_barriers, barriers);
     if (early_hud_capture_source != nullptr) {
         capture_mode3_early_hud(
@@ -26651,32 +26728,14 @@ void STDMETHODCALLTYPE hook_resource_barrier(
         log_line("Streamline stereo capture skipped eye=%u output=%p state=0x%X",
             g_streamline_output_frame.eye, tracked_output, static_cast<unsigned>(capture_state));
     }
-    bool tagged_capture_succeeded{};
-    if (g_config.openxr_mode == 2 && tagged_backbuffer != nullptr &&
-        g_mono_hud_outputs_valid.load(std::memory_order_acquire)) {
-        tagged_capture_succeeded = true;
-        for (uint32_t eye = 0; eye < 2; ++eye) {
-            tagged_capture_succeeded =
-                capture_tagged_backbuffer_output(
-                    command_list, g_mono_hud_outputs[eye],
-                    D3D12_RESOURCE_STATE_COPY_SOURCE,
-                    eye, packed_route_tag.generation,
-                    packed_route_tag.pair_id,
-                    packed_route_tag.render_view,
-                    packed_route_tag.render_view_valid,
-                    eye, true) &&
-                tagged_capture_succeeded;
-        }
-    } else {
-        tagged_capture_succeeded = tagged_backbuffer != nullptr &&
-            capture_tagged_backbuffer_output(
-                command_list, tagged_backbuffer, D3D12_RESOURCE_STATE_PRESENT,
-                packed_route_tag.eye, packed_route_tag.generation,
-                packed_route_tag.pair_id, packed_route_tag.render_view,
-                packed_route_tag.render_view_valid,
-                packed_route_tag.eye,
-                packed_route_tag.eye <= 1);
-    }
+    const bool tagged_capture_succeeded = tagged_backbuffer != nullptr &&
+        capture_tagged_backbuffer_output(
+            command_list, tagged_backbuffer, D3D12_RESOURCE_STATE_PRESENT,
+            packed_route_tag.eye, packed_route_tag.generation,
+            packed_route_tag.pair_id, packed_route_tag.render_view,
+            packed_route_tag.render_view_valid,
+            packed_route_tag.eye,
+            packed_route_tag.eye <= 1);
     if (!clean_mode3_fast_path &&
         tagged_backbuffer != nullptr && !tagged_capture_succeeded) {
         static std::atomic<uint32_t> tagged_capture_failures{};
@@ -28335,7 +28394,7 @@ void __fastcall hook_engine_frame_builder(void* render_context, void* frame_data
         g_engine_render_eye >= 0 && g_engine_render_eye <= 1 &&
         g_engine_render_pair_id != 0 &&
         g_engine_render_pair_id != UINT64_MAX;
-    const bool mono_transport = g_config.openxr_mode == 2;
+    const bool mono_transport = clean_mono_transport_active();
     const int correction_eye = stereo_transport ? g_engine_render_eye : 0;
     const uint64_t correction_pair = stereo_transport
         ? g_engine_render_pair_id
@@ -29175,7 +29234,7 @@ void __fastcall hook_engine_gameplay_frame_entry(void* frame_task) {
     void* mono_lookup_frame_data{};
     bool mono_lookup_hit{};
     if ((g_engine_dual_render_active.load() ||
-            g_config.openxr_mode == 2) &&
+            clean_mono_transport_active()) &&
         frame_task != nullptr) {
         __try {
             void* frame_data{};
@@ -29193,7 +29252,7 @@ void __fastcall hook_engine_gameplay_frame_entry(void* frame_task) {
             log_line("Engine gameplay eye-map read fault task=%p", frame_task);
         }
     }
-    if (g_config.openxr_mode == 2 && frame_task != nullptr) {
+    if (clean_mono_transport_active() && frame_task != nullptr) {
         static std::atomic<uint32_t> mono_task_lookup_logs{};
         if (mono_task_lookup_logs.fetch_add(1) < 16) {
             log_line(
@@ -29298,7 +29357,7 @@ void __fastcall hook_engine_gameplay_frame_entry(void* frame_task) {
                 g_present_count.load(std::memory_order_relaxed));
         }
     }
-    if (g_config.openxr_mode == 2 && g_engine_render_eye == 0 &&
+    if (clean_mono_transport_active() && g_engine_render_eye == 0 &&
         g_engine_render_pair_id != 0 && g_engine_render_view_valid) {
         EngineFrameTag completed_tag{};
         completed_tag.eye = 0;
@@ -29307,6 +29366,11 @@ void __fastcall hook_engine_gameplay_frame_entry(void* frame_task) {
         completed_tag.render_view = g_engine_render_view;
         completed_tag.render_view_valid = true;
         completed_tag.pixel_projection = g_engine_render_pixel_projection;
+        g_engine_completed_view_mutex.lock();
+        g_clean_mono_render_views[0] = completed_tag.render_view;
+        g_clean_mono_render_views[1] = completed_tag.render_view;
+        g_clean_mono_render_views_valid = true;
+        g_engine_completed_view_mutex.unlock();
         g_engine_completed_tag_queue_mutex.lock();
         if (g_engine_completed_tag_queue.size() >= 32) {
             g_engine_completed_tag_queue.pop_front();
@@ -29430,7 +29494,7 @@ void __fastcall hook_engine_gameplay_frame_entry(void* frame_task) {
 void install_engine_gameplay_entry_probe() {
     if ((!g_config.engine_gameplay_entry_probe &&
             !g_engine_dual_render_active.load() &&
-            g_config.openxr_mode != 2) ||
+            !clean_mono_transport_active()) ||
         g_engine_gameplay_frame_entry != nullptr) {
         return;
     }
@@ -29894,6 +29958,14 @@ void install_engine_shadow_cascade_build_hook() {
 }
 
 bool safe_rebuild_shadow_view(float* shadow_view) {
+    // [FIX:CLEAN-MONO-VIEW-REBUILD-DEPENDENCY V19000 2/2] Every private
+    // camera rebuild depends on the original REDengine trampoline published
+    // by install_engine_view_factory_probe(). Fail closed if hook creation did
+    // not publish it; an indirect call through null is not catchable reliably
+    // once REDengine's crash reporter observes the execute access violation.
+    if (shadow_view == nullptr || g_engine_view_rebuild == nullptr) {
+        return false;
+    }
     __try {
         g_engine_view_rebuild(shadow_view);
         return true;
@@ -30677,7 +30749,7 @@ void capture_engine_original_temporal_matrix(float* view, uint64_t present) {
     const int routed_eye = g_engine_factory_eye >= 0
         ? g_engine_factory_eye
         : g_engine_render_eye;
-    const int eye = g_config.openxr_mode == 2 && routed_eye < 0
+    const int eye = clean_mono_transport_active() && routed_eye < 0
         ? 0
         : (routed_eye >= 0 || !g_config.streamline_taau_bridge ||
                 geometry_stereo_transport_active()
@@ -30748,7 +30820,7 @@ void capture_engine_corrected_temporal_matrix(
     const int routed_eye = g_engine_factory_eye >= 0
         ? g_engine_factory_eye
         : g_engine_render_eye;
-    const int eye = g_config.openxr_mode == 2 && routed_eye < 0
+    const int eye = clean_mono_transport_active() && routed_eye < 0
         ? 0
         : (routed_eye >= 0 || !g_config.streamline_taau_bridge ||
                 geometry_stereo_transport_active()
@@ -30846,7 +30918,8 @@ void capture_engine_corrected_temporal_matrix(
             pair.render_views[render_view_eye] = g_config.hmd_compositor_only
                 ? g_hmd_center_views[render_view_eye]
                 : g_xr_views[render_view_eye];
-            if (g_config.openxr_mode == 2 && !g_config.hmd_compositor_only) {
+            if (clean_mono_transport_active() &&
+                !g_config.hmd_compositor_only) {
                 pair.render_views[render_view_eye].pose.position.x -=
                     g_mono_neck_pose_correction.x;
                 pair.render_views[render_view_eye].pose.position.y -=
@@ -30973,7 +31046,7 @@ bool prepare_full_vr_frame_camera(
             left, right, down, up);
         float horizontal_scale = projection_scales.horizontal;
         float vertical_scale = projection_scales.vertical;
-        if (!mode3_stereo_transport_active() &&
+        if (!selected_resolution_full_image_transport_active() &&
             (!g_config.fullscreen_projection ||
                 g_xr_cinema_projection_pipeline == nullptr) &&
             g_xr_eye_swapchains[0].width > 0 &&
@@ -34448,7 +34521,7 @@ void __fastcall hook_engine_view_rebuild(float* view) {
             left, right, down, up);
         float horizontal_scale = projection_scales.horizontal;
         float vertical_scale = projection_scales.vertical;
-        if (!mode3_stereo_transport_active() &&
+        if (!selected_resolution_full_image_transport_active() &&
             (!g_config.fullscreen_projection ||
                 g_xr_cinema_projection_pipeline == nullptr) &&
             g_xr_eye_swapchains[0].width > 0 && g_xr_eye_swapchains[0].height > 0 &&
@@ -37114,9 +37187,15 @@ void install_engine_temporal_camera_builder_hook() {
 }
 
 void install_engine_view_factory_probe() {
+    // [FIX:CLEAN-MONO-VIEW-REBUILD-DEPENDENCY V19000 1/2] Clean Mode 1 uses
+    // the common gameplay/Full-VR camera correction and its private rebuilds
+    // even though it deliberately owns no stereo offset or per-eye temporal
+    // history. Therefore it owns this hook dependency independently of every
+    // retired stereo-era probe selector.
     if ((!g_config.engine_view_factory_probe &&
             g_config.engine_factory_stereo_offset == 0.0f &&
-            !engine_native_per_eye_temporal_history_active()) ||
+            !engine_native_per_eye_temporal_history_active() &&
+            !clean_mono_transport_active()) ||
         g_engine_view_rebuild != nullptr) {
         return;
     }
@@ -37159,8 +37238,7 @@ float* __fastcall hook_engine_render_proxy_distance_scale(
 
     if (destination == nullptr || source == nullptr ||
         !g_config.openxr_enabled ||
-        (!mode3_stereo_transport_active() &&
-            !dlss_sequential_mode_active()) ||
+        !supported_projection_transport_active() ||
         !g_native_world_fov_valid.load(std::memory_order_acquire) ||
         g_engine_menu_state.load(std::memory_order_relaxed) != 0) {
         return result;
@@ -37235,13 +37313,12 @@ float* __fastcall hook_engine_render_proxy_distance_scale(
 
 // [FIX:RENDER-PROXY-FOV-DISTANCE-AUTHORITY V1122 3/4] The derived distance
 // authority is common REDengine geometry work, independent of the selected AA
-// backend. Install it for every Mode-3 stereo route; the strict view signature
-// and native-camera validity gate still decide whether an individual view is
-// eligible.
+// backend. Install it for every supported Mode-3 or clean-Mono projection
+// transport; the strict view signature and native-camera validity gate still
+// decide whether an individual view is eligible.
 void install_engine_render_proxy_distance_scale_hook() {
     if (!g_config.openxr_enabled ||
-        (!mode3_stereo_transport_active() &&
-            !dlss_sequential_mode_active()) ||
+        !supported_projection_transport_active() ||
         g_engine_view_copy_rebuild != nullptr) {
         return;
     }
@@ -37257,7 +37334,7 @@ void install_engine_render_proxy_distance_scale_hook() {
         MH_EnableHook(target) == MH_OK) {
         log_line(
             "Render-proxy FOV distance scale hook installed "
-            "RVA=0x%llX target=%p route=all_mode3_backends "
+            "RVA=0x%llX target=%p route=mode3_and_clean_mono "
             "native_fov_authority=gameplay_camera",
             static_cast<unsigned long long>(kEngineViewCopyRebuildRva), target);
     } else {
@@ -37725,7 +37802,7 @@ void* __fastcall hook_engine_frame_data_factory(void* render_context, void* rend
         }
     }
 
-    const bool tag_mono_frame = g_config.openxr_mode == 2 &&
+    const bool tag_mono_frame = clean_mono_transport_active() &&
         hmd_camera_recent &&
         !g_cinema_mode_active.load(std::memory_order_relaxed) &&
         g_engine_menu_state.load(std::memory_order_relaxed) == 0 &&
@@ -38039,7 +38116,7 @@ void* __fastcall hook_engine_frame_data_factory(void* render_context, void* rend
 void install_engine_frame_factory_probe() {
     if ((!g_config.engine_frame_factory_probe &&
             !g_config.engine_dual_render_probe &&
-            g_config.openxr_mode != 2) ||
+            !clean_mono_transport_active()) ||
         g_engine_frame_data_factory != nullptr) {
         return;
     }
@@ -38144,6 +38221,336 @@ void apply_right_eye_temporal_offset(void* constants, float offset) {
     }
 }
 
+std::array<float, 12> clean_mono_camera_to_previous_transform(
+    const std::array<float, 12>& current,
+    const std::array<float, 12>& previous) {
+    std::array<float, 12> transform{};
+    const float* current_basis[3] = {
+        current.data() + 3, current.data() + 6, current.data() + 9};
+    const float* previous_basis[3] = {
+        previous.data() + 3, previous.data() + 6, previous.data() + 9};
+    for (size_t row = 0; row < 3; ++row) {
+        for (size_t column = 0; column < 3; ++column) {
+            for (size_t axis = 0; axis < 3; ++axis) {
+                transform[row * 4 + column] +=
+                    previous_basis[row][axis] * current_basis[column][axis];
+            }
+        }
+        for (size_t axis = 0; axis < 3; ++axis) {
+            transform[row * 4 + 3] += previous_basis[row][axis] *
+                (current[axis] - previous[axis]);
+        }
+    }
+    return transform;
+}
+
+bool initialize_clean_mono_dlss_mvec_pipeline() {
+    std::call_once(g_clean_mono_dlss_mvec_pipeline_once, []() {
+        if (g_d3d12_device == nullptr || !initialize_dxc()) {
+            return;
+        }
+        static constexpr char kShaderSource[] = R"(
+Texture2D<float> depth_texture : register(t0);
+RWTexture2D<float2> motion_texture : register(u0);
+cbuffer Parameters : register(b0) {
+    float4 current_to_previous_row0;
+    float4 current_to_previous_row1;
+    float4 current_to_previous_row2;
+    float4 projection;
+    uint2 texture_size;
+};
+[numthreads(8, 8, 1)]
+void main(uint3 dispatch_id : SV_DispatchThreadID) {
+    if (any(dispatch_id.xy >= texture_size)) return;
+    float2 uv = (float2(dispatch_id.xy) + 0.5) / float2(texture_size);
+    float depth = depth_texture.Load(int3(dispatch_id.xy, 0));
+    float tan_half_y = projection.x;
+    float tan_half_x = tan_half_y * projection.y;
+    float near_plane = projection.z;
+    float far_plane = projection.w;
+    float denominator = near_plane + depth * (far_plane - near_plane);
+    if (tan_half_x <= 1e-6 || tan_half_y <= 1e-6 ||
+        abs(denominator) < 1e-6) {
+        motion_texture[dispatch_id.xy] = float2(0.0, 0.0);
+        return;
+    }
+    float linear_depth = near_plane * far_plane / denominator;
+    float2 ndc = float2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+    float3 current_position = float3(
+        ndc.x * tan_half_x, ndc.y * tan_half_y, 1.0) * linear_depth;
+    float3 previous_position = float3(
+        dot(current_to_previous_row0.xyz, current_position) +
+            current_to_previous_row0.w,
+        dot(current_to_previous_row1.xyz, current_position) +
+            current_to_previous_row1.w,
+        dot(current_to_previous_row2.xyz, current_position) +
+            current_to_previous_row2.w);
+    if (previous_position.z <= 1e-5) {
+        motion_texture[dispatch_id.xy] = float2(0.0, 0.0);
+        return;
+    }
+    float2 previous_ndc = float2(
+        previous_position.x / (previous_position.z * tan_half_x),
+        previous_position.y / (previous_position.z * tan_half_y));
+    float2 previous_uv = float2(
+        previous_ndc.x * 0.5 + 0.5,
+        0.5 - previous_ndc.y * 0.5);
+    motion_texture[dispatch_id.xy] = previous_uv - uv;
+}
+)";
+        DxcBuffer source{kShaderSource, sizeof(kShaderSource) - 1, DXC_CP_UTF8};
+        LPCWSTR arguments[] = {L"-E", L"main", L"-T", L"cs_6_0", L"-O3"};
+        IDxcResult* result{};
+        if (FAILED(g_dxc_compiler->Compile(
+                &source, arguments, static_cast<UINT32>(std::size(arguments)),
+                nullptr, IID_PPV_ARGS(&result))) || result == nullptr) {
+            return;
+        }
+        HRESULT status{};
+        result->GetStatus(&status);
+        if (FAILED(status)) {
+            IDxcBlobUtf8* errors{};
+            result->GetOutput(DXC_OUT_ERRORS, IID_PPV_ARGS(&errors), nullptr);
+            log_line("V19003 clean Mono DLSS shader compile failed: %s",
+                errors != nullptr ? errors->GetStringPointer() : "unknown");
+            if (errors != nullptr) errors->Release();
+            result->Release();
+            return;
+        }
+        IDxcBlob* shader{};
+        if (FAILED(result->GetOutput(
+                DXC_OUT_OBJECT, IID_PPV_ARGS(&shader), nullptr)) ||
+            shader == nullptr) {
+            result->Release();
+            return;
+        }
+        D3D12_DESCRIPTOR_RANGE ranges[2]{};
+        ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        ranges[0].NumDescriptors = 1;
+        ranges[0].BaseShaderRegister = 0;
+        ranges[0].OffsetInDescriptorsFromTableStart =
+            D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+        ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+        ranges[1].NumDescriptors = 1;
+        ranges[1].BaseShaderRegister = 0;
+        ranges[1].OffsetInDescriptorsFromTableStart =
+            D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+        D3D12_ROOT_PARAMETER parameters[3]{};
+        parameters[0].ParameterType =
+            D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        parameters[0].DescriptorTable.NumDescriptorRanges = 1;
+        parameters[0].DescriptorTable.pDescriptorRanges = &ranges[0];
+        parameters[1].ParameterType =
+            D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        parameters[1].DescriptorTable.NumDescriptorRanges = 1;
+        parameters[1].DescriptorTable.pDescriptorRanges = &ranges[1];
+        parameters[2].ParameterType =
+            D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        parameters[2].Constants.ShaderRegister = 0;
+        parameters[2].Constants.Num32BitValues = 18;
+        D3D12_ROOT_SIGNATURE_DESC root_desc{};
+        root_desc.NumParameters = static_cast<UINT>(std::size(parameters));
+        root_desc.pParameters = parameters;
+        ID3DBlob* serialized{};
+        ID3DBlob* errors{};
+        const auto serialize_hr = D3D12SerializeRootSignature(
+            &root_desc, D3D_ROOT_SIGNATURE_VERSION_1, &serialized, &errors);
+        if (FAILED(serialize_hr) || serialized == nullptr ||
+            FAILED(g_d3d12_device->CreateRootSignature(
+                0, serialized != nullptr ? serialized->GetBufferPointer() : nullptr,
+                serialized != nullptr ? serialized->GetBufferSize() : 0,
+                IID_PPV_ARGS(&g_clean_mono_dlss_mvec_root_signature)))) {
+            if (errors != nullptr) errors->Release();
+            if (serialized != nullptr) serialized->Release();
+            shader->Release();
+            result->Release();
+            return;
+        }
+        if (errors != nullptr) errors->Release();
+        serialized->Release();
+        D3D12_COMPUTE_PIPELINE_STATE_DESC pipeline_desc{};
+        pipeline_desc.pRootSignature = g_clean_mono_dlss_mvec_root_signature;
+        pipeline_desc.CS = {
+            shader->GetBufferPointer(), shader->GetBufferSize()};
+        const auto pipeline_hr = g_d3d12_device->CreateComputePipelineState(
+            &pipeline_desc, IID_PPV_ARGS(&g_clean_mono_dlss_mvec_pipeline));
+        shader->Release();
+        result->Release();
+        if (FAILED(pipeline_hr)) {
+            return;
+        }
+        D3D12_DESCRIPTOR_HEAP_DESC heap_desc{};
+        heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        heap_desc.NumDescriptors = 2;
+        heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        if (FAILED(g_d3d12_device->CreateDescriptorHeap(
+                &heap_desc, IID_PPV_ARGS(&g_clean_mono_dlss_mvec_heap)))) {
+            return;
+        }
+        g_clean_mono_dlss_mvec_descriptor_increment =
+            g_d3d12_device->GetDescriptorHandleIncrementSize(heap_desc.Type);
+        log_line("V19003 clean Mono DLSS token camera pipeline initialized");
+    });
+    return g_clean_mono_dlss_mvec_pipeline != nullptr &&
+        g_clean_mono_dlss_mvec_root_signature != nullptr &&
+        g_clean_mono_dlss_mvec_heap != nullptr;
+}
+
+void capture_clean_mono_dlss_resource(
+    const void* resource, uint32_t tag) {
+    if (!clean_mono_transport_active() || !temporal_backend_is_dlss() ||
+        (tag != 0 && tag != 1) || resource == nullptr) {
+        return;
+    }
+    ID3D12Resource* native{};
+    uint32_t state{};
+    memcpy(&native, static_cast<const uint8_t*>(resource) + 8, sizeof(native));
+    memcpy(&state, static_cast<const uint8_t*>(resource) + 32, sizeof(state));
+    if (native == nullptr) {
+        return;
+    }
+    std::scoped_lock lock{g_clean_mono_dlss_mutex};
+    auto*& destination = tag == 0
+        ? g_clean_mono_dlss_resources.depth
+        : g_clean_mono_dlss_resources.motion_vectors;
+    if (destination != native) {
+        if (destination != nullptr) destination->Release();
+        native->AddRef();
+        destination = native;
+    }
+    if (tag == 0) {
+        g_clean_mono_dlss_resources.depth_state =
+            static_cast<D3D12_RESOURCE_STATES>(state);
+    } else {
+        g_clean_mono_dlss_resources.motion_state =
+            static_cast<D3D12_RESOURCE_STATES>(state);
+    }
+}
+
+bool dispatch_clean_mono_dlss_camera_motion(
+    ID3D12GraphicsCommandList* command_list,
+    uint32_t frame_token,
+    CleanMonoDlssTemporalState& consumed) {
+    if (command_list == nullptr || !clean_mono_transport_active() ||
+        !temporal_backend_is_dlss()) {
+        return false;
+    }
+    CleanMonoDlssResources resources{};
+    std::array<float, 12> previous_camera{};
+    bool previous_camera_valid{};
+    {
+        std::scoped_lock lock{g_clean_mono_dlss_mutex};
+        const auto temporal =
+            g_clean_mono_dlss_temporal_tokens.find(frame_token);
+        if (temporal == g_clean_mono_dlss_temporal_tokens.end() ||
+            !temporal->second.valid ||
+            g_clean_mono_dlss_resources.depth == nullptr ||
+            g_clean_mono_dlss_resources.motion_vectors == nullptr) {
+            return false;
+        }
+        consumed = temporal->second;
+        g_clean_mono_dlss_temporal_tokens.erase(temporal);
+        resources = g_clean_mono_dlss_resources;
+        resources.depth->AddRef();
+        resources.motion_vectors->AddRef();
+        previous_camera = g_clean_mono_dlss_previous_camera;
+        previous_camera_valid = g_clean_mono_dlss_previous_camera_valid;
+    }
+    const auto depth_desc = resources.depth->GetDesc();
+    const auto motion_desc = resources.motion_vectors->GetDesc();
+    const bool shader_states =
+        (resources.depth_state & D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE) != 0 &&
+        (resources.motion_state & D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE) != 0;
+    if (!consumed.matched_camera_valid || !shader_states ||
+        depth_desc.Width != motion_desc.Width ||
+        depth_desc.Height != motion_desc.Height ||
+        motion_desc.Format != DXGI_FORMAT_R16G16_FLOAT ||
+        (motion_desc.Flags &
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) == 0 ||
+        !initialize_clean_mono_dlss_mvec_pipeline()) {
+        resources.depth->Release();
+        resources.motion_vectors->Release();
+        return false;
+    }
+    DXGI_FORMAT depth_format = DXGI_FORMAT_UNKNOWN;
+    switch (depth_desc.Format) {
+    case DXGI_FORMAT_R32G8X24_TYPELESS:
+    case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:
+        depth_format = DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;
+        break;
+    case DXGI_FORMAT_R32_TYPELESS:
+    case DXGI_FORMAT_D32_FLOAT:
+        depth_format = DXGI_FORMAT_R32_FLOAT;
+        break;
+    case DXGI_FORMAT_R24G8_TYPELESS:
+    case DXGI_FORMAT_D24_UNORM_S8_UINT:
+        depth_format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+        break;
+    case DXGI_FORMAT_R16_TYPELESS:
+    case DXGI_FORMAT_D16_UNORM:
+        depth_format = DXGI_FORMAT_R16_UNORM;
+        break;
+    default:
+        resources.depth->Release();
+        resources.motion_vectors->Release();
+        return false;
+    }
+    auto cpu = g_clean_mono_dlss_mvec_heap->GetCPUDescriptorHandleForHeapStart();
+    D3D12_SHADER_RESOURCE_VIEW_DESC depth_srv{};
+    depth_srv.Format = depth_format;
+    depth_srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    depth_srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    depth_srv.Texture2D.MipLevels = 1;
+    g_d3d12_device->CreateShaderResourceView(
+        resources.depth, &depth_srv, cpu);
+    cpu.ptr += g_clean_mono_dlss_mvec_descriptor_increment;
+    D3D12_UNORDERED_ACCESS_VIEW_DESC motion_uav{};
+    motion_uav.Format = DXGI_FORMAT_R16G16_FLOAT;
+    motion_uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+    g_d3d12_device->CreateUnorderedAccessView(
+        resources.motion_vectors, nullptr, &motion_uav, cpu);
+
+    D3D12_RESOURCE_BARRIER barrier{};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource = resources.motion_vectors;
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    barrier.Transition.StateBefore = resources.motion_state;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    command_list->ResourceBarrier(1, &barrier);
+    ID3D12DescriptorHeap* heaps[] = {g_clean_mono_dlss_mvec_heap};
+    command_list->SetDescriptorHeaps(1, heaps);
+    command_list->SetComputeRootSignature(
+        g_clean_mono_dlss_mvec_root_signature);
+    command_list->SetPipelineState(g_clean_mono_dlss_mvec_pipeline);
+    auto gpu = g_clean_mono_dlss_mvec_heap->GetGPUDescriptorHandleForHeapStart();
+    command_list->SetComputeRootDescriptorTable(0, gpu);
+    gpu.ptr += g_clean_mono_dlss_mvec_descriptor_increment;
+    command_list->SetComputeRootDescriptorTable(1, gpu);
+    const std::array<float, 12> camera_motion = previous_camera_valid
+        ? clean_mono_camera_to_previous_transform(
+            consumed.matched_camera, previous_camera)
+        : std::array<float, 12>{
+            1.0f, 0.0f, 0.0f, 0.0f,
+            0.0f, 1.0f, 0.0f, 0.0f,
+            0.0f, 0.0f, 1.0f, 0.0f};
+    std::array<uint32_t, 18> constants{};
+    memcpy(constants.data(), camera_motion.data(), sizeof(camera_motion));
+    memcpy(constants.data() + 12, consumed.projection,
+        sizeof(consumed.projection));
+    const uint32_t width = static_cast<uint32_t>(motion_desc.Width);
+    const uint32_t height = motion_desc.Height;
+    memcpy(constants.data() + 16, &width, sizeof(width));
+    memcpy(constants.data() + 17, &height, sizeof(height));
+    command_list->SetComputeRoot32BitConstants(
+        2, static_cast<UINT>(constants.size()), constants.data(), 0);
+    command_list->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+    std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+    command_list->ResourceBarrier(1, &barrier);
+    resources.depth->Release();
+    resources.motion_vectors->Release();
+    return true;
+}
+
 uint32_t streamline_eye() {
     if (g_streamline_forced_eye >= 0) {
         return static_cast<uint32_t>(g_streamline_forced_eye);
@@ -38205,7 +38612,7 @@ void __fastcall hook_sl_set_constants(void* constants, uint32_t frame_token, uin
         g_config.streamline_taau_bridge) {
         const auto* values = static_cast<const float*>(constants);
         TaauHmdMotionParameters motion{};
-        const int expected_eye = g_config.openxr_mode == 2 ? 0 : -1;
+        const int expected_eye = clean_mono_transport_active() ? 0 : -1;
         if (find_taau_hmd_motion_parameters(
                 values + 48, expected_eye, 0, motion, 0,
                 g_config.openxr_mode == 3
@@ -38216,12 +38623,27 @@ void __fastcall hook_sl_set_constants(void* constants, uint32_t frame_token, uin
                 g_streamline_taau_bridge_matches.fetch_add(
                     1, std::memory_order_relaxed);
             }
-            if (g_config.openxr_mode == 2 &&
-                motion.matched_render_views_valid) {
-                std::scoped_lock view_lock{g_engine_completed_view_mutex};
-                g_mono_dlss_render_views[0] = motion.matched_render_views[0];
-                g_mono_dlss_render_views[1] = motion.matched_render_views[1];
-                g_mono_dlss_render_views_valid = true;
+            if (clean_mono_transport_active() &&
+                temporal_backend_is_dlss()) {
+                std::scoped_lock lock{g_clean_mono_dlss_mutex};
+                auto& temporal =
+                    g_clean_mono_dlss_temporal_tokens[frame_token];
+                temporal.matched_camera = motion.matched_corrected_camera;
+                temporal.render_views = motion.matched_render_views;
+                temporal.projection[0] = tanf(
+                    motion.vertical_fov_degrees *
+                    (3.14159265358979323846f / 360.0f));
+                temporal.projection[1] = motion.aspect;
+                temporal.projection[2] = motion.near_plane;
+                temporal.projection[3] = motion.far_plane;
+                temporal.matched_camera_valid = true;
+                temporal.render_views_valid =
+                    motion.matched_render_views_valid;
+                temporal.valid = true;
+                while (g_clean_mono_dlss_temporal_tokens.size() > 64) {
+                    g_clean_mono_dlss_temporal_tokens.erase(
+                        g_clean_mono_dlss_temporal_tokens.begin());
+                }
             }
             if (take_bounded_log_slot(
                     g_streamline_taau_bridge_match_logs, 12)) {
@@ -38490,6 +38912,7 @@ int __fastcall hook_sl_set_tag(const void* resource, uint32_t tag, uint32_t view
         memcpy(&tagged_extent, extent, sizeof(tagged_extent));
     }
     capture_streamline_dlss_callback_resource(resource, tag, eye);
+    capture_clean_mono_dlss_resource(resource, tag);
     if (resource != nullptr && (tag == 0 || tag == 1 || tag == 3) &&
         g_config.ngx_trace &&
         !skip_mode3_legacy_sl_tracking) {
@@ -38710,10 +39133,63 @@ int __fastcall hook_sl_evaluate_feature(
             frame_token, viewport, routed_viewport,
             static_cast<uint32_t>(puredark_afw_bundle_slot));
     }
+    CleanMonoDlssTemporalState clean_mono_consumed{};
+    const bool clean_mono_dlss_evaluation = feature == 0 &&
+        clean_mono_transport_active() && temporal_backend_is_dlss();
+    ID3D12GraphicsCommandList* const clean_mono_recording_command_list =
+        clean_mono_dlss_evaluation
+        ? resolve_native_command_list(command_list)
+        : nullptr;
+    const bool clean_mono_dlss_dispatched = clean_mono_dlss_evaluation &&
+        dispatch_clean_mono_dlss_camera_motion(
+            clean_mono_recording_command_list,
+            frame_token, clean_mono_consumed);
+    if (clean_mono_dlss_evaluation) {
+        if (clean_mono_dlss_dispatched) {
+            g_clean_mono_dlss_dispatches.fetch_add(
+                1, std::memory_order_relaxed);
+        } else {
+            g_clean_mono_dlss_ready_misses.fetch_add(
+                1, std::memory_order_relaxed);
+        }
+    }
     // [FIX:STREAMLINE-AFW-NATIVE-RECORDING V1365 3/3] Streamline still owns
     // its public wrapper ABI; only our private recording path is unwrapped.
     const int result = g_sl_evaluate_feature(
         command_buffer, feature, frame_token, routed_viewport);
+    if (clean_mono_dlss_dispatched && result != 0) {
+        {
+            std::scoped_lock lock{g_clean_mono_dlss_mutex};
+            g_clean_mono_dlss_previous_camera =
+                clean_mono_consumed.matched_camera;
+            g_clean_mono_dlss_previous_camera_valid =
+                clean_mono_consumed.matched_camera_valid;
+        }
+        if (clean_mono_consumed.render_views_valid) {
+            std::scoped_lock view_lock{g_engine_completed_view_mutex};
+            g_clean_mono_dlss_render_views[0] =
+                clean_mono_consumed.render_views[0];
+            g_clean_mono_dlss_render_views[1] =
+                clean_mono_consumed.render_views[1];
+            g_clean_mono_dlss_render_views_valid = true;
+        }
+        static std::atomic<uint32_t> clean_mono_dlss_logs{};
+        if (clean_mono_dlss_logs.fetch_add(
+                1, std::memory_order_relaxed) < 24) {
+            log_line(
+                "V19003 clean Mono DLSS consumed token=%u views=%u dispatches=%llu misses=%llu present=%llu",
+                frame_token,
+                clean_mono_consumed.render_views_valid ? 1u : 0u,
+                static_cast<unsigned long long>(
+                    g_clean_mono_dlss_dispatches.load(
+                        std::memory_order_relaxed)),
+                static_cast<unsigned long long>(
+                    g_clean_mono_dlss_ready_misses.load(
+                        std::memory_order_relaxed)),
+                static_cast<unsigned long long>(
+                    g_present_count.load(std::memory_order_relaxed)));
+        }
+    }
     if (streamline_completion_active) {
         // Witcher uses the historical Streamline bool ABI: non-zero is success.
         // [FIX:DLSS-STREAMLINE-UNIVERSAL V1289 4/8] This public callback is the
@@ -40476,7 +40952,7 @@ void ensure_initialized() {
                 "focus_fire_b1=stereo_and_aer_centered_draw_proven "
                 "aer_taau_hud=scene_and_retained_pair_fail_open");
             log_line(
-                "witcher3vr dxgi proxy initialized build=V1391 base=V1369_final_only_presentation_size "
+                "witcher3vr dxgi proxy initialized build=V1408 base=V1391_plus_V19005_clean_mono "
                 "anchor_smoothing_ini=%d anchor_smoothing_seconds=%.4f "
                 "first_person_strafe_ini=%d mode3_aer_presentation=%d raytracing_enabled=%d raytracing_history_buffers=%d "
                 "aer_afw_enabled=%d persistent_registry=%d dlss_public_streamline=%d "
@@ -40559,6 +41035,8 @@ void ensure_initialized() {
             log_line(
                 "V1391 presentation_size=final_openxr_only producer_fov=raw_runtime temporal_dlss_afw=slider_independent swapchain_size=slider_independent final_presenter_hook=retained");
             log_line(
+                "V1408 clean_mono=V19005_net_port_from_V1357 launcher=mono_first schema=15 presentation_size=final_openxr_only mode3_v1391_preserved=1");
+            log_line(
                 "V1279 DLSS compatibility=public_streamline_aer_private_history_ngx_stereo legacy_module_agnostic_discovery=disabled_by_V1288");
             log_line(
                 "V1144 native temporal terrain family source=V15018 validated_via=V15017 terrain_match=exact_vs_ds_two_hs_pso_contract material_ps=wildcard terrain_hs=5B33D68BABD52A7E,9ABE7F60D2CFC2EB mode3_taau_native_full_motion=1 taau_terrain_replay=aer_and_stereo native_temporal_terrain_motion=1 diagnostic_independent=1 diagnostic_off_log_io=none locator_code=absent camera_binding=ds_b1_to_ps_b6_alias motion_formula=current_ndc_minus_history_ndc velocity_target=rt3_only overlay_psos=inherit_base_motion afw_compatible=1");
@@ -40596,13 +41074,11 @@ void capture_d3d12_objects(IUnknown* dxgi_device_parameter) {
     }
     log_line("Captured D3D12 queue=%p device=%p", g_command_queue, g_d3d12_device);
     install_reverse_hooks();
-    // [FIX:AER-AFW-HUD-BARRIER-HOOK V12014 1/1] AER deliberately never
-    // enables the same-tick dual-render transition that historically installed
-    // this hook. Its retained-HUD source discovery therefore succeeded while
-    // the native t1 transition/copy/label path was never observable. Install
-    // the existing barrier hook at device capture only for the configured
-    // [FIX:AER-DLSS-RETAINED-HUD-PARITY V12027 2/12] Install it for the
-    if (g_config.openxr_mode == 2) {
+    // Clean mono never enables the Mode-3 dual-render transition. Install the
+    // shared barrier/lifetime observer at device capture so its one TAAU
+    // history and resource registry still receive the proven release fixes;
+    // the removed mono HUD/PRESENT capture path is not part of this hook.
+    if (clean_mono_transport_active()) {
         install_streamline_resource_barrier_probe();
     }
 }
@@ -42179,15 +42655,16 @@ bool create_openxr_swapchains() {
     const uint32_t source_height = requested_height > 0
         ? requested_height
         : scaled_height;
-    const bool mode3_fixed_resolution = mode3_stereo_transport_active();
+    const bool selected_source_fixed_resolution =
+        selected_resolution_full_image_transport_active();
     // Swapchain dimensions follow the selected source and resolution only.
     // Presentation Size is a final per-frame OpenXR mapping and must not
     // allocate a different render or transport surface.
     swapchain.width = w3vr::mode3_transport::select_swapchain_dimension(
-        mode3_fixed_resolution, source_width, scaled_width,
+        selected_source_fixed_resolution, source_width, scaled_width,
         source_width, config.maxImageRectWidth);
     swapchain.height = w3vr::mode3_transport::select_swapchain_dimension(
-        mode3_fixed_resolution, source_height, scaled_height,
+        selected_source_fixed_resolution, source_height, scaled_height,
         source_height, config.maxImageRectHeight);
     swapchain.format = selected_format;
     swapchain.stereo_array = true;
@@ -42212,7 +42689,7 @@ bool create_openxr_swapchains() {
 
     result = pfn_xrCreateSwapchain(g_xr_session, &swapchain_info, &swapchain.handle);
     g_xr_eye_swapchains[1].handle = swapchain.handle;
-    log_line("OpenXR xrCreateSwapchain stereo-array result=%s (%d) size=%ux%u recommended=%ux%u requested=%ux%u presentation=final_submit_only mode3_fixed_resolution=%d max=%ux%u format=%u samples=%u",
+    log_line("OpenXR xrCreateSwapchain stereo-array result=%s (%d) size=%ux%u recommended=%ux%u requested=%ux%u presentation=final_submit_only selected_source_fixed_resolution=%d clean_mono=%d max=%ux%u format=%u samples=%u",
         xr_result_name(result),
         result,
         swapchain.width,
@@ -42221,7 +42698,8 @@ bool create_openxr_swapchains() {
         config.recommendedImageRectHeight,
         requested_width,
         requested_height,
-        mode3_fixed_resolution ? 1 : 0,
+        selected_source_fixed_resolution ? 1 : 0,
+        clean_mono_transport_active() ? 1 : 0,
         config.maxImageRectWidth,
         config.maxImageRectHeight,
         static_cast<unsigned>(selected_format),
@@ -42739,7 +43217,7 @@ void update_hmd_freelook_pose() {
         current_position.y - g_hmd_center_position.y,
         current_position.z - g_hmd_center_position.z};
     g_mono_neck_pose_correction = {};
-    if (g_config.openxr_mode == 2 &&
+    if (clean_mono_transport_active() &&
         g_config.mono_neck_pivot_compensation_m > 0.0f) {
         // Preserve real room-scale translation while removing only the
         // orientation-correlated arc produced by a virtual pivot behind the
@@ -45019,8 +45497,18 @@ void render_openxr_test_frame(
         if (cinema_mode) {
             g_auto_recenter_on_packed_lock_armed.store(
                 true, std::memory_order_release);
-            if (g_config.openxr_mode == 2) {
-                g_mono_hud_outputs_valid.store(false, std::memory_order_release);
+            if (clean_mono_transport_active()) {
+                {
+                    std::scoped_lock view_lock{
+                        g_engine_completed_view_mutex};
+                    g_clean_mono_render_views_valid = false;
+                    g_clean_mono_dlss_render_views_valid = false;
+                }
+                {
+                    std::scoped_lock dlss_lock{g_clean_mono_dlss_mutex};
+                    g_clean_mono_dlss_temporal_tokens.clear();
+                    g_clean_mono_dlss_previous_camera_valid = false;
+                }
                 g_streamline_capture_latest_slot[0].store(UINT32_MAX);
                 g_streamline_capture_latest_slot[1].store(UINT32_MAX);
                 std::scoped_lock queue_lock{
@@ -45200,11 +45688,19 @@ void render_openxr_test_frame(
     bool native_asymmetric_black_frame{};
     const bool mode3_unified_openxr_submit =
         mode3_stereo_transport_active() && !spatial_panel_active;
+    const bool clean_mono_unified_openxr_submit =
+        clean_mono_transport_active() && !spatial_panel_active;
+    const bool unified_full_image_submit =
+        mode3_unified_openxr_submit || clean_mono_unified_openxr_submit;
     bool mode3_source_native_asymmetric{};
     bool mode3_symmetric_subimage{};
     bool mode3_unified_direct_copy{};
     bool mode3_unified_identity_shader{};
     bool mode3_unified_black_frame{};
+    bool clean_mono_symmetric_subimage{};
+    bool clean_mono_unified_direct_copy{};
+    bool clean_mono_unified_identity_shader{};
+    bool clean_mono_unified_black_frame{};
     int32_t projection_eye_shifts_x_px[2]{};
     int32_t projection_eye_shifts_y_px[2]{};
     bool full_surface_projection{};
@@ -45383,35 +45879,14 @@ void render_openxr_test_frame(
                 direct_stereo_sources[0] = g_streamline_capture_ring[0][left_slot].resource;
                 direct_stereo_sources[1] = g_streamline_capture_ring[1][right_slot].resource;
             }
-            StreamlineCaptureSlot* mono_capture_slots[2]{};
-            // [FIX:MONO-FULL-VR-LIVE-BACKBUFFER 1/1] Gameplay No AA/TAAU can
-            // use the mono capture slots to separate scene and HUD. Automatic
-            // Full VR has no panel/HUD split and cinema entry clears those
-            // slots; subsequent sparse captures made OpenXR repeat almost all
-            // frames. Use the final PRESENT backbuffer for every Mono Full VR
-            // backend, matching the already-correct DLSS Mono route.
-            if (mode == 2 && !spatial_panel_active &&
-                !automatic_full_vr_cutscene &&
-                !temporal_backend_is_dlss()) {
-                for (uint32_t eye = 0; eye < 2; ++eye) {
-                    const auto mono_slot_index =
-                        g_streamline_capture_latest_slot[eye].load();
-                    if (mono_slot_index >= kStreamlineCaptureRingSize) {
-                        continue;
-                    }
-                    auto& slot =
-                        g_streamline_capture_ring[eye][mono_slot_index];
-                    if (slot.initialized &&
-                        slot.generation ==
-                            g_streamline_capture_generation.load()) {
-                        mono_capture_slots[eye] = &slot;
-                    }
-                }
-            }
-            if (g_config.cinema_camera_diagnostics && mode == 2 &&
+            // Clean mono always submits REDengine's one final backbuffer. HUD,
+            // temporal resolve and post-processing are already baked into this
+            // source; no scene/HUD split or eye-indexed capture is allowed.
+            if (g_config.cinema_camera_diagnostics &&
+                clean_mono_mode(mode) &&
                 automatic_full_vr_cutscene && current_present % 60 == 0) {
                 log_cinema_camera_diagnostic(
-                    "Full VR mono source present=%llu backend=%s route=live_backbuffer",
+                    "Full VR clean-mono source present=%llu backend=%s route=final_backbuffer",
                     static_cast<unsigned long long>(current_present),
                     temporal_backend_name());
             }
@@ -45432,18 +45907,10 @@ void render_openxr_test_frame(
                 g_game_swapchain->GetBuffer(game_backbuffer_index, IID_PPV_ARGS(&game_backbuffer));
             }
 
-            if ((mode == 1 || mode == 2 || mode == 3 || mode == 4) &&
+            if ((clean_mono_mode(mode) || mode == kOpenXrModeStereo) &&
                 (direct_stereo || game_backbuffer != nullptr)) {
                 projection_copy_attempted = true;
-                ID3D12Resource* mono_captured_sources[2] = {
-                    mono_capture_slots[0] != nullptr
-                        ? mono_capture_slots[0]->resource : nullptr,
-                    mono_capture_slots[1] != nullptr
-                        ? mono_capture_slots[1]->resource : nullptr};
-                ID3D12Resource* mono_captured_source =
-                    mono_captured_sources[0];
-                const bool live_backbuffer_source = !direct_stereo &&
-                    mono_captured_source == nullptr;
+                const bool live_backbuffer_source = !direct_stereo;
                 D3D12_RESOURCE_BARRIER source_to_copy{};
                 if (live_backbuffer_source) {
                     source_to_copy.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -45475,15 +45942,15 @@ void render_openxr_test_frame(
 
                 auto* primary_source = direct_stereo
                     ? direct_stereo_sources[0]
-                    : (mono_captured_source != nullptr
-                        ? mono_captured_source
-                        : game_backbuffer);
+                    : game_backbuffer;
                 auto source_desc = primary_source->GetDesc();
                 const UINT copy_width = static_cast<UINT>(std::min<uint64_t>(source_desc.Width, swapchain.width));
                 const UINT copy_height = std::min<UINT>(source_desc.Height, swapchain.height);
                 int calibrated_eye_shifts_x[2] = {
-                    g_config.openxr_mono_eye_shift_px,
-                    -g_config.openxr_mono_eye_shift_px};
+                    clean_mono_unified_openxr_submit
+                        ? 0 : g_config.openxr_mono_eye_shift_px,
+                    clean_mono_unified_openxr_submit
+                        ? 0 : -g_config.openxr_mono_eye_shift_px};
                 int calibrated_eye_shifts_y[2]{};
                 float optical_centers[2] = {0.5f, 0.5f};
                 float vertical_optical_centers[2] = {0.5f, 0.5f};
@@ -45540,7 +46007,7 @@ void render_openxr_test_frame(
                 // complete runtime FOV. The V990 shader fit remains the safe
                 // fallback for smaller presentation scales or unusual masks.
                 full_surface_projection =
-                    !mode3_unified_openxr_submit &&
+                    !unified_full_image_submit &&
                     !spatial_panel_active &&
                     g_config.fullscreen_projection &&
                     g_config.hmd_freelook &&
@@ -45807,13 +46274,13 @@ void render_openxr_test_frame(
                     }
                 }
                 const float submitted_crop_fraction =
-                    !mode3_unified_openxr_submit && requested_scale >
+                    !unified_full_image_submit && requested_scale >
                         fullscreen_cover_fraction
                     ? std::clamp(
                         fullscreen_cover_fraction / requested_scale,
                         0.5f, 1.0f)
                     : 1.0f;
-                if (!mode3_unified_openxr_submit &&
+                if (!unified_full_image_submit &&
                     !full_surface_projection && !spatial_panel_active &&
                     submitted_crop_fraction < 0.9999f) {
                     const int32_t crop_width = std::max<int32_t>(1,
@@ -45917,7 +46384,8 @@ void render_openxr_test_frame(
                             g_hmd_render_fov_down.load());
                     }
                 }
-                if (g_config.openxr_mono_eye_shift_auto) {
+                if (!clean_mono_unified_openxr_submit &&
+                    g_config.openxr_mono_eye_shift_auto) {
                     if (optical_centers_valid) {
                         for (uint32_t eye = 0; eye < 2; ++eye) {
                             calibrated_eye_shifts_x[eye] =
@@ -46001,7 +46469,6 @@ void render_openxr_test_frame(
                 const bool sequential_stereo_cache = !fullscreen_menu &&
                     (mode3_final_present_source ||
                         mode3_taau_afw_final_source_active() ||
-                        mode == 2 ||
                         (cinema_mode &&
                             !g_engine_dual_render_active.load(
                                 std::memory_order_relaxed)));
@@ -46755,16 +47222,13 @@ void render_openxr_test_frame(
                         : eye;
                     return direct_stereo
                         ? direct_stereo_sources[cache_eye]
-                        : (mode == 2 &&
-                                mono_captured_sources[eye] != nullptr
-                            ? mono_captured_sources[eye]
-                            : (stereo_cached
-                                ? (packed_stereo_available
-                                    ? (mode3_common_afw_sequenced_available
-                                        ? g_stereo_eye_cache[cache_eye]
-                                        : g_packed_present_cache[cache_eye])
-                                    : g_stereo_eye_cache[cache_eye])
-                                : game_backbuffer));
+                        : (stereo_cached
+                            ? (packed_stereo_available
+                                ? (mode3_common_afw_sequenced_available
+                                    ? g_stereo_eye_cache[cache_eye]
+                                    : g_packed_present_cache[cache_eye])
+                                : g_stereo_eye_cache[cache_eye])
+                            : game_backbuffer);
                 };
                 for (uint32_t eye = 0; eye < 2; ++eye) {
                     fit_projection_sources[eye] =
@@ -46781,7 +47245,7 @@ void render_openxr_test_frame(
                     asymmetric_submit_copy_height[eye] = copy_height;
                 }
                 const bool target_desc_needed =
-                    mode3_unified_openxr_submit ||
+                    unified_full_image_submit ||
                     symmetric_subimage_copy || scaled_fov_direct_copy ||
                     native_asymmetric_noaa_route_active();
                 D3D12_RESOURCE_DESC target_desc{};
@@ -47044,6 +47508,174 @@ void render_openxr_test_frame(
                         if (!native_asymmetric_projection) {
                             projection_eye_image_rect_valid[0] = false;
                             projection_eye_image_rect_valid[1] = false;
+                        }
+                    }
+                }
+
+                // Clean Mode 1 has exactly one completed REDengine source.
+                // Duplicate that immutable final image into both XR slices;
+                // the optional ASYM choice below changes only each view's
+                // reciprocal tangent subimage/FOV, never the pixels, pose,
+                // temporal history, or producer count.
+                if (clean_mono_unified_openxr_submit) {
+                    bool full_source_ready = target_desc_needed &&
+                        game_backbuffer != nullptr &&
+                        fit_projection_sources[0] == game_backbuffer &&
+                        fit_projection_sources[1] == game_backbuffer &&
+                        target_desc.Dimension ==
+                            D3D12_RESOURCE_DIMENSION_TEXTURE2D &&
+                        target_desc.Width == swapchain.width &&
+                        target_desc.Height == swapchain.height &&
+                        target_desc.SampleDesc.Count == 1;
+                    bool full_source_copy_compatible = full_source_ready;
+                    bool full_source_shader_compatible = full_source_ready;
+                    if (full_source_ready) {
+                        const auto mono_source_desc =
+                            game_backbuffer->GetDesc();
+                        const bool exact_full_source =
+                            mono_source_desc.Dimension ==
+                                D3D12_RESOURCE_DIMENSION_TEXTURE2D &&
+                            mono_source_desc.Width == swapchain.width &&
+                            mono_source_desc.Height == swapchain.height &&
+                            mono_source_desc.SampleDesc.Count == 1;
+                        full_source_ready = exact_full_source;
+                        full_source_copy_compatible = exact_full_source &&
+                            mono_source_desc.SampleDesc.Count ==
+                                target_desc.SampleDesc.Count &&
+                            mono_source_desc.SampleDesc.Quality ==
+                                target_desc.SampleDesc.Quality &&
+                            copy_format_compatible(
+                                mono_source_desc.Format,
+                                target_desc.Format);
+                        full_source_shader_compatible = exact_full_source &&
+                            (mono_source_desc.Flags &
+                                D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE) == 0;
+                    }
+                    const bool identity_shader_ready =
+                        full_source_shader_compatible &&
+                        g_xr_cinema_projection_pipeline != nullptr &&
+                        g_xr_cinema_projection_root_signature != nullptr &&
+                        g_xr_cinema_projection_srv_heap != nullptr;
+                    const auto decision =
+                        w3vr::mode3_transport::decide_final_submit({
+                            true,
+                            full_source_ready,
+                            copy_width,
+                            copy_height,
+                            swapchain.width,
+                            swapchain.height,
+                            full_source_copy_compatible,
+                            identity_shader_ready});
+                    clean_mono_unified_direct_copy = decision.transport ==
+                        w3vr::mode3_transport::FinalTransport::DirectCopy;
+                    clean_mono_unified_identity_shader =
+                        decision.transport ==
+                            w3vr::mode3_transport::
+                                FinalTransport::IdentityShader;
+                    clean_mono_unified_black_frame = decision.transport ==
+                        w3vr::mode3_transport::FinalTransport::Unavailable;
+                    projection_image_rect.offset = {0, 0};
+                    projection_image_rect.extent = {
+                        static_cast<int32_t>(decision.width),
+                        static_cast<int32_t>(decision.height)};
+                    for (uint32_t eye = 0; eye < 2; ++eye) {
+                        projection_eye_image_rects[eye] =
+                            projection_image_rect;
+                        projection_eye_image_rect_valid[eye] = true;
+                        projection_eye_fit_rects[eye] =
+                            projection_image_rect;
+                        projection_eye_float_fit_rects[eye] = {
+                            0.0f, 0.0f,
+                            static_cast<float>(swapchain.width),
+                            static_cast<float>(swapchain.height)};
+                    }
+                    projection_eye_fit_rect_valid = true;
+                    projection_eye_float_fit_rect_valid = true;
+
+                    const bool asymmetric_optics_requested =
+                        native_stereo_runtime_enabled();
+                    if (asymmetric_optics_requested &&
+                        g_hmd_render_fov_valid.load(
+                            std::memory_order_acquire) &&
+                        g_xr_views.size() >= 2) {
+                        const XrFovf content_fov{
+                            g_hmd_render_fov_left.load(
+                                std::memory_order_relaxed),
+                            g_hmd_render_fov_right.load(
+                                std::memory_order_relaxed),
+                            g_hmd_render_fov_up.load(
+                                std::memory_order_relaxed),
+                            g_hmd_render_fov_down.load(
+                                std::memory_order_relaxed)};
+                        w3vr::openxr_eye_geometry::SymmetricEyeSubimage
+                            candidates[2]{};
+                        bool candidates_valid = true;
+                        for (uint32_t eye = 0;
+                             eye < 2 && candidates_valid; ++eye) {
+                            XrFovf target_fov{};
+                            candidates_valid =
+                                w3vr::openxr_eye_geometry::
+                                    scale_asymmetric_projection_fov(
+                                        g_xr_views[eye].fov,
+                                        requested_scale,
+                                        target_fov) &&
+                                w3vr::openxr_eye_geometry::
+                                    derive_symmetric_eye_subimage(
+                                        content_fov, target_fov,
+                                        projection_image_rect,
+                                        candidates[eye]);
+                        }
+                        if (candidates_valid) {
+                            clean_mono_symmetric_subimage = true;
+                            for (uint32_t eye = 0; eye < 2; ++eye) {
+                                projection_eye_image_rects[eye] =
+                                    candidates[eye].image_rect;
+                                projection_eye_exact_fovs[eye] =
+                                    candidates[eye].represented_fov;
+                                projection_eye_exact_fov_valid[eye] = true;
+                            }
+                        }
+                    }
+                    if (asymmetric_optics_requested &&
+                        !clean_mono_symmetric_subimage) {
+                        clean_mono_unified_direct_copy = false;
+                        clean_mono_unified_identity_shader = false;
+                        clean_mono_unified_black_frame = true;
+                    }
+                    if (clean_mono_unified_black_frame) {
+                        hud_composite_ready = false;
+                    }
+                    if (g_config.runtime_diagnostics) {
+                        static std::atomic<uint32_t>
+                            clean_mono_submit_logs{};
+                        const auto sample =
+                            clean_mono_submit_logs.fetch_add(
+                                1, std::memory_order_relaxed);
+                        if (sample < 16) {
+                            log_line(
+                                "V1360 final Mode1 mono submit sample=%u "
+                                "backend=%s source=%ux%u swapchain=%ux%u "
+                                "transport=%s optics=%s subimage=%u "
+                                "rect0=%d,%d %dx%d rect1=%d,%d %dx%d "
+                                "producer=one pose=cyclopean shift=0",
+                                sample, temporal_backend_name(),
+                                copy_width, copy_height,
+                                swapchain.width, swapchain.height,
+                                clean_mono_unified_direct_copy
+                                    ? "direct"
+                                    : (clean_mono_unified_identity_shader
+                                        ? "identity_shader" : "black"),
+                                asymmetric_optics_requested
+                                    ? "asymmetric" : "symmetric",
+                                clean_mono_symmetric_subimage ? 1u : 0u,
+                                projection_eye_image_rects[0].offset.x,
+                                projection_eye_image_rects[0].offset.y,
+                                projection_eye_image_rects[0].extent.width,
+                                projection_eye_image_rects[0].extent.height,
+                                projection_eye_image_rects[1].offset.x,
+                                projection_eye_image_rects[1].offset.y,
+                                projection_eye_image_rects[1].extent.width,
+                                projection_eye_image_rects[1].extent.height);
                         }
                     }
                 }
@@ -47323,7 +47955,9 @@ void render_openxr_test_frame(
                     }
                 }
                 const bool projection_direct_copy =
-                    mode3_unified_openxr_submit
+                    clean_mono_unified_openxr_submit
+                    ? clean_mono_unified_direct_copy
+                    : mode3_unified_openxr_submit
                     ? mode3_unified_direct_copy
                     : ((!full_surface_projection &&
                             !native_asymmetric_projection) ||
@@ -47331,11 +47965,15 @@ void render_openxr_test_frame(
                         scaled_fov_direct_copy ||
                         native_asymmetric_direct_copy);
                 const bool projection_black_frame =
-                    mode3_unified_openxr_submit
+                    clean_mono_unified_openxr_submit
+                    ? clean_mono_unified_black_frame
+                    : mode3_unified_openxr_submit
                     ? mode3_unified_black_frame
                     : native_asymmetric_black_frame;
                 const bool projection_identity_shader =
-                    mode3_unified_openxr_submit
+                    clean_mono_unified_openxr_submit
+                    ? clean_mono_unified_identity_shader
+                    : mode3_unified_openxr_submit
                     ? mode3_unified_identity_shader
                     : ((full_surface_projection ||
                             native_asymmetric_projection) &&
@@ -47385,13 +48023,13 @@ void render_openxr_test_frame(
                     // scene and HUD copies must remain unshifted.
                     int eye_shift_x = calibrated_eye_shifts_x[eye];
                     int eye_shift_y = calibrated_eye_shifts_y[eye];
-                    if (mode3_unified_openxr_submit ||
+                    if (unified_full_image_submit ||
                         spatial_panel_active || full_surface_projection ||
                         native_asymmetric_projection) {
                         eye_shift_x = 0;
                         eye_shift_y = 0;
                     }
-                    if (!mode3_unified_openxr_submit &&
+                    if (!unified_full_image_submit &&
                         !full_surface_projection && native_projection_ready) {
                         const int residual = std::max(0,
                             abs(eye_shift_x) -
@@ -47432,7 +48070,7 @@ void render_openxr_test_frame(
                     // unusual runtime rectangles must never leak a one-pixel
                     // cleared edge at slider 1.0. Keep the optical-center crop
                     // inside the exact region copied for this eye.
-                    if (!mode3_unified_openxr_submit &&
+                    if (!unified_full_image_submit &&
                         projection_eye_image_rect_valid[eye] &&
                         requested_scale >= 0.999f &&
                         shifted_width > 0 && shifted_height > 0) {
@@ -47628,24 +48266,22 @@ void render_openxr_test_frame(
 
             XrView mono_render_views[2]{{XR_TYPE_VIEW}, {XR_TYPE_VIEW}};
             bool mono_render_views_valid{};
-            if (mode == 2) {
-                if (mono_capture_slots[0] != nullptr &&
-                    mono_capture_slots[0]->render_view_valid) {
-                    mono_render_views[0] =
-                        mono_capture_slots[0]->render_view;
-                    mono_render_views[1] =
-                        mono_capture_slots[0]->render_view;
-                    mono_render_views_valid = true;
-                } else {
-                    std::scoped_lock view_lock{g_engine_completed_view_mutex};
-                    mono_render_views[0] = g_mono_dlss_render_views[0];
-                    mono_render_views[1] = g_mono_dlss_render_views[1];
-                    mono_render_views_valid = g_mono_dlss_render_views_valid;
-                }
+            if (clean_mono_mode(mode)) {
+                std::scoped_lock view_lock{g_engine_completed_view_mutex};
+                const bool dlss_views = temporal_backend_is_dlss() &&
+                    g_clean_mono_dlss_render_views_valid;
+                mono_render_views[0] = dlss_views
+                    ? g_clean_mono_dlss_render_views[0]
+                    : g_clean_mono_render_views[0];
+                mono_render_views[1] = dlss_views
+                    ? g_clean_mono_dlss_render_views[1]
+                    : g_clean_mono_render_views[1];
+                mono_render_views_valid = dlss_views ||
+                    g_clean_mono_render_views_valid;
             }
             XrPosef mono_cyclopean_pose{};
             bool mono_cyclopean_pose_valid{};
-            if (mode == 2 && g_xr_views.size() >= 2) {
+            if (clean_mono_mode(mode) && g_xr_views.size() >= 2) {
                 const XrView* mono_pose_views = mono_render_views_valid
                     ? mono_render_views
                     : g_xr_views.data();
@@ -47713,9 +48349,10 @@ void render_openxr_test_frame(
                     // correct source pose instead of the latest global pose.
                     render_view = &g_stereo_eye_cache_views[render_source_eye];
                     render_view_origin = "stereo_cache";
-                } else if (mode == 2 && mono_render_views_valid) {
+                } else if (clean_mono_mode(mode) &&
+                    mono_render_views_valid) {
                     render_view = &mono_render_views[eye];
-                    render_view_origin = "mono_capture";
+                    render_view_origin = "clean_mono_producer";
                 }
                 // [TRIAL:RT-NATIVE-AER-FINAL-SOURCE V13013 4/4] Count only
                 // real cache-view submissions, not bootstrap fallbacks.
@@ -47762,14 +48399,32 @@ void render_openxr_test_frame(
                 // per-eye tangent crop from the unfiltered 1:1 source copy.
                 // The fallback shader still publishes the complete rectangle.
                 // Both paths use the unchanged raw runtime FOV.
-                // [FIX:MONO-RUNTIME-FOV-PAIRING 1/1] Mono deliberately shares
-                // one captured image and cyclopean pose, but the copy transform
-                // above is calculated from each runtime eye. Submit that same
-                // eye's runtime FOV instead of duplicating the captured
-                // left-eye FOV into both OpenXR views.
+                // Clean mono deliberately shares one final image and one
+                // cyclopean pose. ASYM selects only the exact tangent interval
+                // represented by each view's subimage; SYM keeps the complete
+                // producer envelope. No pixel shift or eye-local source exists.
                 if (cinema_projection_panel_ready) {
                     projection_views[eye].fov =
                         current_panel_views[eye].fov;
+                } else if (clean_mono_unified_openxr_submit) {
+                    if (clean_mono_symmetric_subimage &&
+                        projection_eye_exact_fov_valid[eye]) {
+                        projection_views[eye].fov =
+                            projection_eye_exact_fovs[eye];
+                    } else if (g_hmd_render_fov_valid.load(
+                            std::memory_order_acquire)) {
+                        projection_views[eye].fov = {
+                            g_hmd_render_fov_left.load(
+                                std::memory_order_acquire),
+                            g_hmd_render_fov_right.load(
+                                std::memory_order_acquire),
+                            g_hmd_render_fov_up.load(
+                                std::memory_order_acquire),
+                            g_hmd_render_fov_down.load(
+                                std::memory_order_acquire)};
+                    } else {
+                        projection_views[eye].fov = render_view->fov;
+                    }
                 } else if (mode3_unified_openxr_submit) {
                     if (mode3_symmetric_subimage &&
                         projection_eye_exact_fov_valid[eye]) {
@@ -47813,12 +48468,12 @@ void render_openxr_test_frame(
                             std::memory_order_acquire)};
                 } else if (full_surface_projection) {
                     projection_views[eye].fov =
-                        mode == 2 && eye < g_xr_views.size()
+                        clean_mono_mode(mode) && eye < g_xr_views.size()
                         ? g_xr_views[eye].fov
                         : render_view->fov;
                 } else {
                     projection_views[eye].fov =
-                        mode == 2 && eye < g_xr_views.size()
+                        clean_mono_mode(mode) && eye < g_xr_views.size()
                         ? g_xr_views[eye].fov
                         : render_view->fov;
                 }
@@ -47828,7 +48483,7 @@ void render_openxr_test_frame(
                     projection_views[eye].subImage.imageRect.extent = {
                         static_cast<int32_t>(swapchain.width),
                         static_cast<int32_t>(swapchain.height)};
-                } else if (mode3_unified_openxr_submit) {
+                } else if (unified_full_image_submit) {
                     // GPU transport always owns the full slice. Every genuine
                     // Mode-3 SYM source exposes its reciprocal per-eye tangent
                     // subimage; every genuine ASYM source keeps the full rect.
@@ -48175,10 +48830,17 @@ void render_openxr_test_frame(
     menu_layer.subImage.imageRect = menu_image_rect;
     menu_layer.subImage.imageArrayIndex = 0;
     // The frontend can report a formally valid LOCAL pose at floor height
-    // before REDengine's stereo renderer is active. Keep only that startup
+    // before REDengine's gameplay camera is active. Keep only that startup
     // menu in VIEW space; pause/inventory menus remain LOCAL world-locked.
+    // Clean Mono never enables dual rendering, so its first HMD gameplay
+    // camera is the readiness edge for switching later menus to LOCAL space.
+    const bool clean_mono_gameplay_camera_seen =
+        g_engine_hmd_camera_last_present.load(std::memory_order_acquire) !=
+            UINT64_MAX;
     const bool startup_frontend_panel = fullscreen_menu &&
-        !g_engine_dual_render_active.load(std::memory_order_relaxed);
+        !g_engine_dual_render_active.load(std::memory_order_relaxed) &&
+        (!clean_mono_transport_active() ||
+            !clean_mono_gameplay_camera_seen);
     const int spatial_panel_kind = startup_frontend_panel
         ? 0
         : (fullscreen_menu ? 1
@@ -48676,7 +49338,7 @@ void handle_f3_capture_hotkey(IDXGISwapChain* swapchain) {
     if (w3vr::pipeline_flight::enabled()) {
         w3vr::pipeline_flight::dump_last_ten_seconds();
     }
-    w3vr::route_flight::dump_last_seconds("V1391", 15);
+    w3vr::route_flight::dump_last_seconds("V1408", 15);
     trigger_renderdoc_capture(
         g_game_swapchain != nullptr ? g_game_swapchain : swapchain);
 }
@@ -48807,11 +49469,10 @@ HRESULT STDMETHODCALLTYPE hook_present(IDXGISwapChain* swapchain, UINT sync_inte
             false, std::memory_order_acq_rel)) {
         reset_loading_video_presentation_state(frame);
     }
-    // Packed/stereo already polls GuiManager from the installed frame-factory
-    // hook.  Mono intentionally has no frame-factory hook, so relying only on
-    // intercepted game calls to IsAnyMenu misses most pause/inventory opens.
-    // Poll the same validated virtual once per mono Present instead.
-    if (g_config.openxr_mode == 2) {
+    // Packed/stereo receives GuiManager state through the dual-render path.
+    // Clean mono installs the frame-factory hook only to tag its one natural
+    // producer; it still needs the validated once-per-Present menu poll.
+    if (clean_mono_transport_active()) {
         poll_engine_menu_state();
     }
     if (high_frequency_runtime_diagnostics_active() && frame % 120 == 0) {
