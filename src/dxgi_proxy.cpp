@@ -34,6 +34,9 @@
 #include "shadow_cascade_authority_policy.h"
 #include "taau_submission_policy.h"
 
+// V1366 carries retained-HUD ownership across an exact ordered producer queue
+// submission, so the late compositor is independent of REDengine's queue
+// topology. V1365's native Streamline command-list repair remains unchanged.
 // V1365 unwraps Streamline's public command-list wrapper before V1352 records
 // its private AFW motion-normalization compute work. The public wrapper remains
 // the owner of slEvaluateFeature; raw D3D12 trampolines receive only a proven
@@ -3024,6 +3027,8 @@ struct Mode3AerAfwSubmittedHudTag {
     EngineFrameTag tag{};
     ID3D12GraphicsCommandList* command_list{};
     ID3D12CommandQueue* queue{};
+    ID3D12Fence* producer_queue_fence{};
+    uint64_t producer_queue_fence_value{};
     uint64_t recorded_present{};
     uint64_t submission_serial{};
     bool scene_only_draw_recorded{};
@@ -4298,6 +4303,10 @@ std::atomic<uint64_t> g_mode3_hud_composite_success{};
 constexpr uint32_t kMode3EarlyHudSlotCount = 6;
 struct Mode3EarlyHudSlot {
     ID3D12Resource* resource{};
+    ID3D12Fence* producer_queue_fence{};
+    uint64_t producer_queue_fence_value{};
+    ID3D12Fence* tag_producer_queue_fence{};
+    uint64_t tag_producer_queue_fence_value{};
     bool shader_read_state{};
     bool initialized{};
     uint32_t generation{};
@@ -4335,6 +4344,8 @@ struct Mode3SubmittedEarlyHudPending {
     Mode3EarlyHudPending pending{};
     ID3D12GraphicsCommandList* command_list{};
     ID3D12CommandQueue* queue{};
+    ID3D12Fence* producer_queue_fence{};
+    uint64_t producer_queue_fence_value{};
     uint64_t submission_serial{};
 };
 std::array<Mode3EarlyHudSlot, kMode3EarlyHudSlotCount>
@@ -4371,7 +4382,10 @@ take_mode3_aer_afw_hud_submissions_before_execute(
     ID3D12CommandList* const* command_lists);
 void publish_mode3_aer_afw_hud_submissions_before_execute(
     ID3D12CommandQueue* queue,
-    const std::vector<Mode3AerAfwHudExecuteSubmission>& pending);
+    const std::vector<Mode3AerAfwHudExecuteSubmission>& pending,
+    bool submission_ordered = true,
+    ID3D12Fence* producer_queue_fence = nullptr,
+    uint64_t producer_queue_fence_value = 0);
 
 bool mode3_hud_pipeline_family(ID3D12PipelineState* pipeline) {
     return pipeline != nullptr &&
@@ -18323,10 +18337,18 @@ void publish_puredark_afw_submissions(
     }
 }
 
-void publish_puredark_afw_submissions_after_execute(
+// [FIX:CROSS-QUEUE-RETAINED-HUD-OWNERSHIP V1366 1/6] One signal placed after
+// the real ExecuteCommandLists call proves completion of every exact HUD and
+// AFW command list in this submission. Secondary-queue HUD metadata is not
+// published before this proof exists; the primary path keeps V1285's
+// pre-Execute latency.
+void publish_mode3_submissions_after_execute(
     ID3D12CommandQueue* producer_queue,
-    const std::vector<PuredarkAfwPendingSubmission>& pending) {
-    if (pending.empty()) {
+    const std::vector<PuredarkAfwPendingSubmission>& afw_pending,
+    const std::vector<Mode3AerAfwHudExecuteSubmission>& hud_pending,
+    bool publish_cross_queue_hud) {
+    if (afw_pending.empty() &&
+        (!publish_cross_queue_hud || hud_pending.empty())) {
         return;
     }
     ID3D12Fence* producer_queue_fence{};
@@ -18335,8 +18357,13 @@ void publish_puredark_afw_submissions_after_execute(
         producer_queue, producer_queue_fence,
         producer_queue_fence_value);
     publish_puredark_afw_submissions(
-        pending, submission_ordered, producer_queue_fence,
+        afw_pending, submission_ordered, producer_queue_fence,
         producer_queue_fence_value);
+    if (publish_cross_queue_hud) {
+        publish_mode3_aer_afw_hud_submissions_before_execute(
+            producer_queue, hud_pending, submission_ordered,
+            producer_queue_fence, producer_queue_fence_value);
+    }
 }
 
 std::vector<EngineFrameTag> take_dlss_cache_submissions(
@@ -18578,12 +18605,16 @@ void STDMETHODCALLTYPE hook_execute_command_lists(
     auto aer_afw_hud_pending =
         take_mode3_aer_afw_hud_submissions_before_execute(
             num_command_lists, command_lists);
+    const bool deferred_cross_queue_hud_publication =
+        queue != g_command_queue && !aer_afw_hud_pending.empty();
     // [PERF:AER-AFW-HUD-PREEXECUTE-PUBLISH V1285 1/4] Pointer-exact labels
     // become visible while REDengine records the PRESENT barrier. Publish the
     // already-detached fallback snapshot at the matching pre-submit boundary
     // instead of making renderer workers discover it only after Execute.
-    publish_mode3_aer_afw_hud_submissions_before_execute(
-        queue, aer_afw_hud_pending);
+    if (!deferred_cross_queue_hud_publication) {
+        publish_mode3_aer_afw_hud_submissions_before_execute(
+            queue, aer_afw_hud_pending);
+    }
     // RT camera/history overrides borrow the shared tiled-culling upload slots.
     // Their command-list uses must reach the queue-fence retirement below even
     // in a release run; diagnostic mode previously disabled this early return
@@ -18608,8 +18639,9 @@ void STDMETHODCALLTYPE hook_execute_command_lists(
         }
         w3vr::pipeline_flight::on_execute(
             queue, num_command_lists, command_lists);
-        publish_puredark_afw_submissions_after_execute(
-            queue, puredark_afw_pending);
+        publish_mode3_submissions_after_execute(
+            queue, puredark_afw_pending, aer_afw_hud_pending,
+            deferred_cross_queue_hud_publication);
         publish_dlss_cache_submissions(dlss_cache_pending);
         publish_taau_cache_submissions(taau_cache_pending);
         return;
@@ -18801,8 +18833,9 @@ void STDMETHODCALLTYPE hook_execute_command_lists(
     }
     w3vr::pipeline_flight::on_execute(
         queue, num_command_lists, command_lists);
-    publish_puredark_afw_submissions_after_execute(
-        queue, puredark_afw_pending);
+    publish_mode3_submissions_after_execute(
+        queue, puredark_afw_pending, aer_afw_hud_pending,
+        deferred_cross_queue_hud_publication);
     publish_dlss_cache_submissions(dlss_cache_pending);
     publish_taau_cache_submissions(taau_cache_pending);
     if (!taau_slot_uses.empty() && g_taau_slot_fence != nullptr) {
@@ -21589,6 +21622,10 @@ void reset_mode3_early_hud_generation_locked(uint32_t generation) {
     g_mode3_early_hud_accepted_pair = 0;
     for (auto& slot : g_mode3_early_hud_slots) {
         slot.initialized = false;
+        slot.producer_queue_fence = nullptr;
+        slot.producer_queue_fence_value = 0;
+        slot.tag_producer_queue_fence = nullptr;
+        slot.tag_producer_queue_fence_value = 0;
         slot.generation = generation;
         slot.eye = UINT32_MAX;
         slot.pair_id = 0;
@@ -21949,6 +21986,10 @@ bool capture_mode3_early_hud(
 
     slot.shader_read_state = true;
     slot.initialized = true;
+    slot.producer_queue_fence = nullptr;
+    slot.producer_queue_fence_value = 0;
+    slot.tag_producer_queue_fence = nullptr;
+    slot.tag_producer_queue_fence_value = 0;
     slot.generation = generation;
     slot.eye = UINT32_MAX;
     slot.pair_id = 0;
@@ -22014,7 +22055,11 @@ void record_mode3_scene_only_hud_output(
 bool apply_mode3_early_hud_label_locked(
     const Mode3EarlyHudPending& pending,
     const EngineFrameTag& tag,
-    uint32_t generation) {
+    uint32_t generation,
+    ID3D12Fence* producer_queue_fence = nullptr,
+    uint64_t producer_queue_fence_value = 0,
+    ID3D12Fence* tag_producer_queue_fence = nullptr,
+    uint64_t tag_producer_queue_fence_value = 0) {
     if (pending.slot >= kMode3EarlyHudSlotCount) {
         return false;
     }
@@ -22023,6 +22068,14 @@ bool apply_mode3_early_hud_label_locked(
         slot.capture_serial != pending.capture_serial) {
         return false;
     }
+    // [FIX:CROSS-QUEUE-RETAINED-HUD-OWNERSHIP V1366 3/6] The slot owns the
+    // exact signal following its CopyResource submission. Null/zero denotes
+    // the primary queue, where normal queue order is already sufficient.
+    slot.producer_queue_fence = producer_queue_fence;
+    slot.producer_queue_fence_value = producer_queue_fence_value;
+    slot.tag_producer_queue_fence = tag_producer_queue_fence;
+    slot.tag_producer_queue_fence_value =
+        tag_producer_queue_fence_value;
     slot.eye = tag.eye;
     slot.pair_id = tag.pair_id;
     g_mode3_early_hud_latest_slot[tag.eye] = pending.slot;
@@ -22059,7 +22112,9 @@ bool get_mode3_early_hud_pair(
     uint64_t* selected_pair = nullptr,
     bool* exact_pair = nullptr,
     bool* shared_fresh_source = nullptr,
-    bool require_eye_local_sources = false) {
+    bool require_eye_local_sources = false,
+    ID3D12Fence* producer_queue_fences[4] = nullptr,
+    uint64_t producer_queue_fence_values[4] = nullptr) {
     std::scoped_lock lock{g_mode3_early_hud_mutex};
     if (selected_pair != nullptr) {
         *selected_pair = 0;
@@ -22070,6 +22125,33 @@ bool get_mode3_early_hud_pair(
     if (shared_fresh_source != nullptr) {
         *shared_fresh_source = false;
     }
+    if (producer_queue_fences != nullptr) {
+        for (uint32_t index = 0; index < 4; ++index) {
+            producer_queue_fences[index] = nullptr;
+        }
+    }
+    if (producer_queue_fence_values != nullptr) {
+        for (uint32_t index = 0; index < 4; ++index) {
+            producer_queue_fence_values[index] = 0;
+        }
+    }
+    const auto select_source = [&](uint32_t eye,
+                                   const Mode3EarlyHudSlot& slot) {
+        sources[eye] = slot.resource;
+        source_formats[eye] = slot.srv_format;
+        if (producer_queue_fences != nullptr) {
+            producer_queue_fences[eye * 2] =
+                slot.producer_queue_fence;
+            producer_queue_fences[eye * 2 + 1] =
+                slot.tag_producer_queue_fence;
+        }
+        if (producer_queue_fence_values != nullptr) {
+            producer_queue_fence_values[eye * 2] =
+                slot.producer_queue_fence_value;
+            producer_queue_fence_values[eye * 2 + 1] =
+                slot.tag_producer_queue_fence_value;
+        }
+    };
     const uint32_t generation =
         g_streamline_capture_generation.load(std::memory_order_acquire);
     // [FIX:MODE3-STRICT-PREVIOUS-HUD 1/2] The scene publisher records the exact
@@ -22129,8 +22211,7 @@ bool get_mode3_early_hud_pair(
         if (settled_slot < kMode3EarlyHudSlotCount) {
             const auto& slot = g_mode3_early_hud_slots[settled_slot];
             for (uint32_t eye = 0; eye < 2; ++eye) {
-                sources[eye] = slot.resource;
-                source_formats[eye] = slot.srv_format;
+                select_source(eye, slot);
             }
             if (selected_pair != nullptr) {
                 *selected_pair = target_pair;
@@ -22170,8 +22251,7 @@ bool get_mode3_early_hud_pair(
             if (fallback_slot < kMode3EarlyHudSlotCount) {
                 const auto& slot = g_mode3_early_hud_slots[fallback_slot];
                 for (uint32_t eye = 0; eye < 2; ++eye) {
-                    sources[eye] = slot.resource;
-                    source_formats[eye] = slot.srv_format;
+                    select_source(eye, slot);
                 }
                 if (selected_pair != nullptr) {
                     *selected_pair = fallback_pair;
@@ -22233,8 +22313,7 @@ bool get_mode3_early_hud_pair(
                 const auto& slot =
                     g_mode3_early_hud_slots[fresh_slot];
                 for (uint32_t eye = 0; eye < 2; ++eye) {
-                    sources[eye] = slot.resource;
-                    source_formats[eye] = slot.srv_format;
+                    select_source(eye, slot);
                 }
                 if (shared_fresh_source != nullptr) {
                     *shared_fresh_source = true;
@@ -22245,8 +22324,7 @@ bool get_mode3_early_hud_pair(
                 for (uint32_t eye = 0; eye < 2; ++eye) {
                     const auto& slot =
                         g_mode3_early_hud_slots[exact_slot[eye]];
-                    sources[eye] = slot.resource;
-                    source_formats[eye] = slot.srv_format;
+                    select_source(eye, slot);
                 }
             }
             if (selected_pair != nullptr) {
@@ -22275,8 +22353,7 @@ bool get_mode3_early_hud_pair(
             slot.pair_id != g_mode3_early_hud_accepted_pair) {
             return false;
         }
-        sources[eye] = slot.resource;
-        source_formats[eye] = slot.srv_format;
+        select_source(eye, slot);
     }
     if (selected_pair != nullptr) {
         *selected_pair = g_mode3_early_hud_accepted_pair;
@@ -27199,9 +27276,32 @@ take_mode3_aer_afw_hud_submissions_before_execute(
 // unchanged while CPU-visible readiness no longer trails the submission.
 void publish_mode3_aer_afw_hud_submissions_before_execute(
     ID3D12CommandQueue* queue,
-    const std::vector<Mode3AerAfwHudExecuteSubmission>& pending) {
+    const std::vector<Mode3AerAfwHudExecuteSubmission>& pending,
+    bool submission_ordered,
+    ID3D12Fence* producer_queue_fence,
+    uint64_t producer_queue_fence_value) {
     if (!mode3_submitted_hud_join_route_configured() ||
         queue == nullptr || pending.empty()) {
+        return;
+    }
+    const bool cross_queue_publication = queue != g_command_queue;
+    // [FIX:CROSS-QUEUE-RETAINED-HUD-OWNERSHIP V1366 2/6] A secondary queue
+    // may publish only after the exact Execute call has a real GPU timeline.
+    // Unknown queue topology fails closed on the retained layer and leaves the
+    // native HUD visible.
+    if (cross_queue_publication &&
+        (!submission_ordered || producer_queue_fence == nullptr ||
+            producer_queue_fence_value == 0)) {
+        static std::atomic<uint32_t> unordered_hud_publication_logs{};
+        if (take_bounded_log_slot(unordered_hud_publication_logs, 16)) {
+            log_line(
+                "V1366 cross-queue retained HUD publication rejected "
+                "queue=%p primary=%p ordered=%u fence=%p value=%llu",
+                queue, g_command_queue, submission_ordered ? 1u : 0u,
+                producer_queue_fence,
+                static_cast<unsigned long long>(
+                    producer_queue_fence_value));
+        }
         return;
     }
     for (const auto& submission : pending) {
@@ -27217,12 +27317,18 @@ void publish_mode3_aer_afw_hud_submissions_before_execute(
             std::scoped_lock lock{g_mode3_early_hud_mutex};
             g_mode3_early_hud_submitted.push_back({
                 recorded_capture, command_list, queue,
+                cross_queue_publication ? producer_queue_fence : nullptr,
+                cross_queue_publication
+                    ? producer_queue_fence_value : 0,
                 submission.submission_serial});
         }
         if (has_tag) {
             std::scoped_lock lock{g_mode3_aer_afw_hud_mutex};
             g_mode3_aer_afw_submitted_hud_tags.push_back({
                 recorded_tag.tag, command_list, queue,
+                cross_queue_publication ? producer_queue_fence : nullptr,
+                cross_queue_publication
+                    ? producer_queue_fence_value : 0,
                 recorded_tag.recorded_present,
                 submission.submission_serial,
                 submission.scene_only_draw_recorded});
@@ -27257,9 +27363,20 @@ void publish_mode3_aer_afw_hud_submissions_before_execute(
             // [PERF:AER-AFW-HUD-ATOMIC-SUBMISSION-ORDER V1284 4/6]
             // Concurrent publishers need not append in serial order. Select
             // the newest immutable submission explicitly.
+            // [FIX:CROSS-QUEUE-RETAINED-HUD-OWNERSHIP V1366 5/6] A primary
+            // PRESENT may consume a secondary candidate only when that exact
+            // candidate carries an ordered producer fence. Same-queue joins
+            // retain the established queue-order proof.
             for (const auto& candidate :
                     g_mode3_aer_afw_submitted_hud_tags) {
-                if (candidate.queue == queue &&
+                const bool candidate_ordered_for_present =
+                    candidate.queue == queue ||
+                    (queue == g_command_queue &&
+                        candidate.queue != nullptr &&
+                        candidate.queue != queue &&
+                        candidate.producer_queue_fence != nullptr &&
+                        candidate.producer_queue_fence_value != 0);
+                if (candidate_ordered_for_present &&
                     w3vr::mode3_transport::
                         submitted_hud_join_window_matches(
                             candidate.tag.generation, generation,
@@ -27297,7 +27414,14 @@ void publish_mode3_aer_afw_hud_submissions_before_execute(
             // [PERF:AER-AFW-HUD-ATOMIC-SUBMISSION-ORDER V1284 5/6] Match the
             // tag policy above instead of depending on deque insertion order.
             for (const auto& candidate : g_mode3_early_hud_submitted) {
-                if (candidate.queue == queue &&
+                const bool capture_ordered_for_present =
+                    candidate.queue == queue ||
+                    (queue == g_command_queue &&
+                        candidate.queue != nullptr &&
+                        candidate.queue != queue &&
+                        candidate.producer_queue_fence != nullptr &&
+                        candidate.producer_queue_fence_value != 0);
+                if (capture_ordered_for_present &&
                     w3vr::mode3_transport::
                         submitted_hud_join_window_matches(
                             candidate.pending.generation, generation,
@@ -27316,7 +27440,11 @@ void publish_mode3_aer_afw_hud_submissions_before_execute(
             }
             if (capture_ready) {
                 labeled = apply_mode3_early_hud_label_locked(
-                    selected_capture.pending, selected_tag.tag, generation);
+                    selected_capture.pending, selected_tag.tag, generation,
+                    selected_capture.producer_queue_fence,
+                    selected_capture.producer_queue_fence_value,
+                    selected_tag.producer_queue_fence,
+                    selected_tag.producer_queue_fence_value);
                 if (labeled) {
                     const uint64_t consumed_serial =
                         selected_capture.submission_serial;
@@ -27325,7 +27453,8 @@ void publish_mode3_aer_afw_hud_submissions_before_execute(
                             g_mode3_early_hud_submitted.begin(),
                             g_mode3_early_hud_submitted.end(),
                             [&](const Mode3SubmittedEarlyHudPending& candidate) {
-                                return candidate.queue == queue &&
+                                return candidate.queue ==
+                                        selected_capture.queue &&
                                     candidate.submission_serial <=
                                         consumed_serial;
                             }),
@@ -27343,7 +27472,7 @@ void publish_mode3_aer_afw_hud_submissions_before_execute(
                         g_mode3_aer_afw_submitted_hud_tags.begin(),
                         g_mode3_aer_afw_submitted_hud_tags.end(),
                         [&](const Mode3AerAfwSubmittedHudTag& candidate) {
-                            return candidate.queue == queue &&
+                            return candidate.queue == selected_tag.queue &&
                                 candidate.submission_serial <=
                                     consumed_serial;
                         }),
@@ -27358,14 +27487,16 @@ void publish_mode3_aer_afw_hud_submissions_before_execute(
             if (take_bounded_log_slot(submitted_hud_join_logs, 64)) {
                 // [PERF:AER-AFW-HUD-PREEXECUTE-PUBLISH V1285 3/4]
                 log_line(
-                    "V1293 pre-Execute Mode-3 submitted HUD join "
+                    "V1366 ordered Mode-3 submitted HUD join "
                     "tag=%d capture=%d "
                     "labeled=%d eye=%u pair=%llu generation=%u "
                     "tag_command_list=%p capture_command_list=%p "
                     "present_command_list=%p tag_present=%llu "
                     "capture_present=%llu boundary_present=%llu "
                     "tag_serial=%llu capture_serial=%llu present_serial=%llu "
-                    "queue=%p",
+                    "queue=%p tag_queue=%p capture_queue=%p "
+                    "tag_fence=%p tag_value=%llu capture_fence=%p "
+                    "capture_value=%llu",
                     tag_ready ? 1 : 0, capture_ready ? 1 : 0,
                     labeled ? 1 : 0, selected_tag.tag.eye,
                     static_cast<unsigned long long>(
@@ -27386,7 +27517,13 @@ void publish_mode3_aer_afw_hud_submissions_before_execute(
                         selected_capture.submission_serial),
                     static_cast<unsigned long long>(
                         submission.submission_serial),
-                    queue);
+                    queue, selected_tag.queue, selected_capture.queue,
+                    selected_tag.producer_queue_fence,
+                    static_cast<unsigned long long>(
+                        selected_tag.producer_queue_fence_value),
+                    selected_capture.producer_queue_fence,
+                    static_cast<unsigned long long>(
+                        selected_capture.producer_queue_fence_value));
             }
         }
     }
@@ -39745,7 +39882,7 @@ void ensure_initialized() {
                 "focus_fire_b1=stereo_and_aer_centered_draw_proven "
                 "aer_taau_hud=scene_and_retained_pair_fail_open");
             log_line(
-                "witcher3vr dxgi proxy initialized build=V1365 base=V1364_streamline_afw_native_command_list "
+                "witcher3vr dxgi proxy initialized build=V1366 base=V1365_cross_queue_retained_hud_ownership "
                 "anchor_smoothing_ini=%d anchor_smoothing_seconds=%.4f "
                 "first_person_strafe_ini=%d mode3_aer_presentation=%d raytracing_enabled=%d raytracing_history_buffers=%d "
                 "aer_afw_enabled=%d persistent_registry=%d dlss_public_streamline=%d "
@@ -39813,6 +39950,9 @@ void ensure_initialized() {
                 "V1364 strict_stereo_dlss_constants=original_builder_per_eye guard=state_0x6c peer_payload_replay=0 aer=unchanged route_flight=always_on_ram_f3");
             log_line(
                 "V1365 streamline_afw_recording=native_unwrapped public_sl_evaluate=wrapper fail_closed_non_native=1");
+            // [FIX:CROSS-QUEUE-RETAINED-HUD-OWNERSHIP V1366 6/6]
+            log_line(
+                "V1366 retained_hud_ownership=exact_ordered_submission cross_queue_gpu_wait=1 same_queue_fast_path=1 queue_topology_independent=1");
             log_line(
                 "V1279 DLSS compatibility=public_streamline_aer_private_history_ngx_stereo legacy_module_agnostic_discovery=disabled_by_V1288");
             log_line(
@@ -40218,11 +40358,14 @@ bool composite_mode3_hud_into_projection_image(
     uint64_t selected_hud_pair{};
     bool exact_hud_pair{};
     bool shared_fresh_hud_source{};
+    ID3D12Fence* hud_producer_fences[4]{};
+    uint64_t hud_producer_fence_values[4]{};
     const bool hud_pair_available = get_mode3_early_hud_pair(
         sources, source_formats, scene_pair_id,
         &selected_hud_pair, &exact_hud_pair,
         &shared_fresh_hud_source,
-        route == Mode3HudProjectionRoute::FullVr);
+        route == Mode3HudProjectionRoute::FullVr,
+        hud_producer_fences, hud_producer_fence_values);
     if (!hud_pair_available ||
         g_xr_command_list == nullptr ||
         g_xr_hud_pipeline == nullptr ||
@@ -40236,6 +40379,57 @@ bool composite_mode3_hud_into_projection_image(
         image_index >= target_swapchain.images.size() ||
         image_index * 2 + 1 >= target_swapchain.rtvs.size()) {
         return false;
+    }
+    // [FIX:CROSS-QUEUE-RETAINED-HUD-OWNERSHIP V1366 4/6] Queue the exact
+    // producer signals before the XR list that samples these retained copies.
+    // This is a GPU queue dependency, never a CPU wait. Same-queue sources
+    // carry null/zero and retain the original zero-overhead path.
+    for (uint32_t owner = 0; owner < 4; ++owner) {
+        auto* const producer_fence = hud_producer_fences[owner];
+        const uint64_t producer_value =
+            hud_producer_fence_values[owner];
+        if (producer_fence == nullptr || producer_value == 0) {
+            continue;
+        }
+        bool covered_by_prior_wait{};
+        for (uint32_t prior_owner = 0; prior_owner < owner; ++prior_owner) {
+            if (hud_producer_fences[prior_owner] == producer_fence &&
+                hud_producer_fence_values[prior_owner] >= producer_value) {
+                covered_by_prior_wait = true;
+                break;
+            }
+        }
+        if (covered_by_prior_wait || g_command_queue == nullptr) {
+            if (g_command_queue == nullptr) {
+                return false;
+            }
+            continue;
+        }
+        const HRESULT wait_result =
+            g_command_queue->Wait(producer_fence, producer_value);
+        if (FAILED(wait_result)) {
+            log_line(
+                "V1366 retained HUD cross-queue wait failed eye=%u "
+                "fence=%p value=%llu hr=0x%08X",
+                owner / 2, producer_fence,
+                static_cast<unsigned long long>(producer_value),
+                static_cast<unsigned>(wait_result));
+            return false;
+        }
+        static std::atomic<uint64_t> retained_hud_cross_queue_waits{};
+        const uint64_t wait_count =
+            retained_hud_cross_queue_waits.fetch_add(
+                1, std::memory_order_relaxed) + 1;
+        if (wait_count <= 32 || (wait_count % 240) == 0) {
+            log_line(
+                "V1366 retained HUD cross-queue wait count=%llu eye=%u "
+                "owner=%s fence=%p value=%llu pair=%llu",
+                static_cast<unsigned long long>(wait_count), owner / 2,
+                (owner % 2) == 0 ? "capture" : "tag",
+                producer_fence,
+                static_cast<unsigned long long>(producer_value),
+                static_cast<unsigned long long>(selected_hud_pair));
+        }
     }
     D3D12_RESOURCE_DESC source_descs[2]{
         sources[0]->GetDesc(), sources[1]->GetDesc()};
@@ -47785,7 +47979,7 @@ void handle_f3_capture_hotkey(IDXGISwapChain* swapchain) {
     if (w3vr::pipeline_flight::enabled()) {
         w3vr::pipeline_flight::dump_last_ten_seconds();
     }
-    w3vr::route_flight::dump_last_seconds("V1365", 15);
+    w3vr::route_flight::dump_last_seconds("V1366", 15);
     trigger_renderdoc_capture(
         g_game_swapchain != nullptr ? g_game_swapchain : swapchain);
 }
