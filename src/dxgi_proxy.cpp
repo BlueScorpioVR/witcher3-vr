@@ -26,6 +26,7 @@
 #include "first_person_horse_gallop_offset.h"
 #include "hmd_camera_orientation.h"
 #include "mode3_transport_policy.h"
+#include "mode3_dlss_constants_policy.h"
 #include "native_asymmetric_transport_policy.h"
 #include "pipeline_flight_recorder.h"
 #include "route_flight_recorder.h"
@@ -33,6 +34,10 @@
 #include "shadow_cascade_authority_policy.h"
 #include "taau_submission_policy.h"
 
+// V1364 re-enters REDengine's original DLSS constants builder only when strict
+// Stereo has produced the exact current eye-1 constants but eye 0 is still
+// missing. It forwards only the engine-owned reset bit; no constants payload,
+// camera matrix or temporal recipe is copied between eyes. AER is unchanged.
 // V1363 physically removes V1340's ineffective DLSS scene-boundary reset.
 // V1362 makes the exact producer record behind TAAU CB10 the sole owner of a
 // strict-Stereo resolve identity. The completed-task queue and committed eye
@@ -3074,6 +3079,62 @@ std::unordered_map<uint32_t, std::deque<EngineFrameTag>>
 using EngineUpscalerPipelineFn = uint32_t(__fastcall*)(
     void*, void*, void*, int64_t, uint32_t, char, float);
 EngineUpscalerPipelineFn g_engine_upscaler_pipeline{};
+struct SequentialDlssConstantsReceiptAtomic {
+    std::atomic_flag write_lock = ATOMIC_FLAG_INIT;
+    std::atomic<uint32_t> sequence{};
+    std::atomic<uint64_t> pair_id{};
+    std::atomic<uint32_t> generation{};
+    std::atomic<uint32_t> frame_token{};
+    std::atomic<uint8_t> reset{};
+};
+std::array<SequentialDlssConstantsReceiptAtomic, 2>
+    g_sequential_dlss_constants_receipts{};
+
+w3vr::mode3_dlss_constants::Receipt snapshot_sequential_dlss_constants_receipt(
+    uint32_t eye) {
+    w3vr::mode3_dlss_constants::Receipt receipt{};
+    if (eye > 1) {
+        return receipt;
+    }
+    auto& slot = g_sequential_dlss_constants_receipts[eye];
+    for (;;) {
+        const uint32_t begin = slot.sequence.load(std::memory_order_acquire);
+        if ((begin & 1u) != 0) {
+            YieldProcessor();
+            continue;
+        }
+        receipt.pair_id = slot.pair_id.load(std::memory_order_relaxed);
+        receipt.generation = slot.generation.load(std::memory_order_relaxed);
+        receipt.frame_token = slot.frame_token.load(std::memory_order_relaxed);
+        receipt.reset = slot.reset.load(std::memory_order_relaxed) != 0;
+        const uint32_t end = slot.sequence.load(std::memory_order_acquire);
+        if (begin == end) {
+            return receipt;
+        }
+    }
+}
+
+void publish_sequential_dlss_constants_receipt(
+    uint32_t eye,
+    uint64_t pair_id,
+    uint32_t generation,
+    uint32_t frame_token,
+    bool reset) {
+    if (eye > 1 || pair_id == 0 || pair_id == UINT64_MAX) {
+        return;
+    }
+    auto& slot = g_sequential_dlss_constants_receipts[eye];
+    while (slot.write_lock.test_and_set(std::memory_order_acquire)) {
+        YieldProcessor();
+    }
+    slot.sequence.fetch_add(1, std::memory_order_acq_rel);
+    slot.pair_id.store(pair_id, std::memory_order_relaxed);
+    slot.generation.store(generation, std::memory_order_relaxed);
+    slot.frame_token.store(frame_token, std::memory_order_relaxed);
+    slot.reset.store(reset ? 1u : 0u, std::memory_order_relaxed);
+    slot.sequence.fetch_add(1, std::memory_order_release);
+    slot.write_lock.clear(std::memory_order_release);
+}
 struct SequentialDlssHistoryBinding {
     const NVSDK_NGX_Handle* history{};
     uint64_t generation{};
@@ -13201,6 +13262,13 @@ void load_config() {
             temporal_backend,
             g_config.ngx_trace,
             g_config.streamline_taau_bridge);
+
+        // V1364 keeps the coarse RAM-only route recorder active for Mode-3
+        // DLSS even when Diagnostic Logging is disabled. F3 remains the only
+        // file-I/O boundary during a normal runtime test.
+        if (dlss_sequential_mode_active()) {
+            w3vr::route_flight::set_enabled(true);
+        }
 
         if (temporal_backend_is_dlss()) {
             g_config.ngx_trace = true;
@@ -26291,10 +26359,12 @@ void __fastcall hook_engine_view_constants(void* self, void* view_data, char fla
     g_engine_view_constants(self, view_data, flags);
 }
 
-void install_engine_view_probe() {
-    // V594 uses this existing hook for a bounded cinema-only matrix probe even
-    // when the broad engine view probe is disabled in the INI.
-    if ((!g_config.engine_view_probe && !engine_view_runtime_probe_active()) ||
+void install_engine_view_constants_hook() {
+    // The same detour owns the optional bounded view probe and the functional
+    // strict-Stereo DLSS re-entry. The latter must exist independently of all
+    // diagnostic INI controls.
+    if ((!g_config.engine_view_probe && !engine_view_runtime_probe_active() &&
+            !dlss_sequential_mode_active()) ||
         g_engine_view_constants != nullptr) {
         return;
     }
@@ -26306,10 +26376,11 @@ void install_engine_view_probe() {
         MH_CreateHook(target, reinterpret_cast<void*>(&hook_engine_view_constants),
             reinterpret_cast<void**>(&g_engine_view_constants)) == MH_OK &&
         MH_EnableHook(target) == MH_OK) {
-        log_line("Engine view probe hooked RVA=0x%llX target=%p",
-            static_cast<unsigned long long>(kEngineViewConstantsRva), target);
+        log_line("Engine view constants hooked RVA=0x%llX target=%p dlss=%u",
+            static_cast<unsigned long long>(kEngineViewConstantsRva), target,
+            dlss_sequential_mode_active() ? 1u : 0u);
     } else {
-        log_line("Engine view probe hook failed RVA=0x%llX target=%p",
+        log_line("Engine view constants hook failed RVA=0x%llX target=%p",
             static_cast<unsigned long long>(kEngineViewConstantsRva), target);
     }
 }
@@ -28156,12 +28227,11 @@ void __fastcall hook_engine_dlss_command(void* context, uint8_t** stream) {
     g_streamline_forced_eye = previous_forced_eye;
 }
 
-// [FIX:DLSS-PACKED 3/10] Replay the captured Streamline recipe for the missing
-// eye so both views reach NGX with matching frame identity and graphics state.
-// [FIX:DLSS-SEQUENTIAL-PER-EYE-INPUTS 1/1] REDengine guards native input
-// preparation and DLSS evaluation independently. Reset both frame guards before
-// eye 0 so its Depth/MVec are regenerated before its native DLSS chain. The
-// explicit low-budget compatibility mode preserves the old prepare guard.
+// REDengine guards the common sl::Constants builder, native input preparation
+// and evaluation independently. Strict Stereo must execute all three original
+// producers for eye 0; copying a peer constants block is invalid because it
+// carries the other eye's camera matrices. AER already publishes both eyes and
+// is deliberately excluded from the additional constants-builder call.
 uint32_t __fastcall hook_engine_upscaler_pipeline(
     void* pipeline, void* render_state, void* frame_data, int64_t graph,
     uint32_t pass_index, char enabled, float scale) {
@@ -28194,6 +28264,8 @@ uint32_t __fastcall hook_engine_upscaler_pipeline(
             const auto frame_id = *reinterpret_cast<uint32_t*>(
                 static_cast<uint8_t*>(frame_data) + 0xAA4);
             if (dlss_state != nullptr) {
+                auto* constants_builder_frame =
+                    reinterpret_cast<uint32_t*>(dlss_state + 0x6C);
                 auto* processed_frame =
                     reinterpret_cast<uint32_t*>(dlss_state + 0x70);
                 *processed_frame = frame_id - 1;
@@ -28202,17 +28274,74 @@ uint32_t __fastcall hook_engine_upscaler_pipeline(
                         reinterpret_cast<uint32_t*>(dlss_state + 0x74);
                     *prepared_input_frame = frame_id - 1;
                 }
+
+                const uint64_t pair_id = g_engine_render_pair_id;
+                const uint32_t generation = g_engine_render_generation;
+                const uint32_t guard_before = *constants_builder_frame;
+                const auto target_before =
+                    snapshot_sequential_dlss_constants_receipt(0);
+                const auto peer_before =
+                    snapshot_sequential_dlss_constants_receipt(1);
+                const auto decision =
+                    w3vr::mode3_dlss_constants::decide_builder_reentry(
+                        true, mode3_aer_presentation_active(),
+                        g_engine_render_eye, pair_id, generation,
+                        frame_id, guard_before,
+                        target_before, peer_before);
+                const uint32_t decision_flags =
+                    (decision.target_current ? 0x01u : 0u) |
+                    (decision.peer_current ? 0x02u : 0u) |
+                    (g_engine_view_constants != nullptr ? 0x04u : 0u) |
+                    (decision.invoke ? 0x08u : 0u) |
+                    (decision.forward_reset ? 0x20u : 0u) |
+                    (mode3_aer_presentation_active() ? 0x40u : 0u);
+                record_route_flight(
+                    w3vr::route_flight::EventCode::DlssConstants,
+                    0, pair_id, peer_before.pair_id, generation,
+                    1, decision_flags, frame_id, guard_before,
+                    target_before.frame_token, peer_before.frame_token);
+
+                if (decision.invoke && g_engine_view_constants != nullptr) {
+                    // FUN_141CFE280 rebuilds the complete constants block from
+                    // this eye's current REDengine frame data. Only the
+                    // engine-generated reset bit is forwarded from the peer;
+                    // no peer matrix or constants payload is reused.
+                    *constants_builder_frame = frame_id - 1;
+                    g_engine_view_constants(
+                        dlss_state, frame_data,
+                        decision.forward_reset ? '\x01' : '\0');
+
+                    const auto target_after =
+                        snapshot_sequential_dlss_constants_receipt(0);
+                    const uint32_t guard_after = *constants_builder_frame;
+                    const bool completed =
+                        target_after.matches(pair_id, generation);
+                    record_route_flight(
+                        w3vr::route_flight::EventCode::DlssConstants,
+                        0, pair_id, peer_before.pair_id, generation,
+                        2,
+                        decision_flags |
+                            (completed ? 0x80u : 0u) |
+                            (guard_after == frame_id ? 0x100u : 0u),
+                        frame_id, guard_after,
+                        target_after.frame_token,
+                        peer_before.frame_token);
+                }
             }
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             static std::atomic<uint32_t> guard_fault_logs{};
             if (take_bounded_log_slot(guard_fault_logs, 4)) {
                 log_line(
-                    "Sequential DLSS guard reset fault frame_data=%p "
+                    "Sequential DLSS constants/guard fault frame_data=%p "
                     "pair=%llu present=%llu",
                     frame_data,
                     static_cast<unsigned long long>(g_engine_render_pair_id),
                     static_cast<unsigned long long>(g_present_count.load()));
             }
+            record_route_flight(
+                w3vr::route_flight::EventCode::DlssConstants,
+                0, g_engine_render_pair_id, 0,
+                g_engine_render_generation, 3, 0x10u);
         }
     }
 
@@ -37385,6 +37514,16 @@ void __fastcall hook_sl_set_constants(void* constants, uint32_t frame_token, uin
         }
     }
 
+    if (constants != nullptr && dlss_sequential_mode_active() && eye <= 1 &&
+        g_engine_render_eye == static_cast<int>(eye) &&
+        g_engine_render_pair_id != 0 &&
+        g_engine_render_pair_id != UINT64_MAX) {
+        publish_sequential_dlss_constants_receipt(
+            eye, g_engine_render_pair_id, g_engine_render_generation,
+            frame_token,
+            static_cast<const uint8_t*>(constants)[0x19F] != 0);
+    }
+
     if (g_config.streamline_split_viewports &&
         geometry_stereo_transport_active() &&
         g_config.engine_factory_stereo_offset != 0.0f) {
@@ -39533,7 +39672,7 @@ void ensure_initialized() {
         install_xinput_snap_turn_hook();
         install_ngx_dlaa_loader_hooks();
         initialize_performance_cpu_sets();
-        install_engine_view_probe();
+        install_engine_view_constants_hook();
         install_engine_temporal_writer_hook();
         install_engine_frame_builder_probe();
         install_engine_gameplay_entry_probe();
@@ -39585,7 +39724,7 @@ void ensure_initialized() {
                 "focus_fire_b1=stereo_and_aer_centered_draw_proven "
                 "aer_taau_hud=scene_and_retained_pair_fail_open");
             log_line(
-                "witcher3vr dxgi proxy initialized build=V1363 base=V1362_without_rejected_V1340_dlss_scene_history_reset "
+                "witcher3vr dxgi proxy initialized build=V1364 base=V1363_dlss_per_eye_constants_builder "
                 "anchor_smoothing_ini=%d anchor_smoothing_seconds=%.4f "
                 "first_person_strafe_ini=%d mode3_aer_presentation=%d raytracing_enabled=%d raytracing_history_buffers=%d "
                 "aer_afw_enabled=%d persistent_registry=%d dlss_public_streamline=%d "
@@ -39649,6 +39788,8 @@ void ensure_initialized() {
                 "V1362 smoke world-up depth=reprojected_from_new_world_row10 cbv_cache=full_handle_hash_lock_free taau_stereo_identity=exact_cb10_producer_no_history_fallback projection_PSO=deferred_exact_runtime_fov smoke_visibility_diagnostic=removed hidden_draws=0 gpu_queries=0 f3=route_pipeline_renderdoc_only");
             log_line(
                 "V1363 dlss_scene_history_reset=removed_rejected_V1340 projection_switch_reset=V1331_only");
+            log_line(
+                "V1364 strict_stereo_dlss_constants=original_builder_per_eye guard=state_0x6c peer_payload_replay=0 aer=unchanged route_flight=always_on_ram_f3");
             log_line(
                 "V1279 DLSS compatibility=public_streamline_aer_private_history_ngx_stereo legacy_module_agnostic_discovery=disabled_by_V1288");
             log_line(
@@ -47621,7 +47762,7 @@ void handle_f3_capture_hotkey(IDXGISwapChain* swapchain) {
     if (w3vr::pipeline_flight::enabled()) {
         w3vr::pipeline_flight::dump_last_ten_seconds();
     }
-    w3vr::route_flight::dump_last_seconds("V1363", 15);
+    w3vr::route_flight::dump_last_seconds("V1364", 15);
     trigger_renderdoc_capture(
         g_game_swapchain != nullptr ? g_game_swapchain : swapchain);
 }

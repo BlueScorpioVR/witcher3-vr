@@ -226,6 +226,16 @@ if(BUILD_TESTING)
         COMMAND w3vr_mode3_transport_policy_tests
     )
 
+    add_executable(w3vr_mode3_dlss_constants_policy_tests
+        tests/mode3_dlss_constants_policy_tests.cpp
+    )
+    target_include_directories(
+        w3vr_mode3_dlss_constants_policy_tests PRIVATE src)
+    add_test(
+        NAME renderer_mode3_dlss_constants_policy
+        COMMAND w3vr_mode3_dlss_constants_policy_tests
+    )
+
     add_executable(w3vr_native_asymmetric_transport_policy_tests
         tests/native_asymmetric_transport_policy_tests.cpp
     )
@@ -327,6 +337,13 @@ if(BUILD_TESTING)
         COMMAND "${CMAKE_COMMAND}"
             "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/taau_cb10_producer_identity_contract.cmake"
+    )
+
+    add_test(
+        NAME renderer_dlss_per_eye_constants_contract
+        COMMAND "${CMAKE_COMMAND}"
+            "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/dlss_per_eye_constants_contract.cmake"
     )
 
 endif()
