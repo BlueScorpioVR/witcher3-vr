@@ -34,6 +34,9 @@
 #include "shadow_cascade_authority_policy.h"
 #include "taau_submission_policy.h"
 
+// V1367 replaces the cross-queue-invalid global TAAU/RT slot retirement fence
+// with one persistent timeline per submitting queue. Every reusable slot owns
+// the exact fence object and value that follows its real GPU submission.
 // V1366 carries retained-HUD ownership across an exact ordered producer queue
 // submission, so the late compositor is independent of REDengine's queue
 // topology. V1365's native Streamline command-list repair remains unchanged.
@@ -4524,7 +4527,8 @@ constexpr UINT64 kTaauPrivateCb10Stride = 512;
 constexpr size_t kTaauPrivateCb10Bytes = 512;
 struct TaauOverrideSlot {
     ID3D12DescriptorHeap* heap{};
-    std::atomic<uint64_t> fence_value{};
+    ID3D12Fence* retirement_fence{};
+    uint64_t retirement_fence_value{};
     std::atomic<bool> reserved{};
 };
 constexpr size_t kTaauOverrideSlotCount = 64;
@@ -4553,7 +4557,8 @@ constexpr UINT kTiledCullingSharedPixelSlot = 12;
 constexpr size_t kTiledCullingSharedPixelBytes = 4608;
 constexpr size_t kTiledCullingSlotCount = 256;
 struct TiledCullingOverrideSlot {
-    std::atomic<uint64_t> fence_value{};
+    ID3D12Fence* retirement_fence{};
+    uint64_t retirement_fence_value{};
     std::atomic<bool> reserved{};
 };
 std::array<TiledCullingOverrideSlot, kTiledCullingSlotCount>
@@ -4915,7 +4920,8 @@ struct TaauComposeSlot {
     UINT64 width{};
     UINT height{};
     bool initialized{};
-    std::atomic<uint64_t> fence_value{};
+    ID3D12Fence* retirement_fence{};
+    uint64_t retirement_fence_value{};
     std::atomic<bool> reserved{};
 };
 std::array<TaauComposeSlot, kTaauComposeSlotCount> g_taau_compose_slots{};
@@ -4925,8 +4931,19 @@ struct TaauPendingSlotUse {
     uint32_t index{};
     bool tiled_culling{};
 };
-ID3D12Fence* g_taau_slot_fence{};
-std::atomic<uint64_t> g_taau_slot_fence_value{};
+// [FIX:PER-QUEUE-PRIVATE-SLOT-RETIREMENT V1367 1/5] Fence values are ordered
+// only within one command queue. A single fence signaled by independent queues
+// can advance past work which is still in flight on another queue. Keep one
+// persistent timeline per real producer and attach that exact timeline to each
+// descriptor/upload/snapshot slot.
+struct PrivateResourceQueueTimeline {
+    ID3D12CommandQueue* queue{};
+    ID3D12Fence* fence{};
+    uint64_t value{};
+};
+std::mutex g_private_resource_queue_timeline_mutex{};
+std::unordered_map<ID3D12CommandQueue*, PrivateResourceQueueTimeline>
+    g_private_resource_queue_timelines{};
 std::mutex g_taau_slot_mutex{};
 std::unordered_map<ID3D12CommandList*, std::vector<TaauPendingSlotUse>>
     g_taau_pending_slot_uses{};
@@ -18557,6 +18574,57 @@ void consume_mode3_temporal_cache_submission(
     }
 }
 
+// [FIX:PER-QUEUE-PRIVATE-SLOT-RETIREMENT V1367 2/5] Return the exact GPU
+// timeline point placed after the real ExecuteCommandLists call. The map is
+// keyed by the submitting queue itself; values from independent queues can
+// therefore never retire one another's private resources.
+bool signal_private_resource_queue_timeline(
+    ID3D12CommandQueue* producer_queue,
+    ID3D12Fence*& producer_fence,
+    uint64_t& producer_fence_value) {
+    producer_fence = nullptr;
+    producer_fence_value = 0;
+    if (producer_queue == nullptr || g_d3d12_device == nullptr) {
+        return false;
+    }
+
+    std::scoped_lock lock{g_private_resource_queue_timeline_mutex};
+    auto timeline = g_private_resource_queue_timelines.find(producer_queue);
+    if (timeline == g_private_resource_queue_timelines.end()) {
+        ID3D12Fence* fence{};
+        const HRESULT create_result = g_d3d12_device->CreateFence(
+            0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence));
+        if (FAILED(create_result) || fence == nullptr) {
+            log_line(
+                "V1367 private resource queue fence creation failed "
+                "queue=%p hr=0x%08X",
+                producer_queue, static_cast<unsigned>(create_result));
+            return false;
+        }
+        producer_queue->AddRef();
+        timeline = g_private_resource_queue_timelines.emplace(
+            producer_queue,
+            PrivateResourceQueueTimeline{producer_queue, fence, 0}).first;
+    }
+
+    auto& queue_timeline = timeline->second;
+    const uint64_t signal_value = ++queue_timeline.value;
+    const HRESULT signal_result = producer_queue->Signal(
+        queue_timeline.fence, signal_value);
+    if (FAILED(signal_result)) {
+        log_line(
+            "V1367 private resource queue signal failed queue=%p "
+            "fence=%p value=%llu hr=0x%08X",
+            producer_queue, queue_timeline.fence,
+            static_cast<unsigned long long>(signal_value),
+            static_cast<unsigned>(signal_result));
+        return false;
+    }
+    producer_fence = queue_timeline.fence;
+    producer_fence_value = signal_value;
+    return true;
+}
+
 void STDMETHODCALLTYPE hook_execute_command_lists(
     ID3D12CommandQueue* queue,
     UINT num_command_lists,
@@ -18838,30 +18906,45 @@ void STDMETHODCALLTYPE hook_execute_command_lists(
         deferred_cross_queue_hud_publication);
     publish_dlss_cache_submissions(dlss_cache_pending);
     publish_taau_cache_submissions(taau_cache_pending);
-    if (!taau_slot_uses.empty() && g_taau_slot_fence != nullptr) {
-        const auto fence_value = g_taau_slot_fence_value.fetch_add(
-            1, std::memory_order_relaxed) + 1;
-        const auto signal_hr = queue->Signal(g_taau_slot_fence, fence_value);
-        const auto retired_value = SUCCEEDED(signal_hr) ? fence_value : UINT64_MAX;
+    if (!taau_slot_uses.empty()) {
+        // [FIX:PER-QUEUE-PRIVATE-SLOT-RETIREMENT V1367 3/5] This signal is
+        // placed after the exact Execute which owns the collected command-list
+        // uses. Store its fence object as well as its value in every slot.
+        ID3D12Fence* retirement_fence{};
+        uint64_t retirement_fence_value{};
+        const bool retirement_ordered =
+            signal_private_resource_queue_timeline(
+                queue, retirement_fence, retirement_fence_value);
         for (const auto& use : taau_slot_uses) {
             if (use.tiled_culling &&
                 use.index < g_tiled_culling_override_slots.size()) {
                 auto& slot = g_tiled_culling_override_slots[use.index];
-                slot.fence_value.store(retired_value, std::memory_order_release);
+                slot.retirement_fence = retirement_ordered
+                    ? retirement_fence : nullptr;
+                slot.retirement_fence_value = retirement_ordered
+                    ? retirement_fence_value : UINT64_MAX;
                 slot.reserved.store(false, std::memory_order_release);
             } else if (use.compose && use.index < g_taau_compose_slots.size()) {
                 auto& slot = g_taau_compose_slots[use.index];
-                slot.fence_value.store(retired_value, std::memory_order_release);
+                slot.retirement_fence = retirement_ordered
+                    ? retirement_fence : nullptr;
+                slot.retirement_fence_value = retirement_ordered
+                    ? retirement_fence_value : UINT64_MAX;
                 slot.reserved.store(false, std::memory_order_release);
             } else if (!use.compose && use.index < g_taau_override_slots.size()) {
                 auto& slot = g_taau_override_slots[use.index];
-                slot.fence_value.store(retired_value, std::memory_order_release);
+                slot.retirement_fence = retirement_ordered
+                    ? retirement_fence : nullptr;
+                slot.retirement_fence_value = retirement_ordered
+                    ? retirement_fence_value : UINT64_MAX;
                 slot.reserved.store(false, std::memory_order_release);
             }
         }
-        if (FAILED(signal_hr)) {
-            log_taau_trace_line("TAAU slot retirement signal failed hr=0x%08X slots=%zu",
-                static_cast<unsigned>(signal_hr), taau_slot_uses.size());
+        if (!retirement_ordered) {
+            log_taau_trace_line(
+                "V1367 private slot retirement failed closed queue=%p "
+                "slots=%zu",
+                queue, taau_slot_uses.size());
         }
     }
     if (submits_taau_readback && g_taau_readback_fence != nullptr &&
@@ -23553,20 +23636,22 @@ bool write_taau_private_resolve_cb10(
     return true;
 }
 
-bool ensure_taau_slot_fence() {
-    if (g_taau_slot_fence != nullptr) {
+// [FIX:PER-QUEUE-PRIVATE-SLOT-RETIREMENT V1367 4/5] Reservation provides the
+// acquire/release handoff for these plain ownership fields. A zero value is a
+// never-submitted fresh slot. Device removal's UINT64_MAX sentinel is never
+// accepted as successful retirement.
+bool private_resource_slot_retired(
+    ID3D12Fence* retirement_fence,
+    uint64_t retirement_fence_value) {
+    if (retirement_fence_value == 0) {
         return true;
     }
-    if (g_d3d12_device == nullptr) {
+    if (retirement_fence == nullptr ||
+        retirement_fence_value == UINT64_MAX) {
         return false;
     }
-    std::scoped_lock lock{g_taau_slot_mutex};
-    if (g_taau_slot_fence == nullptr && FAILED(g_d3d12_device->CreateFence(
-            0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&g_taau_slot_fence)))) {
-        log_line("TAAU slot retirement fence creation failed");
-        return false;
-    }
-    return g_taau_slot_fence != nullptr;
+    const uint64_t completed = retirement_fence->GetCompletedValue();
+    return completed != UINT64_MAX && completed >= retirement_fence_value;
 }
 
 void track_taau_slot_use(
@@ -23582,10 +23667,9 @@ void track_taau_slot_use(
 bool acquire_taau_override_slot(
     ID3D12GraphicsCommandList* command_list,
     uint32_t& slot_index_out) {
-    if (command_list == nullptr || !ensure_taau_slot_fence()) {
+    if (command_list == nullptr) {
         return false;
     }
-    const auto completed = g_taau_slot_fence->GetCompletedValue();
     const auto start = g_taau_override_slot_index.fetch_add(1);
     for (uint32_t offset = 0; offset < g_taau_override_slots.size(); ++offset) {
         const auto index = (start + offset) %
@@ -23596,8 +23680,9 @@ bool acquire_taau_override_slot(
                 std::memory_order_acq_rel)) {
             continue;
         }
-        const auto fence_value = slot.fence_value.load(std::memory_order_acquire);
-        if (fence_value == 0 || completed >= fence_value) {
+        if (private_resource_slot_retired(
+                slot.retirement_fence,
+                slot.retirement_fence_value)) {
             slot_index_out = index;
             track_taau_slot_use(command_list, false, index);
             return true;
@@ -23611,11 +23696,9 @@ bool acquire_tiled_culling_override_slot(
     ID3D12GraphicsCommandList* command_list,
     uint32_t& slot_index_out) {
     if (command_list == nullptr ||
-        !ensure_tiled_culling_override_resources() ||
-        !ensure_taau_slot_fence()) {
+        !ensure_tiled_culling_override_resources()) {
         return false;
     }
-    const auto completed = g_taau_slot_fence->GetCompletedValue();
     const auto start = g_tiled_culling_slot_index.fetch_add(
         1, std::memory_order_relaxed);
     for (uint32_t offset = 0;
@@ -23628,9 +23711,9 @@ bool acquire_tiled_culling_override_slot(
                 expected, true, std::memory_order_acq_rel)) {
             continue;
         }
-        const auto fence_value = slot.fence_value.load(
-            std::memory_order_acquire);
-        if (fence_value == 0 || completed >= fence_value) {
+        if (private_resource_slot_retired(
+                slot.retirement_fence,
+                slot.retirement_fence_value)) {
             slot_index_out = index;
             track_taau_slot_use(command_list, false, index, true);
             return true;
@@ -23646,12 +23729,10 @@ bool acquire_taau_compose_slot(
     TaauComposeSlot*& slot_out,
     bool& was_initialized) {
     if (command_list == nullptr || source == nullptr || g_d3d12_device == nullptr ||
-        !ensure_taau_slot_fence() ||
         g_taau_mvec_descriptor_increment == 0) {
         return false;
     }
 
-    const auto completed = g_taau_slot_fence->GetCompletedValue();
     const auto start = g_taau_compose_slot_index.fetch_add(1);
     uint32_t slot_index = UINT32_MAX;
     for (uint32_t offset = 0; offset < g_taau_compose_slots.size(); ++offset) {
@@ -23663,8 +23744,9 @@ bool acquire_taau_compose_slot(
                 std::memory_order_acq_rel)) {
             continue;
         }
-        const auto fence_value = candidate.fence_value.load(std::memory_order_acquire);
-        if (fence_value == 0 || completed >= fence_value) {
+        if (private_resource_slot_retired(
+                candidate.retirement_fence,
+                candidate.retirement_fence_value)) {
             slot_index = index;
             break;
         }
@@ -39882,7 +39964,7 @@ void ensure_initialized() {
                 "focus_fire_b1=stereo_and_aer_centered_draw_proven "
                 "aer_taau_hud=scene_and_retained_pair_fail_open");
             log_line(
-                "witcher3vr dxgi proxy initialized build=V1366 base=V1365_cross_queue_retained_hud_ownership "
+                "witcher3vr dxgi proxy initialized build=V1367 base=V1366_per_queue_slot_retirement "
                 "anchor_smoothing_ini=%d anchor_smoothing_seconds=%.4f "
                 "first_person_strafe_ini=%d mode3_aer_presentation=%d raytracing_enabled=%d raytracing_history_buffers=%d "
                 "aer_afw_enabled=%d persistent_registry=%d dlss_public_streamline=%d "
@@ -39953,6 +40035,9 @@ void ensure_initialized() {
             // [FIX:CROSS-QUEUE-RETAINED-HUD-OWNERSHIP V1366 6/6]
             log_line(
                 "V1366 retained_hud_ownership=exact_ordered_submission cross_queue_gpu_wait=1 same_queue_fast_path=1 queue_topology_independent=1");
+            // [FIX:PER-QUEUE-PRIVATE-SLOT-RETIREMENT V1367 5/5]
+            log_line(
+                "V1367 private_slot_retirement=per_producer_queue fence_object_and_value_per_slot=1 independent_queue_values=0 failure=closed");
             log_line(
                 "V1279 DLSS compatibility=public_streamline_aer_private_history_ngx_stereo legacy_module_agnostic_discovery=disabled_by_V1288");
             log_line(
@@ -47979,7 +48064,7 @@ void handle_f3_capture_hotkey(IDXGISwapChain* swapchain) {
     if (w3vr::pipeline_flight::enabled()) {
         w3vr::pipeline_flight::dump_last_ten_seconds();
     }
-    w3vr::route_flight::dump_last_seconds("V1366", 15);
+    w3vr::route_flight::dump_last_seconds("V1367", 15);
     trigger_renderdoc_capture(
         g_game_swapchain != nullptr ? g_game_swapchain : swapchain);
 }
