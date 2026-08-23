@@ -34,6 +34,8 @@
 #include "shadow_cascade_authority_policy.h"
 #include "taau_submission_policy.h"
 
+// V1391 removes Presentation Size from every producer and swapchain-sizing
+// decision. The setting remains readable only by the final OpenXR presenter.
 // V1369 carries every private RT AO/SIGMA/REBLUR history use across its exact
 // submitting queue. Readers wait on the last physical owner, and pair metadata
 // becomes visible only with the post-Execute fence that produced its pixels.
@@ -348,8 +350,8 @@ struct Config {
     bool mode3_aer_presentation{false};
     float resolution_scale{1.0f};
     float presentation_scale{0.9f};
-    // Native asymmetric geometry is independent from the final presentation
-    // method. Presentation Size scales its immutable per-eye tangent FOV.
+    // Native asymmetric producer geometry is always the raw runtime geometry.
+    // Presentation Size is consumed only by the final OpenXR presenter.
     bool native_stereo{false};
     // The visibility-mask envelope/fit route is opt-in. Missing keys retain
     // the proven legacy crop-and-copy presentation path.
@@ -1641,17 +1643,17 @@ float runtime_presentation_cover_fraction(UINT source_width = 0) {
     return std::clamp(cover_fraction, 0.5f, 1.0f);
 }
 
-float presentation_render_fov_scale() {
+float producer_render_fov_scale() {
     const float cover_fraction = runtime_presentation_cover_fraction();
     if (mode3_stereo_transport_active()) {
         return w3vr::mode3_transport::symmetric_producer_fov_scale(
-            cover_fraction, g_config.presentation_scale);
+            cover_fraction);
     }
     return std::clamp(
-        g_config.presentation_scale / cover_fraction, 0.01f, 2.0f);
+        1.0f / cover_fraction, 0.01f, 2.0f);
 }
 
-struct PresentationProjectionScales {
+struct ProducerProjectionScales {
     float horizontal{1.0f};
     float vertical{1.0f};
 };
@@ -1667,10 +1669,8 @@ struct ProjectionFloatRect {
 // optical zero which covers the runtime's complete visible mask. Any black
 // target pixels are therefore outside the lens aperture. When the extension is
 // unavailable, conservatively cover the complete rectangular runtime FOV.
-PresentationProjectionScales presentation_projection_scales(
+ProducerProjectionScales producer_projection_scales(
     float left, float right, float down, float up) {
-    const float selected_scale = std::clamp(
-        g_config.presentation_scale, 0.01f, 1.0f);
     const float horizontal_span = right - left;
     const float vertical_span = up - down;
     if (g_config.fullscreen_projection &&
@@ -1692,15 +1692,15 @@ PresentationProjectionScales presentation_projection_scales(
             return {
                 std::clamp(
                     2.0f * half_tan_x /
-                        horizontal_span * selected_scale,
+                        horizontal_span,
                     0.01f, 2.0f),
                 std::clamp(
                     2.0f * half_tan_y /
-                        vertical_span * selected_scale,
+                        vertical_span,
                     0.01f, 2.0f)};
         }
     }
-    const float cover_scale = presentation_render_fov_scale();
+    const float cover_scale = producer_render_fov_scale();
     return {cover_scale, cover_scale};
 }
 
@@ -2700,20 +2700,15 @@ bool initialize_native_asymmetric_pair(uint64_t pair_id) {
         g_xr_views.size() < 2 || pair_id == 0 || pair_id == UINT64_MAX) {
         return false;
     }
-    // Freeze the exact tangent-scaled runtime FOV into the native producer.
-    // Final submit forwards this same source-owned geometry without a second
-    // scale, so rendered pixels and submitted rays remain reciprocal-exact.
-    const float presentation_scale = std::clamp(
-        g_config.presentation_scale, 0.01f, 1.0f);
-    std::array<XrFovf, 2> presentation_fovs{};
+    // Freeze the raw runtime FOV into the native producer. Presentation Size
+    // is deliberately absent from render, temporal, DLSS and AFW geometry.
+    std::array<XrFovf, 2> producer_fovs{};
     for (uint32_t eye = 0; eye < 2; ++eye) {
         w3vr::openxr_eye_geometry::AsymmetricProjectionDescriptor descriptor{};
-        if (!w3vr::openxr_eye_geometry::scale_asymmetric_projection_fov(
-                g_xr_views[eye].fov, presentation_scale,
-                presentation_fovs[eye]) ||
-            !w3vr::openxr_eye_geometry::
+        producer_fovs[eye] = g_xr_views[eye].fov;
+        if (!w3vr::openxr_eye_geometry::
                 derive_asymmetric_projection_descriptor(
-                    presentation_fovs[eye], 1, 1, descriptor)) {
+                    producer_fovs[eye], 1, 1, descriptor)) {
             return false;
         }
     }
@@ -2727,8 +2722,8 @@ bool initialize_native_asymmetric_pair(uint64_t pair_id) {
     slot.factory_mask.store(0, std::memory_order_relaxed);
     slot.temporal_mask.store(0, std::memory_order_relaxed);
     slot.dlss_input_mask.store(0, std::memory_order_relaxed);
-    slot.fov[0] = presentation_fovs[0];
-    slot.fov[1] = presentation_fovs[1];
+    slot.fov[0] = producer_fovs[0];
+    slot.fov[1] = producer_fovs[1];
     slot.pair_id.store(pair_id, std::memory_order_release);
     return true;
 }
@@ -14540,11 +14535,10 @@ bool derive_asymmetric_bootstrap_hud_source_shifts(
         return false;
     }
 
-    const float presentation_scale = 1.0f;
     const float symmetric_half_tangent =
         g_xr_visibility_half_tan_x.load(std::memory_order_acquire);
     const float symmetric_horizontal_span =
-        2.0f * symmetric_half_tangent * presentation_scale;
+        2.0f * symmetric_half_tangent;
     if (!std::isfinite(symmetric_horizontal_span) ||
         symmetric_horizontal_span <= 0.01f) {
         return false;
@@ -14557,14 +14551,11 @@ bool derive_asymmetric_bootstrap_hud_source_shifts(
         const XrFovf runtime_fov{
             atanf(bounds.min_x), atanf(bounds.max_x),
             atanf(bounds.max_y), atanf(bounds.min_y)};
-        XrFovf presentation_fov{};
         w3vr::openxr_eye_geometry::AsymmetricProjectionDescriptor
             descriptor{};
-        if (!w3vr::openxr_eye_geometry::scale_asymmetric_projection_fov(
-                runtime_fov, presentation_scale, presentation_fov) ||
-            !w3vr::openxr_eye_geometry::
+        if (!w3vr::openxr_eye_geometry::
                 derive_asymmetric_projection_descriptor(
-                    presentation_fov, g_game_render_width,
+                    runtime_fov, g_game_render_width,
                     g_game_render_height, descriptor)) {
             return false;
         }
@@ -30976,10 +30967,9 @@ bool prepare_full_vr_frame_camera(
         const float down = tanf(xr_fov->angleDown);
         const float up = tanf(xr_fov->angleUp);
         // Render the centered symmetric angular envelope selected from the
-        // runtime geometry. In Mode 3 this producer owns Presentation Size;
-        // the final OpenXR subImage only selects each per-eye interval.
-        // Legacy modes retain their established extent floor below.
-        const auto projection_scales = presentation_projection_scales(
+        // runtime geometry. Presentation Size is absent from this producer;
+        // only the final OpenXR presenter may resize the completed image.
+        const auto projection_scales = producer_projection_scales(
             left, right, down, up);
         float horizontal_scale = projection_scales.horizontal;
         float vertical_scale = projection_scales.vertical;
@@ -34452,12 +34442,9 @@ void __fastcall hook_engine_view_rebuild(float* view) {
         const float down = tanf(xr_fov.angleDown);
         const float up = tanf(xr_fov.angleUp);
         // Build the centered envelope required to contain both displaced
-        // runtime eyes, then apply Presentation Size once in tangent space.
-        // Mode 3 must not floor that scale to the source/swapchain ratio: at
-        // p=0.8 the intended p/q can legitimately be slightly below 1 in both
-        // strict Stereo and AER. Keep this regular factory path identical to
-        // the fallback above.
-        const auto projection_scales = presentation_projection_scales(
+        // runtime eyes. Presentation Size is absent from producer geometry;
+        // keep this regular factory path identical to the fallback above.
+        const auto projection_scales = producer_projection_scales(
             left, right, down, up);
         float horizontal_scale = projection_scales.horizontal;
         float vertical_scale = projection_scales.vertical;
@@ -40489,7 +40476,7 @@ void ensure_initialized() {
                 "focus_fire_b1=stereo_and_aer_centered_draw_proven "
                 "aer_taau_hud=scene_and_retained_pair_fail_open");
             log_line(
-                "witcher3vr dxgi proxy initialized build=V1369 base=V1368_cross_queue_rt_history_ownership "
+                "witcher3vr dxgi proxy initialized build=V1391 base=V1369_final_only_presentation_size "
                 "anchor_smoothing_ini=%d anchor_smoothing_seconds=%.4f "
                 "first_person_strafe_ini=%d mode3_aer_presentation=%d raytracing_enabled=%d raytracing_history_buffers=%d "
                 "aer_afw_enabled=%d persistent_registry=%d dlss_public_streamline=%d "
@@ -40569,6 +40556,8 @@ void ensure_initialized() {
             // [FIX:CROSS-QUEUE-RT-HISTORY-OWNERSHIP V1369 7/7]
             log_line(
                 "V1369 rt_private_history_ownership=per_slot_last_submitted_queue cross_queue_consumer_wait=exact pair_publication=post_execute ao_sigma_reblur=1 failure=closed");
+            log_line(
+                "V1391 presentation_size=final_openxr_only producer_fov=raw_runtime temporal_dlss_afw=slider_independent swapchain_size=slider_independent final_presenter_hook=retained");
             log_line(
                 "V1279 DLSS compatibility=public_streamline_aer_private_history_ngx_stereo legacy_module_agnostic_discovery=disabled_by_V1288");
             log_line(
@@ -42184,8 +42173,6 @@ bool create_openxr_swapchains() {
     const uint32_t requested_height = g_config.render_height > 0
         ? static_cast<uint32_t>(g_config.render_height)
         : 0;
-    const float presentation_scale = std::clamp(
-        g_config.presentation_scale, 0.01f, 1.0f);
     const uint32_t source_width = requested_width > 0
         ? requested_width
         : scaled_width;
@@ -42193,25 +42180,15 @@ bool create_openxr_swapchains() {
         ? requested_height
         : scaled_height;
     const bool mode3_fixed_resolution = mode3_stereo_transport_active();
-    // Every Mode-3 backend already produced the selected-resolution eye
-    // texture. Presentation Size remains an angular OpenXR correction only;
-    // the swapchain takes the exact full-frame producer extent so GPU transport
-    // is an identity handoff with no stretch or padding. Strict Stereo can
-    // still select a per-eye OpenXR subImage from that completed texture.
-    const uint32_t presentation_width = mode3_fixed_resolution
-        ? source_width
-        : static_cast<uint32_t>(ceilf(
-            static_cast<float>(source_width) / presentation_scale));
-    const uint32_t presentation_height = mode3_fixed_resolution
-        ? source_height
-        : static_cast<uint32_t>(ceilf(
-            static_cast<float>(source_height) / presentation_scale));
+    // Swapchain dimensions follow the selected source and resolution only.
+    // Presentation Size is a final per-frame OpenXR mapping and must not
+    // allocate a different render or transport surface.
     swapchain.width = w3vr::mode3_transport::select_swapchain_dimension(
         mode3_fixed_resolution, source_width, scaled_width,
-        presentation_width, config.maxImageRectWidth);
+        source_width, config.maxImageRectWidth);
     swapchain.height = w3vr::mode3_transport::select_swapchain_dimension(
         mode3_fixed_resolution, source_height, scaled_height,
-        presentation_height, config.maxImageRectHeight);
+        source_height, config.maxImageRectHeight);
     swapchain.format = selected_format;
     swapchain.stereo_array = true;
 
@@ -42235,7 +42212,7 @@ bool create_openxr_swapchains() {
 
     result = pfn_xrCreateSwapchain(g_xr_session, &swapchain_info, &swapchain.handle);
     g_xr_eye_swapchains[1].handle = swapchain.handle;
-    log_line("OpenXR xrCreateSwapchain stereo-array result=%s (%d) size=%ux%u recommended=%ux%u requested=%ux%u presentation=%.3f mode3_fixed_resolution=%d max=%ux%u format=%u samples=%u",
+    log_line("OpenXR xrCreateSwapchain stereo-array result=%s (%d) size=%ux%u recommended=%ux%u requested=%ux%u presentation=final_submit_only mode3_fixed_resolution=%d max=%ux%u format=%u samples=%u",
         xr_result_name(result),
         result,
         swapchain.width,
@@ -42244,7 +42221,6 @@ bool create_openxr_swapchains() {
         config.recommendedImageRectHeight,
         requested_width,
         requested_height,
-        presentation_scale,
         mode3_fixed_resolution ? 1 : 0,
         config.maxImageRectWidth,
         config.maxImageRectHeight,
@@ -45987,7 +45963,7 @@ void render_openxr_test_frame(
                             copy_width, copy_height,
                             projection_width, projection_height,
                             swapchain.width, swapchain.height,
-                            g_config.presentation_scale);
+                            requested_scale);
                     }
                 }
                 const bool cache_resources_ready = !direct_stereo &&
@@ -48700,7 +48676,7 @@ void handle_f3_capture_hotkey(IDXGISwapChain* swapchain) {
     if (w3vr::pipeline_flight::enabled()) {
         w3vr::pipeline_flight::dump_last_ten_seconds();
     }
-    w3vr::route_flight::dump_last_seconds("V1369", 15);
+    w3vr::route_flight::dump_last_seconds("V1391", 15);
     trigger_renderdoc_capture(
         g_game_swapchain != nullptr ? g_game_swapchain : swapchain);
 }

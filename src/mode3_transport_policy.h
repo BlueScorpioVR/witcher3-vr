@@ -176,20 +176,16 @@ constexpr uint32_t select_swapchain_dimension(
 }
 
 // A centered symmetric camera starts from the union of the two displaced
-// runtime-eye frusta, then applies the same tangent-space Presentation Size as
-// a native asymmetric producer. Strict Stereo later selects the corresponding
-// per-eye tangent crop; Presentation Size is not applied a second time.
+// runtime-eye frusta. Presentation Size is deliberately absent: it belongs to
+// the final OpenXR presenter and must never alter producer geometry.
 constexpr float symmetric_producer_fov_scale(
-    float runtime_cover_fraction,
-    float requested_scale) noexcept {
+    float runtime_cover_fraction) noexcept {
     const float cover = runtime_cover_fraction < 0.5f
         ? 0.5f
         : (runtime_cover_fraction > 1.0f
             ? 1.0f
             : runtime_cover_fraction);
-    const float scale = requested_scale < 0.01f
-        ? 0.01f : (requested_scale > 1.0f ? 1.0f : requested_scale);
-    return scale / cover;
+    return 1.0f / cover;
 }
 
 // Route, backend and projection encoding are deliberately absent. Once the

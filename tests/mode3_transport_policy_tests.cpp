@@ -154,20 +154,16 @@ int main() {
     assert(select_swapchain_dimension(
         true, 20000, 3072, 20000, 16384) == 16384);
 
-    // Symmetric producer geometry covers both displaced runtime eyes and then
-    // applies Presentation Size once. The calibrated Quest 3 cover is about
-    // 0.804821; the final per-eye crop is tested in eye_geometry.
+    // Symmetric producer geometry always covers both displaced runtime eyes.
+    // Presentation Size is a final OpenXR concern and has no producer input.
+    // The calibrated Quest 3 cover is about 0.804821.
     const float symmetric_envelope =
-        symmetric_producer_fov_scale(0.804821f, 1.0f);
+        symmetric_producer_fov_scale(0.804821f);
     assert(symmetric_envelope > 1.24250f);
     assert(symmetric_envelope < 1.24253f);
-    const float symmetric_at_point_eight =
-        symmetric_producer_fov_scale(0.804821f, 0.8f);
-    assert(symmetric_at_point_eight > 0.99400f);
-    assert(symmetric_at_point_eight < 0.99402f);
-    assert(symmetric_producer_fov_scale(1.0f, 1.0f) == 1.0f);
-    assert(symmetric_producer_fov_scale(0.0f, 1.0f) == 2.0f);
-    assert(symmetric_producer_fov_scale(2.0f, 1.0f) == 1.0f);
+    assert(symmetric_producer_fov_scale(1.0f) == 1.0f);
+    assert(symmetric_producer_fov_scale(0.0f) == 2.0f);
+    assert(symmetric_producer_fov_scale(2.0f) == 1.0f);
 
     // Every Mode-3 route maps a genuinely symmetric source to the per-eye
     // tangent interval. Runtime F2 changes the producer itself; it is not a
