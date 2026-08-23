@@ -34,6 +34,10 @@
 #include "shadow_cascade_authority_policy.h"
 #include "taau_submission_policy.h"
 
+// V1368 publishes packed scene captures only after their exact command list is
+// submitted and transfers the producing queue's GPU ownership to OpenXR. Ring
+// reuse follows the last producer or packed-cache consumer fence carried by
+// the physical resource.
 // V1367 replaces the cross-queue-invalid global TAAU/RT slot retirement fence
 // with one persistent timeline per submitting queue. Every reusable slot owns
 // the exact fence object and value that follows its real GPU submission.
@@ -1400,6 +1404,8 @@ std::atomic<uint32_t> g_puredark_afw_present_logs{};
 std::atomic<uint32_t> g_puredark_afw_failure_logs{};
 std::atomic<uint32_t> g_puredark_afw_pose_logs{};
 ID3D12Resource* g_packed_present_cache[2]{};
+ID3D12Fence* g_packed_present_cache_last_use_fence[2]{};
+uint64_t g_packed_present_cache_last_use_fence_value[2]{};
 bool g_packed_present_cache_valid{};
 XrView g_packed_present_cache_views[2]{{XR_TYPE_VIEW}, {XR_TYPE_VIEW}};
 bool g_packed_present_cache_view_valid[2]{};
@@ -1543,6 +1549,14 @@ void reset_mode3_aer_presentation_state(
 constexpr size_t kStreamlineCaptureRingSize = 3;
 struct StreamlineCaptureSlot {
     ID3D12Resource* resource{};
+    ID3D12Fence* last_use_fence{};
+    uint64_t last_use_fence_value{};
+    ID3D12CommandQueue* producer_queue{};
+    ID3D12Fence* producer_queue_fence{};
+    uint64_t producer_queue_fence_value{};
+    uint64_t capture_serial{};
+    bool recording_pending{};
+    bool copy_source_state{};
     bool initialized{};
     uint32_t generation{};
     uint64_t pair_id{};
@@ -1555,14 +1569,28 @@ struct StreamlineCaptureSlot {
     bool render_view_valid{};
     bool native_asymmetric_projection{};
 };
+// [FIX:CROSS-QUEUE-SCENE-CAPTURE-OWNERSHIP V1368 1/7] Recording a copy is not
+// publication. Preserve its exact slot identity until ExecuteCommandLists can
+// attach a real producer timeline and order the primary OpenXR consumer.
+struct PendingStreamlineCapturePublication {
+    uint32_t eye{UINT32_MAX};
+    uint32_t slot{UINT32_MAX};
+    uint32_t generation{};
+    uint64_t pair_id{};
+    uint64_t capture_serial{};
+};
 std::array<std::array<StreamlineCaptureSlot, kStreamlineCaptureRingSize>, 2> g_streamline_capture_ring{};
 std::atomic<uint64_t> g_streamline_capture_write_count[2]{};
+std::atomic<uint64_t> g_streamline_capture_serial{};
 std::atomic<uint32_t> g_streamline_capture_latest_slot[2]{UINT32_MAX, UINT32_MAX};
 std::atomic<uint32_t> g_streamline_capture_generation{1};
 std::atomic<uint32_t> g_streamline_capture_log_count[2]{};
 std::atomic<uint32_t> g_streamline_dual_capture_sequence{};
 std::atomic<uint32_t> g_streamline_dual_evaluate_log_count{};
 std::mutex g_streamline_capture_mutex{};
+std::unordered_map<ID3D12CommandList*,
+    std::vector<PendingStreamlineCapturePublication>>
+    g_streamline_capture_pending_publications{};
 DXGI_FORMAT g_streamline_capture_format{DXGI_FORMAT_UNKNOWN};
 UINT g_streamline_capture_width{};
 UINT g_streamline_capture_height{};
@@ -1683,6 +1711,16 @@ void capture_puredark_afw_mode3_taau_camera(
     uint32_t viewport);
 void mark_engine_pair_output_captured(uint64_t pair_id, uint32_t eye);
 bool capture_streamline_output(ID3D12GraphicsCommandList* command_list, D3D12_RESOURCE_STATES source_state);
+std::vector<PendingStreamlineCapturePublication>
+take_streamline_capture_submissions(
+    UINT num_command_lists,
+    ID3D12CommandList* const* command_lists);
+void publish_streamline_capture_submissions(
+    ID3D12CommandQueue* producer_queue,
+    const std::vector<PendingStreamlineCapturePublication>& pending,
+    bool submission_ordered,
+    ID3D12Fence* producer_queue_fence,
+    uint64_t producer_queue_fence_value);
 std::vector<PuredarkAfwPendingSubmission>
 take_puredark_afw_pending_submissions(
     UINT num_command_lists,
@@ -18625,6 +18663,139 @@ bool signal_private_resource_queue_timeline(
     return true;
 }
 
+std::vector<PendingStreamlineCapturePublication>
+take_streamline_capture_submissions(
+    UINT num_command_lists,
+    ID3D12CommandList* const* command_lists) {
+    std::vector<PendingStreamlineCapturePublication> pending{};
+    if (command_lists == nullptr) {
+        return pending;
+    }
+    std::scoped_lock lock{g_streamline_capture_mutex};
+    for (UINT index = 0; index < num_command_lists; ++index) {
+        const auto found = g_streamline_capture_pending_publications.find(
+            command_lists[index]);
+        if (found == g_streamline_capture_pending_publications.end()) {
+            continue;
+        }
+        pending.insert(
+            pending.end(), found->second.begin(), found->second.end());
+        g_streamline_capture_pending_publications.erase(found);
+    }
+    return pending;
+}
+
+// [FIX:CROSS-QUEUE-SCENE-CAPTURE-OWNERSHIP V1368 2/7] A secondary producer
+// becomes visible only after its post-Execute signal has been queued as a GPU
+// wait on the primary OpenXR queue. Same-queue submissions retain natural queue
+// order. Unknown ownership fails closed without publishing incomplete pixels.
+void publish_streamline_capture_submissions(
+    ID3D12CommandQueue* producer_queue,
+    const std::vector<PendingStreamlineCapturePublication>& pending,
+    bool submission_ordered,
+    ID3D12Fence* producer_queue_fence,
+    uint64_t producer_queue_fence_value) {
+    if (pending.empty()) {
+        return;
+    }
+
+    bool consumer_ordered = submission_ordered &&
+        producer_queue != nullptr && producer_queue_fence != nullptr &&
+        producer_queue_fence_value != 0;
+    HRESULT wait_result = S_OK;
+    if (consumer_ordered && producer_queue != g_command_queue) {
+        if (g_command_queue == nullptr) {
+            consumer_ordered = false;
+        } else {
+            wait_result = g_command_queue->Wait(
+                producer_queue_fence, producer_queue_fence_value);
+            consumer_ordered = SUCCEEDED(wait_result);
+        }
+    }
+
+    std::vector<std::pair<uint64_t, uint32_t>> published_pairs{};
+    {
+        std::scoped_lock lock{g_streamline_capture_mutex};
+        for (const auto& publication : pending) {
+            if (publication.eye > 1 ||
+                publication.slot >= kStreamlineCaptureRingSize) {
+                continue;
+            }
+            auto& slot = g_streamline_capture_ring[publication.eye]
+                [publication.slot];
+            if (!slot.recording_pending ||
+                slot.capture_serial != publication.capture_serial) {
+                continue;
+            }
+
+            // Execute succeeded even if its ordering signal did not. Preserve
+            // the physical state reached by that submitted list, but never
+            // expose its logical frame without an exact usable timeline.
+            slot.copy_source_state = true;
+            slot.recording_pending = false;
+            const bool identity_current =
+                slot.generation == publication.generation &&
+                slot.pair_id == publication.pair_id &&
+                publication.generation ==
+                    g_streamline_capture_generation.load(
+                        std::memory_order_acquire);
+            const bool publication_ready =
+                consumer_ordered && identity_current;
+            slot.producer_queue = publication_ready
+                ? producer_queue : nullptr;
+            slot.producer_queue_fence = publication_ready
+                ? producer_queue_fence : nullptr;
+            slot.producer_queue_fence_value = publication_ready
+                ? producer_queue_fence_value : 0;
+            slot.last_use_fence = consumer_ordered
+                ? producer_queue_fence : nullptr;
+            slot.last_use_fence_value = consumer_ordered
+                ? producer_queue_fence_value : UINT64_MAX;
+            slot.initialized = publication_ready;
+            if (!publication_ready) {
+                slot.pair_id = 0;
+                slot.source_eye = UINT32_MAX;
+                slot.source_eye_valid = false;
+                slot.render_view_valid = false;
+                slot.native_asymmetric_projection = false;
+                continue;
+            }
+            g_streamline_capture_latest_slot[publication.eye].store(
+                publication.slot, std::memory_order_release);
+            published_pairs.emplace_back(
+                publication.pair_id, publication.eye);
+        }
+    }
+    for (const auto& [pair_id, eye] : published_pairs) {
+        mark_engine_pair_output_captured(pair_id, eye);
+    }
+
+    static std::atomic<uint64_t> cross_queue_capture_waits{};
+    if (consumer_ordered && producer_queue != g_command_queue) {
+        const uint64_t count = cross_queue_capture_waits.fetch_add(
+            1, std::memory_order_relaxed) + 1;
+        if (count <= 32 || (count % 240) == 0) {
+            log_line(
+                "V1368 scene capture cross-queue wait count=%llu "
+                "producer=%p primary=%p fence=%p value=%llu captures=%zu",
+                static_cast<unsigned long long>(count), producer_queue,
+                g_command_queue, producer_queue_fence,
+                static_cast<unsigned long long>(
+                    producer_queue_fence_value),
+                pending.size());
+        }
+    } else if (!consumer_ordered) {
+        log_line(
+            "V1368 scene capture publication rejected producer=%p "
+            "primary=%p ordered=%u fence=%p value=%llu wait_hr=0x%08X "
+            "captures=%zu",
+            producer_queue, g_command_queue,
+            submission_ordered ? 1u : 0u, producer_queue_fence,
+            static_cast<unsigned long long>(producer_queue_fence_value),
+            static_cast<unsigned>(wait_result), pending.size());
+    }
+}
+
 void STDMETHODCALLTYPE hook_execute_command_lists(
     ID3D12CommandQueue* queue,
     UINT num_command_lists,
@@ -18673,6 +18844,11 @@ void STDMETHODCALLTYPE hook_execute_command_lists(
     auto aer_afw_hud_pending =
         take_mode3_aer_afw_hud_submissions_before_execute(
             num_command_lists, command_lists);
+    // [FIX:CROSS-QUEUE-SCENE-CAPTURE-OWNERSHIP V1368 3/7] Detach exact
+    // capture tickets before the real Execute so Reset cannot erase or reuse
+    // their command-list identity before post-submit ownership is attached.
+    auto streamline_capture_pending = take_streamline_capture_submissions(
+        num_command_lists, command_lists);
     const bool deferred_cross_queue_hud_publication =
         queue != g_command_queue && !aer_afw_hud_pending.empty();
     // [PERF:AER-AFW-HUD-PREEXECUTE-PUBLISH V1285 1/4] Pointer-exact labels
@@ -18712,6 +18888,14 @@ void STDMETHODCALLTYPE hook_execute_command_lists(
             deferred_cross_queue_hud_publication);
         publish_dlss_cache_submissions(dlss_cache_pending);
         publish_taau_cache_submissions(taau_cache_pending);
+        ID3D12Fence* capture_fence{};
+        uint64_t capture_fence_value{};
+        const bool capture_ordered = streamline_capture_pending.empty() ||
+            signal_private_resource_queue_timeline(
+                queue, capture_fence, capture_fence_value);
+        publish_streamline_capture_submissions(
+            queue, streamline_capture_pending, capture_ordered,
+            capture_fence, capture_fence_value);
         return;
     }
 
@@ -18906,41 +19090,46 @@ void STDMETHODCALLTYPE hook_execute_command_lists(
         deferred_cross_queue_hud_publication);
     publish_dlss_cache_submissions(dlss_cache_pending);
     publish_taau_cache_submissions(taau_cache_pending);
+    ID3D12Fence* private_resource_fence{};
+    uint64_t private_resource_fence_value{};
+    const bool private_resource_ordered =
+        (taau_slot_uses.empty() && streamline_capture_pending.empty()) ||
+        signal_private_resource_queue_timeline(
+            queue, private_resource_fence,
+            private_resource_fence_value);
+    publish_streamline_capture_submissions(
+        queue, streamline_capture_pending, private_resource_ordered,
+        private_resource_fence, private_resource_fence_value);
     if (!taau_slot_uses.empty()) {
         // [FIX:PER-QUEUE-PRIVATE-SLOT-RETIREMENT V1367 3/5] This signal is
         // placed after the exact Execute which owns the collected command-list
         // uses. Store its fence object as well as its value in every slot.
-        ID3D12Fence* retirement_fence{};
-        uint64_t retirement_fence_value{};
-        const bool retirement_ordered =
-            signal_private_resource_queue_timeline(
-                queue, retirement_fence, retirement_fence_value);
         for (const auto& use : taau_slot_uses) {
             if (use.tiled_culling &&
                 use.index < g_tiled_culling_override_slots.size()) {
                 auto& slot = g_tiled_culling_override_slots[use.index];
-                slot.retirement_fence = retirement_ordered
-                    ? retirement_fence : nullptr;
-                slot.retirement_fence_value = retirement_ordered
-                    ? retirement_fence_value : UINT64_MAX;
+                slot.retirement_fence = private_resource_ordered
+                    ? private_resource_fence : nullptr;
+                slot.retirement_fence_value = private_resource_ordered
+                    ? private_resource_fence_value : UINT64_MAX;
                 slot.reserved.store(false, std::memory_order_release);
             } else if (use.compose && use.index < g_taau_compose_slots.size()) {
                 auto& slot = g_taau_compose_slots[use.index];
-                slot.retirement_fence = retirement_ordered
-                    ? retirement_fence : nullptr;
-                slot.retirement_fence_value = retirement_ordered
-                    ? retirement_fence_value : UINT64_MAX;
+                slot.retirement_fence = private_resource_ordered
+                    ? private_resource_fence : nullptr;
+                slot.retirement_fence_value = private_resource_ordered
+                    ? private_resource_fence_value : UINT64_MAX;
                 slot.reserved.store(false, std::memory_order_release);
             } else if (!use.compose && use.index < g_taau_override_slots.size()) {
                 auto& slot = g_taau_override_slots[use.index];
-                slot.retirement_fence = retirement_ordered
-                    ? retirement_fence : nullptr;
-                slot.retirement_fence_value = retirement_ordered
-                    ? retirement_fence_value : UINT64_MAX;
+                slot.retirement_fence = private_resource_ordered
+                    ? private_resource_fence : nullptr;
+                slot.retirement_fence_value = private_resource_ordered
+                    ? private_resource_fence_value : UINT64_MAX;
                 slot.reserved.store(false, std::memory_order_release);
             }
         }
-        if (!retirement_ordered) {
+        if (!private_resource_ordered) {
             log_taau_trace_line(
                 "V1367 private slot retirement failed closed queue=%p "
                 "slots=%zu",
@@ -20280,6 +20469,35 @@ HRESULT STDMETHODCALLTYPE hook_reset_command_list(
                 }
             }
             g_mode3_early_hud_pending_by_command_list.erase(found);
+        }
+    }
+    // [FIX:CROSS-QUEUE-SCENE-CAPTURE-OWNERSHIP V1368 5/7] Reset discards a
+    // recording before submission. Release only its exact serial reservations;
+    // physical resource state remains what the preceding submitted use owned.
+    {
+        std::scoped_lock lock{g_streamline_capture_mutex};
+        const auto found = g_streamline_capture_pending_publications.find(
+            command_list);
+        if (found != g_streamline_capture_pending_publications.end()) {
+            for (const auto& pending : found->second) {
+                if (pending.eye > 1 ||
+                    pending.slot >= kStreamlineCaptureRingSize) {
+                    continue;
+                }
+                auto& slot = g_streamline_capture_ring[pending.eye]
+                    [pending.slot];
+                if (slot.recording_pending &&
+                    slot.capture_serial == pending.capture_serial) {
+                    slot.recording_pending = false;
+                    slot.initialized = false;
+                    slot.pair_id = 0;
+                    slot.source_eye = UINT32_MAX;
+                    slot.source_eye_valid = false;
+                    slot.render_view_valid = false;
+                    slot.native_asymmetric_projection = false;
+                }
+            }
+            g_streamline_capture_pending_publications.erase(found);
         }
     }
     // [FIX:AER-CINEMA-EXACT-EYE-CONTRACT V1214 6/12] A recycled command
@@ -39964,7 +40182,7 @@ void ensure_initialized() {
                 "focus_fire_b1=stereo_and_aer_centered_draw_proven "
                 "aer_taau_hud=scene_and_retained_pair_fail_open");
             log_line(
-                "witcher3vr dxgi proxy initialized build=V1367 base=V1366_per_queue_slot_retirement "
+                "witcher3vr dxgi proxy initialized build=V1368 base=V1367_cross_queue_scene_capture_ownership "
                 "anchor_smoothing_ini=%d anchor_smoothing_seconds=%.4f "
                 "first_person_strafe_ini=%d mode3_aer_presentation=%d raytracing_enabled=%d raytracing_history_buffers=%d "
                 "aer_afw_enabled=%d persistent_registry=%d dlss_public_streamline=%d "
@@ -40038,6 +40256,9 @@ void ensure_initialized() {
             // [FIX:PER-QUEUE-PRIVATE-SLOT-RETIREMENT V1367 5/5]
             log_line(
                 "V1367 private_slot_retirement=per_producer_queue fence_object_and_value_per_slot=1 independent_queue_values=0 failure=closed");
+            // [FIX:CROSS-QUEUE-SCENE-CAPTURE-OWNERSHIP V1368 7/7]
+            log_line(
+                "V1368 scene_capture_ownership=post_execute_publication producer_to_primary_wait=exact per_resource_last_use_fence=1 ring_reuse=retired_only failure=closed");
             log_line(
                 "V1279 DLSS compatibility=public_streamline_aer_private_history_ngx_stereo legacy_module_agnostic_discovery=disabled_by_V1288");
             log_line(
@@ -42423,6 +42644,10 @@ bool ensure_stereo_eye_cache(const D3D12_RESOURCE_DESC& source_desc) {
             cache = nullptr;
         }
     }
+    g_packed_present_cache_last_use_fence[0] = nullptr;
+    g_packed_present_cache_last_use_fence[1] = nullptr;
+    g_packed_present_cache_last_use_fence_value[0] = 0;
+    g_packed_present_cache_last_use_fence_value[1] = 0;
     reset_sequential_cinema_pair_authority(0, true);
     g_stereo_eye_cache_initialized[0] = false;
     g_stereo_eye_cache_initialized[1] = false;
@@ -43408,6 +43633,7 @@ bool update_mode3_aer_eye_cache() {
     }
     const bool mode3_common_fifo = queued_producer_selected;
 
+    std::scoped_lock capture_lock{g_streamline_capture_mutex};
     uint32_t promoted_mask{};
     uint64_t promoted_pair[2]{};
     for (uint32_t eye = 0; eye < 2; ++eye) {
@@ -43473,6 +43699,16 @@ bool update_mode3_aer_eye_cache() {
         g_mode3_aer_packed_native_eye[eye] =
             slot.native_asymmetric_projection;
         std::swap(slot.resource, g_packed_present_cache[eye]);
+        std::swap(
+            slot.last_use_fence,
+            g_packed_present_cache_last_use_fence[eye]);
+        std::swap(
+            slot.last_use_fence_value,
+            g_packed_present_cache_last_use_fence_value[eye]);
+        slot.producer_queue = nullptr;
+        slot.producer_queue_fence = nullptr;
+        slot.producer_queue_fence_value = 0;
+        slot.copy_source_state = packed_eye_was_initialized;
         slot.initialized = packed_eye_was_initialized;
         slot.pair_id = 0;
         slot.source_eye = UINT32_MAX;
@@ -43696,6 +43932,7 @@ bool update_packed_eye_cache() {
         return false;
     }
 
+    std::scoped_lock capture_lock{g_streamline_capture_mutex};
     const auto left_slot_index = g_streamline_capture_latest_slot[0].load();
     const auto right_slot_index = g_streamline_capture_latest_slot[1].load();
     if (left_slot_index >= kStreamlineCaptureRingSize ||
@@ -43871,6 +44108,16 @@ bool update_packed_eye_cache() {
         g_packed_present_cache_views[eye] = slot.render_view;
         g_packed_present_cache_view_valid[eye] = slot.render_view_valid;
         std::swap(slot.resource, g_packed_present_cache[eye]);
+        std::swap(
+            slot.last_use_fence,
+            g_packed_present_cache_last_use_fence[eye]);
+        std::swap(
+            slot.last_use_fence_value,
+            g_packed_present_cache_last_use_fence_value[eye]);
+        slot.producer_queue = nullptr;
+        slot.producer_queue_fence = nullptr;
+        slot.producer_queue_fence_value = 0;
+        slot.copy_source_state = had_accepted_pair;
         slot.initialized = had_accepted_pair;
         slot.pair_id = 0;
         slot.source_eye = UINT32_MAX;
@@ -43938,6 +44185,14 @@ bool ensure_streamline_capture_ring(const D3D12_RESOURCE_DESC& source_desc) {
                 slot.resource->Release();
                 slot.resource = nullptr;
             }
+            slot.last_use_fence = nullptr;
+            slot.last_use_fence_value = 0;
+            slot.producer_queue = nullptr;
+            slot.producer_queue_fence = nullptr;
+            slot.producer_queue_fence_value = 0;
+            slot.capture_serial = 0;
+            slot.recording_pending = false;
+            slot.copy_source_state = false;
             slot.initialized = false;
             slot.pair_id = 0;
             slot.source_eye = UINT32_MAX;
@@ -43948,6 +44203,7 @@ bool ensure_streamline_capture_ring(const D3D12_RESOURCE_DESC& source_desc) {
     g_streamline_capture_latest_slot[0].store(UINT32_MAX);
     g_streamline_capture_latest_slot[1].store(UINT32_MAX);
 
+    g_streamline_capture_pending_publications.clear();
     auto capture_desc = source_desc;
     capture_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
     D3D12_HEAP_PROPERTIES heap_props{};
@@ -43979,6 +44235,46 @@ bool ensure_streamline_capture_ring(const D3D12_RESOURCE_DESC& source_desc) {
     return true;
 }
 
+// [FIX:CROSS-QUEUE-SCENE-CAPTURE-OWNERSHIP V1368 4/7] Reserve only a physical
+// texture whose previous producer or packed-cache consumer has completed. The
+// logical slot is hidden until Execute publishes its new timeline.
+bool reserve_streamline_capture_slot(
+    uint32_t eye,
+    uint32_t& slot_index,
+    bool& destination_was_copy_source,
+    uint64_t& capture_serial) {
+    if (eye > 1) {
+        return false;
+    }
+    std::scoped_lock lock{g_streamline_capture_mutex};
+    const uint64_t start = g_streamline_capture_write_count[eye].fetch_add(
+        1, std::memory_order_relaxed);
+    for (uint32_t offset = 0;
+            offset < kStreamlineCaptureRingSize; ++offset) {
+        const uint32_t candidate_index = static_cast<uint32_t>(
+            (start + offset) % kStreamlineCaptureRingSize);
+        auto& candidate = g_streamline_capture_ring[eye][candidate_index];
+        if (candidate.recording_pending || candidate.resource == nullptr ||
+            !private_resource_slot_retired(
+                candidate.last_use_fence,
+                candidate.last_use_fence_value)) {
+            continue;
+        }
+        destination_was_copy_source = candidate.copy_source_state;
+        capture_serial = g_streamline_capture_serial.fetch_add(
+            1, std::memory_order_relaxed) + 1;
+        candidate.capture_serial = capture_serial;
+        candidate.recording_pending = true;
+        candidate.initialized = false;
+        candidate.producer_queue = nullptr;
+        candidate.producer_queue_fence = nullptr;
+        candidate.producer_queue_fence_value = 0;
+        slot_index = candidate_index;
+        return true;
+    }
+    return false;
+}
+
 bool capture_streamline_output(ID3D12GraphicsCommandList* command_list, D3D12_RESOURCE_STATES source_state) {
     auto output = g_streamline_output_frame;
     g_streamline_output_frame = {};
@@ -43987,10 +44283,16 @@ bool capture_streamline_output(ID3D12GraphicsCommandList* command_list, D3D12_RE
         return false;
     }
 
-    const uint32_t slot_index = static_cast<uint32_t>(
-        g_streamline_capture_write_count[output.eye].fetch_add(1) % kStreamlineCaptureRingSize);
+    uint32_t slot_index{};
+    bool destination_was_copy_source{};
+    uint64_t capture_serial{};
+    if (!reserve_streamline_capture_slot(
+            output.eye, slot_index, destination_was_copy_source,
+            capture_serial)) {
+        return false;
+    }
     auto& slot = g_streamline_capture_ring[output.eye][slot_index];
-    if (slot.initialized) {
+    if (destination_was_copy_source) {
         D3D12_RESOURCE_BARRIER to_copy_dest{};
         to_copy_dest.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
         to_copy_dest.Transition.pResource = slot.resource;
@@ -44020,24 +44322,29 @@ bool capture_streamline_output(ID3D12GraphicsCommandList* command_list, D3D12_RE
     to_copy_source.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
     to_copy_source.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
     command_list->ResourceBarrier(1, &to_copy_source);
-    slot.initialized = true;
-    slot.generation = g_streamline_capture_generation.load();
-    slot.pair_id = output.pair_id;
-    slot.source_eye = output.eye;
-    slot.source_eye_valid = output.eye <= 1;
-    slot.native_asymmetric_projection =
-        native_asymmetric_source_eye_tagged(output.pair_id, output.eye);
-    if (output.render_view_valid) {
-        slot.render_view = output.render_view;
-        slot.render_view_valid = true;
-    } else {
-        slot.render_view_valid = false;
+    const uint32_t generation = g_streamline_capture_generation.load(
+        std::memory_order_acquire);
+    {
+        std::scoped_lock lock{g_streamline_capture_mutex};
+        slot.generation = generation;
+        slot.pair_id = output.pair_id;
+        slot.source_eye = output.eye;
+        slot.source_eye_valid = output.eye <= 1;
+        slot.native_asymmetric_projection =
+            native_asymmetric_source_eye_tagged(output.pair_id, output.eye);
+        if (output.render_view_valid) {
+            slot.render_view = output.render_view;
+            slot.render_view_valid = true;
+        } else {
+            slot.render_view_valid = false;
+        }
+        g_streamline_capture_pending_publications[command_list].push_back({
+            output.eye, slot_index, generation, output.pair_id,
+            capture_serial});
     }
-    g_streamline_capture_latest_slot[output.eye].store(slot_index);
-    mark_engine_pair_output_captured(output.pair_id, output.eye);
 
     if (g_streamline_capture_log_count[output.eye].fetch_add(1) < 4) {
-        log_line("Streamline stereo capture eye=%u slot=%u pair=%llu output=%p state=0x%X present=%llu",
+        log_line("V1368 Streamline stereo capture recorded eye=%u slot=%u pair=%llu output=%p state=0x%X present=%llu",
             output.eye,
             slot_index,
             static_cast<unsigned long long>(slot.pair_id),
@@ -44066,11 +44373,17 @@ bool capture_tagged_backbuffer_output(
         return false;
     }
 
-    const uint32_t slot_index = static_cast<uint32_t>(
-        g_streamline_capture_write_count[eye].fetch_add(1) % kStreamlineCaptureRingSize);
+    uint32_t slot_index{};
+    bool destination_was_copy_source{};
+    uint64_t capture_serial{};
+    if (!reserve_streamline_capture_slot(
+            eye, slot_index, destination_was_copy_source,
+            capture_serial)) {
+        return false;
+    }
     auto& slot = g_streamline_capture_ring[eye][slot_index];
     g_packed_capture_internal = true;
-    if (slot.initialized) {
+    if (destination_was_copy_source) {
         D3D12_RESOURCE_BARRIER to_copy_dest{};
         to_copy_dest.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
         to_copy_dest.Transition.pResource = slot.resource;
@@ -44104,18 +44417,19 @@ bool capture_tagged_backbuffer_output(
     command_list->ResourceBarrier(1, &slot_to_source);
     g_packed_capture_internal = false;
 
-    slot.initialized = true;
-    slot.generation = generation;
-    slot.pair_id = pair_id;
-    slot.source_eye = source_eye;
-    slot.source_eye_valid = source_eye_valid && source_eye <= 1;
-    slot.render_view = render_view;
-    slot.render_view_valid = render_view_valid;
-    slot.native_asymmetric_projection =
-        native_asymmetric_source_eye_tagged(pair_id, eye);
-    g_streamline_capture_latest_slot[eye].store(
-        slot_index, std::memory_order_release);
-    mark_engine_pair_output_captured(pair_id, eye);
+    {
+        std::scoped_lock lock{g_streamline_capture_mutex};
+        slot.generation = generation;
+        slot.pair_id = pair_id;
+        slot.source_eye = source_eye;
+        slot.source_eye_valid = source_eye_valid && source_eye <= 1;
+        slot.render_view = render_view;
+        slot.render_view_valid = render_view_valid;
+        slot.native_asymmetric_projection =
+            native_asymmetric_source_eye_tagged(pair_id, eye);
+        g_streamline_capture_pending_publications[command_list].push_back({
+            eye, slot_index, generation, pair_id, capture_serial});
+    }
 
     if (g_config.runtime_diagnostics &&
         g_cinema_mode_active.load(std::memory_order_relaxed)) {
@@ -44124,7 +44438,7 @@ bool capture_tagged_backbuffer_output(
                 1, std::memory_order_relaxed);
         if (diagnostic_index < 128) {
             log_taau_trace_line(
-                "Cinema stereo capture sample=%u present=%llu eye=%u "
+                "V1368 Cinema stereo capture recorded sample=%u present=%llu eye=%u "
                 "pair=%llu generation=%u slot=%u source=%p",
                 diagnostic_index,
                 static_cast<unsigned long long>(
@@ -44136,7 +44450,7 @@ bool capture_tagged_backbuffer_output(
     }
 
     if (g_streamline_capture_log_count[eye].fetch_add(1) < 4) {
-        log_line("Packed tagged backbuffer captured eye=%u slot=%u pair=%llu resource=%p present=%llu",
+        log_line("V1368 packed tagged backbuffer recorded eye=%u slot=%u pair=%llu resource=%p present=%llu",
             eye, slot_index, static_cast<unsigned long long>(slot.pair_id), source,
             static_cast<unsigned long long>(g_present_count.load()));
     }
@@ -47516,6 +47830,18 @@ void render_openxr_test_frame(
                 if (SUCCEEDED(g_command_queue->Signal(g_xr_fence, submission))) {
                     g_xr_command_allocator_fences[g_xr_command_allocator_index] =
                         submission;
+                    // [FIX:CROSS-QUEUE-SCENE-CAPTURE-OWNERSHIP V1368 6/7]
+                    // When a packed cache resource is swapped back into the
+                    // capture ring, this exact primary-consumer fence becomes
+                    // its next reuse authority.
+                    for (uint32_t eye = 0; eye < 2; ++eye) {
+                        if (g_packed_present_cache[eye] != nullptr) {
+                            g_packed_present_cache_last_use_fence[eye] =
+                                g_xr_fence;
+                            g_packed_present_cache_last_use_fence_value[eye] =
+                                submission;
+                        }
+                    }
                     puredark_afw_bundle_submitted = true;
                     puredark_afw_bundle_fence = submission;
                 } else {
@@ -48064,7 +48390,7 @@ void handle_f3_capture_hotkey(IDXGISwapChain* swapchain) {
     if (w3vr::pipeline_flight::enabled()) {
         w3vr::pipeline_flight::dump_last_ten_seconds();
     }
-    w3vr::route_flight::dump_last_seconds("V1367", 15);
+    w3vr::route_flight::dump_last_seconds("V1368", 15);
     trigger_renderdoc_capture(
         g_game_swapchain != nullptr ? g_game_swapchain : swapchain);
 }
