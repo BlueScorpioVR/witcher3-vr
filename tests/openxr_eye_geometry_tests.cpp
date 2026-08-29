@@ -549,6 +549,24 @@ void test_asymmetric_projection_descriptor() {
     require(std::fabs(left.aspect - 0.92549446f) < 2.0e-6f &&
         std::fabs(right.aspect - 0.92549446f) < 2.0e-6f,
         "Quest lossless tangent aspect");
+
+    const XrFovf pimax_dream_air_left{
+        -0.912782907f, 0.701172709f, 0.811612010f, -0.811612010f};
+    const XrFovf pimax_dream_air_right{
+        -0.701172650f, 0.912782907f, 0.811612010f, -0.811612010f};
+    eye_geometry::AsymmetricProjectionDescriptor pimax_left{};
+    eye_geometry::AsymmetricProjectionDescriptor pimax_right{};
+    require(eye_geometry::derive_asymmetric_projection_descriptor(
+            pimax_dream_air_left, 3116, 3072, pimax_left) &&
+        eye_geometry::derive_asymmetric_projection_descriptor(
+            pimax_dream_air_right, 3116, 3072, pimax_right),
+        "Pimax Dream Air asymmetric descriptors");
+    require(std::fabs(pimax_left.center_ndc_x - 0.210230261f) < 2.0e-6f &&
+        std::fabs(pimax_right.center_ndc_x + 0.210230276f) < 2.0e-6f,
+        "Pimax Dream Air runtime horizontal centers");
+    require(std::fabs(pimax_left.center_ndc_y) < 2.0e-6f &&
+        std::fabs(pimax_right.center_ndc_y) < 2.0e-6f,
+        "Pimax Dream Air runtime vertical centers");
     require(std::fabs(left.horizontal_tangent_span - 2.21548265f) <
             3.0e-6f &&
         std::fabs(right.horizontal_tangent_span - 2.21548265f) <

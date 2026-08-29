@@ -13,8 +13,8 @@ set(required_fragments
     "std::unordered_map<ID3D12CommandQueue*, PrivateResourceQueueTimeline>"
     "slot.retirement_fence = private_resource_ordered"
     "private_resource_slot_retired("
-    "build=V1442"
-    "dump_last_seconds(\"V1442\", 15)"
+    "build=V1443"
+    "dump_last_seconds(\"V1443\", 15)"
     "uint32_t slot_count{1}"
     "slot.retirement_fence = private_resource_ordered")
 

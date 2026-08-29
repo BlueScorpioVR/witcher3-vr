@@ -5,7 +5,7 @@ endif()
 file(READ "${DXGI_PROXY_SOURCE}" source)
 
 set(required_fragments
-    "build=V1442 base=V1441_noaa_aggressive_optimization"
+    "build=V1443 base=V1442_runtime_focus_fire_centers"
     "PERF:NOAA-TILED-TLS V1442"
     "return asymmetric_tiled_culling_fix_needed() ||"
     "snapshot.compute_tables = state->compute_tables"

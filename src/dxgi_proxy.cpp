@@ -25,6 +25,7 @@
 #include "first_person_anchor_smoothing.h"
 #include "first_person_horse_gallop_offset.h"
 #include "foliage_hmd_base_policy.h"
+#include "focus_fire_projection_policy.h"
 #include "hmd_camera_orientation.h"
 #include "mode3_transport_policy.h"
 #include "mode3_dlss_constants_policy.h"
@@ -37,6 +38,8 @@
 #include "smoke_eye_authority_policy.h"
 #include "taau_submission_policy.h"
 
+// V1443 replaces the focus/fire family's Quest-specific projection constants
+// with immutable variants derived from the active OpenXR runtime eye FOV.
 // V1442 starts physically from V1441 and removes additional CPU bookkeeping
 // from the clean No-AA path. Tiled-culling bindings remain recording-thread
 // local, foliage upload slots are reserved and retired in exact-fence chunks,
@@ -256,6 +259,7 @@
 #include <cmath>
 #include <iterator>
 #include <limits>
+#include <memory>
 #include <deque>
 #include <unordered_map>
 #include <unordered_set>
@@ -3824,19 +3828,23 @@ struct RealSmokeSelectionTrace {
 
 // The automatic focus path reads the vertex-visible b1/b12 table at root 3.
 constexpr uint32_t kFocusVsCbvRoot = 3;
-constexpr float kFocusFireEye0CenterX = 0.242512643f;
-constexpr float kFocusFireEye1CenterX = -0.242512643f;
-constexpr float kFocusFireCenterY = 0.193187416f;
+constexpr float kFocusFireCenterMatchTolerance = 0.06f;
 constexpr size_t kFocusFirePipelineTableSize = 1024;
 static_assert((kFocusFirePipelineTableSize &
     (kFocusFirePipelineTableSize - 1)) == 0);
 
+struct HudCompositePsoRecipe;
+
 struct FocusFirePipelineSlot {
     std::atomic<ID3D12PipelineState*> original{};
-    ID3D12PipelineState* eye_pso[2]{};
+    std::atomic<ID3D12PipelineState*> eye_pso[2]{};
+    float center_x[2]{};
+    float center_y[2]{};
     uint64_t vs_hash{};
     uint64_t ps_hash{};
     uint32_t enrollment{};
+    HudCompositePsoRecipe* recipe{};
+    bool build_failed{};
     // 0 = not sampled, 1 = centered b1 needs correction,
     // 2 = b1 already carries the asymmetric center.
     std::atomic<uint32_t> b1_center_contract{};
@@ -3850,6 +3858,8 @@ std::array<FocusFirePipelineSlot, kFocusFirePipelineTableSize>
 ID3D12PipelineState* const kFocusFirePipelineClaimed =
     reinterpret_cast<ID3D12PipelineState*>(static_cast<uintptr_t>(1));
 std::atomic<bool> g_focus_fire_pipeline_overflow_logged{};
+std::mutex g_focus_fire_pso_creation_mutex{};
+std::atomic<uint32_t> g_focus_fire_pending_pipeline_count{};
 std::atomic<uint64_t> g_focus_fire_pso_routes[2]{};
 std::atomic<uint64_t> g_focus_fire_pso_fallbacks{};
 std::atomic<uint32_t> g_focus_fire_pso_route_logs{};
@@ -15784,7 +15794,7 @@ bool generate_focus_fire_horizontal_shader(
     uint64_t& signature_hash_out) {
     if (!initialize_dxc() || vertex_shader.pShaderBytecode == nullptr ||
         vertex_shader.BytecodeLength == 0 || !std::isfinite(center_x) ||
-        fabsf(center_x) < 0.05f || fabsf(center_x) > 0.5f ||
+        fabsf(center_x) > 0.5f ||
         !std::isfinite(center_y) || fabsf(center_y) > 0.5f) {
         return false;
     }
@@ -16362,16 +16372,15 @@ bool mark_focus_projection_shader_applied(
     return written;
 }
 
-void register_focus_fire_pipeline(
+bool register_focus_fire_pipeline(
     ID3D12PipelineState* original,
-    ID3D12PipelineState* eye0,
-    ID3D12PipelineState* eye1,
+    HudCompositePsoRecipe* recipe,
     uint64_t vs_hash,
     uint64_t ps_hash,
     FocusProjectionEnrollment enrollment) {
-    if (original == nullptr || eye0 == nullptr || eye1 == nullptr ||
+    if (original == nullptr || recipe == nullptr || !recipe->valid ||
         enrollment == FocusProjectionEnrollment::None) {
-        return;
+        return false;
     }
     const size_t mask = g_focus_fire_pipeline_table.size() - 1;
     const size_t start =
@@ -16381,7 +16390,7 @@ void register_focus_fire_pipeline(
         auto& slot = g_focus_fire_pipeline_table[(start + probe) & mask];
         auto* current = slot.original.load(std::memory_order_acquire);
         if (current == original) {
-            return;
+            return false;
         }
         if (current != nullptr) {
             continue;
@@ -16392,13 +16401,14 @@ void register_focus_fire_pipeline(
                 std::memory_order_acq_rel)) {
             continue;
         }
-        slot.eye_pso[0] = eye0;
-        slot.eye_pso[1] = eye1;
         slot.vs_hash = vs_hash;
         slot.ps_hash = ps_hash;
         slot.enrollment = static_cast<uint32_t>(enrollment);
+        slot.recipe = recipe;
+        g_focus_fire_pending_pipeline_count.fetch_add(
+            1, std::memory_order_release);
         slot.original.store(original, std::memory_order_release);
-        return;
+        return true;
     }
     if (!g_focus_fire_pipeline_overflow_logged.exchange(
             true, std::memory_order_relaxed)) {
@@ -16406,6 +16416,7 @@ void register_focus_fire_pipeline(
             "V1081 focus projection PSO table overflow capacity=%zu",
             g_focus_fire_pipeline_table.size());
     }
+    return false;
 }
 
 FocusFirePipelineSlot* find_focus_fire_pipeline(
@@ -16430,9 +16441,140 @@ FocusFirePipelineSlot* find_focus_fire_pipeline(
     return nullptr;
 }
 
-// [FIX:ASYMMETRIC-FOCUS-AUTO-FAMILY V1081 3/5] Build immutable eye PSOs
-// from a structurally enrolled descriptor. The root signature, VS, PS, blend,
-// depth and every bound resource remain the original state.
+// [FIX:PORTABLE-FOCUS-FIRE-CENTERS V1443] The game can create transparent
+// PSOs before xrLocateViews has published a usable FOV. Keep their immutable
+// recipes and complete each pair only after the active runtime owns the exact
+// per-eye optical centres. Quest, Pimax and future headsets therefore share the
+// same code path; no runtime name or headset calibration participates.
+bool ensure_focus_fire_projection_psos() {
+    if (g_focus_fire_pending_pipeline_count.load(
+            std::memory_order_acquire) == 0) {
+        return true;
+    }
+    constexpr XrViewStateFlags kRequiredRuntimeViewFlags =
+        XR_VIEW_STATE_ORIENTATION_VALID_BIT |
+        XR_VIEW_STATE_POSITION_VALID_BIT;
+    const XrViewStateFlags runtime_view_flags =
+        g_xr_render_view_state_flags.load(std::memory_order_acquire);
+    if ((runtime_view_flags & kRequiredRuntimeViewFlags) !=
+            kRequiredRuntimeViewFlags ||
+        g_xr_views.size() < 2 ||
+        g_create_graphics_pipeline_state == nullptr) {
+        return false;
+    }
+
+    std::array<w3vr::openxr_eye_geometry::AsymmetricProjectionDescriptor, 2>
+        projections{};
+    w3vr::focus_fire_projection::RuntimeCenters centers{};
+    for (uint32_t eye = 0; eye < 2; ++eye) {
+        if (!w3vr::openxr_eye_geometry::
+                derive_asymmetric_projection_descriptor(
+                    g_xr_views[eye].fov, 1, 1, projections[eye])) {
+            return false;
+        }
+        centers.x[eye] = projections[eye].center_ndc_x;
+        centers.y[eye] = projections[eye].center_ndc_y;
+    }
+    if (!w3vr::focus_fire_projection::valid(centers)) {
+        return false;
+    }
+
+    std::scoped_lock creation_lock{g_focus_fire_pso_creation_mutex};
+    for (auto& slot : g_focus_fire_pipeline_table) {
+        if (g_focus_fire_pending_pipeline_count.load(
+                std::memory_order_relaxed) == 0) {
+            break;
+        }
+        auto* original = slot.original.load(std::memory_order_acquire);
+        if (original == nullptr || original == kFocusFirePipelineClaimed ||
+            slot.build_failed || slot.recipe == nullptr ||
+            slot.eye_pso[0].load(std::memory_order_acquire) != nullptr ||
+            slot.eye_pso[1].load(std::memory_order_acquire) != nullptr) {
+            continue;
+        }
+
+        auto* recipe = slot.recipe;
+        std::array<std::vector<uint8_t>, 2> eye_shaders{};
+        uint64_t signature_hash[2]{};
+        bool shaders_ready = true;
+        for (uint32_t eye = 0; eye < 2; ++eye) {
+            shaders_ready = shaders_ready &&
+                generate_focus_fire_horizontal_shader(
+                    recipe->desc.VS, centers.x[eye], centers.y[eye],
+                    eye_shaders[eye], signature_hash[eye]);
+        }
+
+        ID3D12PipelineState* eye_pso[2]{};
+        HRESULT eye_hr[2]{E_FAIL, E_FAIL};
+        if (shaders_ready) {
+            for (uint32_t eye = 0; eye < 2; ++eye) {
+                auto eye_desc = recipe->desc;
+                eye_desc.GS = D3D12_SHADER_BYTECODE{
+                    eye_shaders[eye].data(), eye_shaders[eye].size()};
+                eye_hr[eye] = g_create_graphics_pipeline_state(
+                    recipe->device, &eye_desc,
+                    IID_PPV_ARGS(&eye_pso[eye]));
+            }
+        }
+
+        if (!shaders_ready || FAILED(eye_hr[0]) || FAILED(eye_hr[1]) ||
+            eye_pso[0] == nullptr || eye_pso[1] == nullptr) {
+            if (eye_pso[0] != nullptr) eye_pso[0]->Release();
+            if (eye_pso[1] != nullptr) eye_pso[1]->Release();
+            slot.build_failed = true;
+            delete slot.recipe;
+            slot.recipe = nullptr;
+            g_focus_fire_pending_pipeline_count.fetch_sub(
+                1, std::memory_order_release);
+            log_line(
+                "V1443 focus projection PSO completion failed enrollment=%s original=%p vs=0x%llX ps=0x%llX shader=%d hr=0x%08X,0x%08X center=%.9g,%.9g/%.9g,%.9g",
+                focus_projection_enrollment_name(
+                    static_cast<FocusProjectionEnrollment>(slot.enrollment)),
+                original,
+                static_cast<unsigned long long>(slot.vs_hash),
+                static_cast<unsigned long long>(slot.ps_hash),
+                shaders_ready ? 1 : 0,
+                static_cast<unsigned>(eye_hr[0]),
+                static_cast<unsigned>(eye_hr[1]),
+                centers.x[0], centers.y[0],
+                centers.x[1], centers.y[1]);
+            continue;
+        }
+
+        {
+            std::scoped_lock reverse_lock{g_reverse_mutex};
+            g_pipeline_infos[eye_pso[0]] = recipe->pipeline_info;
+            g_pipeline_infos[eye_pso[1]] = recipe->pipeline_info;
+        }
+        slot.center_x[0] = centers.x[0];
+        slot.center_x[1] = centers.x[1];
+        slot.center_y[0] = centers.y[0];
+        slot.center_y[1] = centers.y[1];
+        delete slot.recipe;
+        slot.recipe = nullptr;
+        slot.eye_pso[0].store(eye_pso[0], std::memory_order_release);
+        slot.eye_pso[1].store(eye_pso[1], std::memory_order_release);
+        g_focus_fire_pending_pipeline_count.fetch_sub(
+            1, std::memory_order_release);
+        record_focus_projection_shader(slot.vs_hash, slot.ps_hash);
+        log_line(
+            "V1443 focus projection PSOs ready enrollment=%s original=%p eye0=%p eye1=%p vs=0x%llX ps=0x%llX runtime_center=%.9g,%.9g/%.9g,%.9g signature=0x%llX,0x%llX shared_writes=0",
+            focus_projection_enrollment_name(
+                static_cast<FocusProjectionEnrollment>(slot.enrollment)),
+            original, eye_pso[0], eye_pso[1],
+            static_cast<unsigned long long>(slot.vs_hash),
+            static_cast<unsigned long long>(slot.ps_hash),
+            centers.x[0], centers.y[0], centers.x[1], centers.y[1],
+            static_cast<unsigned long long>(signature_hash[0]),
+            static_cast<unsigned long long>(signature_hash[1]));
+    }
+    return g_focus_fire_pending_pipeline_count.load(
+        std::memory_order_acquire) == 0;
+}
+
+// [FIX:ASYMMETRIC-FOCUS-AUTO-FAMILY V1081 3/5] Enrol the immutable
+// descriptor. V1443 defers the eye variants until the runtime FOV is known;
+// the root signature, VS, PS, blend, depth and resources remain original.
 void create_focus_fire_horizontal_psos(
     ID3D12Device* device,
     const D3D12_GRAPHICS_PIPELINE_STATE_DESC* desc,
@@ -16463,66 +16605,22 @@ void create_focus_fire_horizontal_psos(
         return;
     }
 
-    std::vector<uint8_t> eye_shader[2]{};
-    uint64_t signature_hash[2]{};
-    if (!generate_focus_fire_horizontal_shader(
-            desc->VS, kFocusFireEye0CenterX, kFocusFireCenterY,
-            eye_shader[0], signature_hash[0]) ||
-        !generate_focus_fire_horizontal_shader(
-            desc->VS, kFocusFireEye1CenterX, kFocusFireCenterY,
-            eye_shader[1], signature_hash[1])) {
+    auto recipe = std::make_unique<HudCompositePsoRecipe>();
+    if (!capture_graphics_pso_recipe(*recipe, device, *desc, info)) {
         log_line(
-            "V1081 focus projection GS generation failed enrollment=%s original=%p vs=0x%llX ps=0x%llX",
+            "V1443 focus projection recipe capture failed enrollment=%s original=%p vs=0x%llX ps=0x%llX",
             focus_projection_enrollment_name(enrollment),
             original,
             static_cast<unsigned long long>(info.vs_hash),
             static_cast<unsigned long long>(info.ps_hash));
         return;
     }
-
-    ID3D12PipelineState* eye_pso[2]{};
-    HRESULT eye_hr[2]{E_FAIL, E_FAIL};
-    for (uint32_t eye = 0; eye < 2; ++eye) {
-        auto eye_desc = *desc;
-        eye_desc.GS = D3D12_SHADER_BYTECODE{
-            eye_shader[eye].data(), eye_shader[eye].size()};
-        eye_hr[eye] = g_create_graphics_pipeline_state(
-            device, &eye_desc, IID_PPV_ARGS(&eye_pso[eye]));
+    if (register_focus_fire_pipeline(
+            original, recipe.get(), info.vs_hash, info.ps_hash,
+            enrollment)) {
+        recipe.release();
+        ensure_focus_fire_projection_psos();
     }
-    if (FAILED(eye_hr[0]) || FAILED(eye_hr[1]) ||
-        eye_pso[0] == nullptr || eye_pso[1] == nullptr) {
-        if (eye_pso[0] != nullptr) eye_pso[0]->Release();
-        if (eye_pso[1] != nullptr) eye_pso[1]->Release();
-        log_line(
-            "V1081 focus projection PSO creation failed enrollment=%s original=%p vs=0x%llX ps=0x%llX hr=0x%08X,0x%08X",
-            focus_projection_enrollment_name(enrollment),
-            original,
-            static_cast<unsigned long long>(info.vs_hash),
-            static_cast<unsigned long long>(info.ps_hash),
-            static_cast<unsigned>(eye_hr[0]),
-            static_cast<unsigned>(eye_hr[1]));
-        return;
-    }
-
-    {
-        std::scoped_lock lock{g_reverse_mutex};
-        g_pipeline_infos[eye_pso[0]] = info;
-        g_pipeline_infos[eye_pso[1]] = info;
-    }
-    register_focus_fire_pipeline(
-        original, eye_pso[0], eye_pso[1], info.vs_hash, info.ps_hash,
-        enrollment);
-    record_focus_projection_shader(info.vs_hash, info.ps_hash);
-    log_line(
-        "V1081 focus projection PSOs ready enrollment=%s original=%p eye0=%p eye1=%p vs=0x%llX ps=0x%llX center_x=%.9g,%.9g center_y=%.9g signature=0x%llX,0x%llX shared_writes=0",
-        focus_projection_enrollment_name(enrollment), original,
-        eye_pso[0], eye_pso[1],
-        static_cast<unsigned long long>(info.vs_hash),
-        static_cast<unsigned long long>(info.ps_hash),
-        kFocusFireEye0CenterX, kFocusFireEye1CenterX,
-        kFocusFireCenterY,
-        static_cast<unsigned long long>(signature_hash[0]),
-        static_cast<unsigned long long>(signature_hash[1]));
 }
 
 struct NativeFocusDrawEyeAuthority {
@@ -16551,6 +16649,7 @@ bool match_native_focus_draw_eye(
 bool resolve_focus_fire_b1_authority(
     ID3D12GraphicsCommandList* command_list,
     uint64_t present,
+    const w3vr::focus_fire_projection::RuntimeCenters& centers,
     uint32_t& detected_contract,
     int& eye,
     float& estimated_x,
@@ -16574,12 +16673,25 @@ ID3D12PipelineState* resolve_focus_fire_horizontal_draw_pso(
     if (focus_fire == nullptr || command_list == nullptr) {
         return nullptr;
     }
+    ID3D12PipelineState* eye_psos[2]{
+        focus_fire->eye_pso[0].load(std::memory_order_acquire),
+        focus_fire->eye_pso[1].load(std::memory_order_acquire)};
+    if (eye_psos[0] == nullptr || eye_psos[1] == nullptr) {
+        return nullptr;
+    }
+    const w3vr::focus_fire_projection::RuntimeCenters centers{{
+        focus_fire->center_x[0], focus_fire->center_x[1]}, {
+        focus_fire->center_y[0], focus_fire->center_y[1]}};
+    if (!w3vr::focus_fire_projection::valid(centers)) {
+        return nullptr;
+    }
 
     const uint64_t present =
         g_present_count.load(std::memory_order_relaxed);
     int focus_eye{-1};
     uint32_t stage{1};
     float center_x{};
+    float center_y{};
     uint32_t draw_b1_contract{};
     const auto read_gpu_va_bytes = [](
         D3D12_GPU_VIRTUAL_ADDRESS gpu_va,
@@ -16699,6 +16811,11 @@ ID3D12PipelineState* resolve_focus_fire_horizontal_draw_pso(
                                     stage = 5;
                                     stage = 6;
                                     center_x = projection[8];
+                                    center_y = projection[9];
+                                    const auto projection_eye =
+                                        w3vr::focus_fire_projection::match_eye(
+                                            center_x, center_y, centers,
+                                            kFocusFireCenterMatchTolerance);
                                     const bool projection_valid =
                                         std::all_of(
                                             projection.begin(),
@@ -16710,8 +16827,8 @@ ID3D12PipelineState* resolve_focus_fire_horizontal_draw_pso(
                                         fabsf(projection[0]) <= 10.0f &&
                                         fabsf(projection[5]) >= 0.1f &&
                                         fabsf(projection[5]) <= 10.0f &&
-                                        fabsf(center_x) >= 0.20f &&
-                                        fabsf(center_x) <= 0.30f &&
+                                        projection_eye.matched &&
+                                        projection_eye.eye >= 0 &&
                                         fabsf(projection[11] - 1.0f) <=
                                             0.01f &&
                                         fabsf(projection[15]) <= 0.01f;
@@ -16771,21 +16888,19 @@ ID3D12PipelineState* resolve_focus_fire_horizontal_draw_pso(
                                                              b1_matrix[6] *
                                                                 b1_matrix[14]) /
                                                             denominator;
-                                                        uint32_t detected{};
-                                                        if (fabsf(estimated_x) <=
-                                                                0.06f &&
-                                                            fabsf(estimated_y) <=
-                                                                0.06f) {
-                                                            detected = 1;
-                                                        } else if (
-                                                            fabsf(estimated_x -
-                                                                center_x) <=
-                                                                0.06f &&
-                                                            fabsf(estimated_y -
-                                                                kFocusFireCenterY) <=
-                                                                0.06f) {
-                                                            detected = 2;
-                                                        }
+                                                        const auto
+                                                            classification =
+                                                            w3vr::
+                                                                focus_fire_projection::
+                                                                classify_b1(
+                                                                    estimated_x,
+                                                                    estimated_y,
+                                                                    centers,
+                                                                    kFocusFireCenterMatchTolerance);
+                                                        const uint32_t detected =
+                                                            static_cast<uint32_t>(
+                                                                classification.
+                                                                    contract);
                                                         if (detected != 0) {
                                                             b1_contract =
                                                                 detected;
@@ -16804,8 +16919,9 @@ ID3D12PipelineState* resolve_focus_fire_horizontal_draw_pso(
                                             }
                                         }
                                         if (b1_contract == 1) {
-                                            focus_eye =
-                                                center_x > 0.0f ? 0 : 1;
+                                            focus_eye = projection_eye.eye;
+                                            center_x = centers.x[focus_eye];
+                                            center_y = centers.y[focus_eye];
                                             stage = 7;
                                         } else if (b1_contract == 2) {
                                             stage = 9;
@@ -16836,8 +16952,8 @@ ID3D12PipelineState* resolve_focus_fire_horizontal_draw_pso(
         float estimated_y{};
         uint32_t authority_route{};
         if (resolve_focus_fire_b1_authority(
-                command_list, present, detected_contract, matched_eye,
-                estimated_x, estimated_y, authority_route)) {
+                command_list, present, centers, detected_contract,
+                matched_eye, estimated_x, estimated_y, authority_route)) {
             draw_b1_contract = detected_contract;
             if (detected_contract != 0) {
                 uint32_t expected{};
@@ -16853,8 +16969,8 @@ ID3D12PipelineState* resolve_focus_fire_horizontal_draw_pso(
             } else if (detected_contract == 1 && matched_eye >= 0 &&
                 matched_eye <= 1) {
                 focus_eye = matched_eye;
-                center_x = focus_eye == 0
-                    ? kFocusFireEye0CenterX : kFocusFireEye1CenterX;
+                center_x = centers.x[focus_eye];
+                center_y = centers.y[focus_eye];
                 stage = authority_route == 1
                     ? 10u : (authority_route == 2 ? 11u : 12u);
             }
@@ -16868,7 +16984,7 @@ ID3D12PipelineState* resolve_focus_fire_horizontal_draw_pso(
 
     ID3D12PipelineState* selected{};
     if (focus_eye >= 0 && focus_eye <= 1) {
-        selected = focus_fire->eye_pso[focus_eye];
+        selected = eye_psos[focus_eye];
     }
     if (selected != nullptr) {
         g_focus_fire_pso_routes[focus_eye].fetch_add(
@@ -16897,7 +17013,7 @@ ID3D12PipelineState* resolve_focus_fire_horizontal_draw_pso(
                     focus_fire->enrollment)),
             focus_fire->b1_center_contract.load(
                 std::memory_order_relaxed),
-            draw_b1_contract, focus_eye, center_x, kFocusFireCenterY, stage,
+            draw_b1_contract, focus_eye, center_x, center_y, stage,
             original, selected,
             static_cast<unsigned long long>(focus_fire->vs_hash),
             static_cast<unsigned long long>(focus_fire->ps_hash),
@@ -17231,6 +17347,7 @@ bool match_native_focus_draw_eye(
 bool resolve_focus_fire_b1_authority(
     ID3D12GraphicsCommandList* command_list,
     uint64_t present,
+    const w3vr::focus_fire_projection::RuntimeCenters& centers,
     uint32_t& detected_contract,
     int& eye,
     float& estimated_x,
@@ -17277,17 +17394,21 @@ bool resolve_focus_fire_b1_authority(
         matrix[2] * matrix[14]) / denominator;
     estimated_y = (matrix[4] * matrix[12] + matrix[5] * matrix[13] +
         matrix[6] * matrix[14]) / denominator;
-    if (fabsf(estimated_x) <= 0.06f && fabsf(estimated_y) <= 0.06f) {
-        detected_contract = 1;
-    } else if (
-        fabsf(fabsf(estimated_x) - fabsf(kFocusFireEye0CenterX)) <= 0.06f &&
-        fabsf(estimated_y - kFocusFireCenterY) <= 0.06f) {
-        detected_contract = 2;
-        eye = estimated_x > 0.0f ? 0 : 1;
-        store_native_focus_draw_eye(
-            command_list, present, static_cast<uint32_t>(eye), 0);
+    const auto classification = w3vr::focus_fire_projection::classify_b1(
+        estimated_x, estimated_y, centers,
+        kFocusFireCenterMatchTolerance);
+    detected_contract = static_cast<uint32_t>(classification.contract);
+    if (classification.contract ==
+            w3vr::focus_fire_projection::B1Contract::Unknown) {
         return true;
-    } else {
+    }
+    if (classification.contract ==
+            w3vr::focus_fire_projection::B1Contract::AlreadyAsymmetric) {
+        eye = classification.eye;
+        if (eye >= 0 && eye <= 1) {
+            store_native_focus_draw_eye(
+                command_list, present, static_cast<uint32_t>(eye), 0);
+        }
         return true;
     }
 
@@ -42022,7 +42143,7 @@ void ensure_initialized() {
                 "focus_fire_b1=stereo_and_aer_centered_draw_proven "
                 "aer_taau_hud=scene_and_retained_pair_fail_open");
             log_line(
-                "witcher3vr dxgi proxy initialized build=V1442 base=V1441_noaa_aggressive_optimization "
+                "witcher3vr dxgi proxy initialized build=V1443 base=V1442_runtime_focus_fire_centers "
                 "anchor_smoothing_ini=%d anchor_smoothing_seconds=%.4f "
                 "first_person_strafe_ini=%d mode3_aer_presentation=%d raytracing_enabled=%d raytracing_history_buffers=%d "
                 "aer_afw_enabled=%d persistent_registry=%d optiscaler_enabled=%d "
@@ -42088,6 +42209,8 @@ void ensure_initialized() {
                 "V1441 noaa_optimization=safe descriptor_copy=lock_free_functional_metadata gpu_va=epoch_validated_tls_hit foliage=pso_reused diagnostics=release_zero_cost base=V1424");
             log_line(
                 "V1442 noaa_optimization=aggressive tiled_culling=tls_bindings foliage=16_slot_chunks nonindexed=clean_route_fast_path gpu_command_stream=unchanged base=V1441");
+            log_line(
+                "V1443 focus_fire_projection=runtime_openxr_fov per_eye_xy=1 quest_constants=removed b1_double_application_guard=runtime_centered");
             log_line(
                 "V1363 dlss_scene_history_reset=removed_rejected_V1340 projection_switch_reset=V1331_only");
             log_line(
@@ -50262,9 +50385,10 @@ void apply_present_boundary_requests() {
             projection_toggle_requests);
     }
 
-    // Complete producer-independent smoke variants after OpenXR view discovery,
-    // even when the process started in SYM and no F2 transition has occurred.
+    // Complete producer-independent transparent-effect variants after OpenXR
+    // view discovery, even when startup was SYM and F2 was never pressed.
     ensure_real_smoke_projection_psos();
+    ensure_focus_fire_projection_psos();
 }
 
 void handle_f3_capture_hotkey(IDXGISwapChain* swapchain) {
@@ -50280,7 +50404,7 @@ void handle_f3_capture_hotkey(IDXGISwapChain* swapchain) {
     if (w3vr::pipeline_flight::enabled()) {
         w3vr::pipeline_flight::dump_last_ten_seconds();
     }
-    w3vr::route_flight::dump_last_seconds("V1442", 15);
+    w3vr::route_flight::dump_last_seconds("V1443", 15);
     trigger_renderdoc_capture(
         g_game_swapchain != nullptr ? g_game_swapchain : swapchain);
 }

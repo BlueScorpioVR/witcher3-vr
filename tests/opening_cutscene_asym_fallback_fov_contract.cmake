@@ -5,7 +5,7 @@ endif()
 file(READ "${DXGI_PROXY_SOURCE}" source)
 
 foreach(required_fragment IN ITEMS
-        "build=V1442 base=V1441_noaa_aggressive_optimization"
+        "build=V1443 base=V1442_runtime_focus_fire_centers"
         "[FIX:FULL-VR-FALLBACK-RAW-FOV V1424]"
         "xr_fov = &g_xr_views[static_cast<size_t>(eye)].fov;"
         "recursive_shared_fov_input=removed"

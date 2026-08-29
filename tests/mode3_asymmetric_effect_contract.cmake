@@ -8,6 +8,9 @@ foreach(required_marker IN ITEMS
         "native_asymmetric_effect_preparation_configured("
         "native_asymmetric_effect_center_application_active("
         "real_smoke_center_fix_route_configured()"
+        "ensure_focus_fire_projection_psos()"
+        "focus_fire_projection::RuntimeCenters"
+        "focus_fire_projection::classify_b1("
         "resolve_focus_fire_horizontal_draw_pso("
         "select_real_smoke_offaxis_pipeline(")
     string(FIND "${source}" "${required_marker}" marker_index)
@@ -37,7 +40,11 @@ foreach(obsolete_marker IN ITEMS
         "effect_producer_projection"
         "effect_producer_transaction"
         "native_asymmetric_source_eye_tagged_for_generation"
-        "final_native_temporal_aer")
+        "final_native_temporal_aer"
+        "kFocusFireEye0CenterX"
+        "kFocusFireEye1CenterX"
+        "kFocusFireCenterY"
+        "fabsf(center_x) >= 0.20f")
     string(FIND "${source}" "${obsolete_marker}" obsolete_index)
     if(NOT obsolete_index EQUAL -1)
         message(FATAL_ERROR

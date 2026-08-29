@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(witcher3vr VERSION 0.1442.0 LANGUAGES C CXX)
+project(witcher3vr VERSION 0.1443.0 LANGUAGES C CXX)
 
 include(CTest)
 
@@ -315,6 +315,16 @@ if(BUILD_TESTING)
     add_test(
         NAME renderer_smoke_eye_authority_policy
         COMMAND w3vr_smoke_eye_authority_policy_tests
+    )
+
+    add_executable(w3vr_focus_fire_projection_policy_tests
+        tests/focus_fire_projection_policy_tests.cpp
+    )
+    target_include_directories(
+        w3vr_focus_fire_projection_policy_tests PRIVATE src)
+    add_test(
+        NAME renderer_focus_fire_projection_policy
+        COMMAND w3vr_focus_fire_projection_policy_tests
     )
 
     add_test(
