@@ -37,6 +37,8 @@
 #include "smoke_eye_authority_policy.h"
 #include "taau_submission_policy.h"
 
+// V1441 starts physically from V1424 and removes equivalent work from the
+// release No-AA hot paths without changing the rendered command stream.
 // V1424 starts physically from V1422 and replaces the automatic Full-VR
 // symmetric-fallback FOV input with the raw OpenXR eye FOV. The shared FOV
 // published by V1418 remains presentation output only and can no longer feed
@@ -1921,10 +1923,6 @@ using ResourceBarrierFn = void(STDMETHODCALLTYPE*)(
 using OMSetRenderTargetsFn = void(STDMETHODCALLTYPE*)(
     ID3D12GraphicsCommandList*, UINT, const D3D12_CPU_DESCRIPTOR_HANDLE*, BOOL,
     const D3D12_CPU_DESCRIPTOR_HANDLE*);
-using RSSetViewportsFn = void(STDMETHODCALLTYPE*)(
-    ID3D12GraphicsCommandList*, UINT, const D3D12_VIEWPORT*);
-using RSSetScissorRectsFn = void(STDMETHODCALLTYPE*)(
-    ID3D12GraphicsCommandList*, UINT, const D3D12_RECT*);
 
 CreateSwapChainForHwndFn g_create_swapchain_for_hwnd{};
 CreateSwapChainFn g_create_swapchain{};
@@ -1968,8 +1966,6 @@ DispatchFn g_dispatch{};
 CopyBufferRegionFn g_copy_buffer_region{};
 ResourceBarrierFn g_resource_barrier{};
 OMSetRenderTargetsFn g_om_set_render_targets{};
-RSSetViewportsFn g_rs_set_viewports{};
-RSSetScissorRectsFn g_rs_set_scissor_rects{};
 void* g_dispatch_hook_target{};
 void* g_compute_table_hook_target{};
 void* g_compute_cbv_hook_target{};
@@ -3654,10 +3650,6 @@ struct DlssGraphicsStateSnapshot {
     ID3D12DescriptorHeap* sampler_heap{};
     ID3D12PipelineState* pipeline_state{};
     ID3D12RootSignature* root_signature{};
-    UINT viewport_count{};
-    UINT scissor_count{};
-    D3D12_VIEWPORT viewport{};
-    D3D12_RECT scissor{};
     D3D12_CPU_DESCRIPTOR_HANDLE cbv_cpu_start{};
     D3D12_GPU_DESCRIPTOR_HANDLE cbv_gpu_start{};
     UINT cbv_descriptor_count{};
@@ -3725,6 +3717,8 @@ std::array<FoliageBoundBasisOverrideSlot, kFoliageBoundBasisSlotCount>
     g_foliage_bound_basis_override_slots{};
 ID3D12Resource* g_foliage_bound_basis_upload{};
 uint8_t* g_foliage_bound_basis_upload_mapped{};
+D3D12_GPU_VIRTUAL_ADDRESS g_foliage_bound_basis_upload_gpu_va{};
+std::atomic<bool> g_foliage_bound_basis_resources_ready{};
 std::once_flag g_foliage_bound_basis_resources_once{};
 std::atomic<uint32_t> g_foliage_bound_basis_slot_index{};
 std::atomic<uint64_t> g_foliage_bound_basis_corrected{};
@@ -4548,9 +4542,6 @@ struct TaauRtvWriter {
 };
 std::unordered_map<ID3D12Resource*, TaauRtvWriter> g_taau_rtv_writers{};
 std::atomic<uint64_t> g_taau_draw_serial{};
-ID3D12Fence* g_taau_readback_fence{};
-std::atomic<ID3D12GraphicsCommandList*> g_taau_readback_command_list{};
-std::atomic<bool> g_taau_readback_submitted{};
 struct TaauResourceTransition {
     ID3D12GraphicsCommandList* command_list{};
     D3D12_RESOURCE_STATES before{};
@@ -5306,14 +5297,6 @@ void STDMETHODCALLTYPE hook_set_descriptor_heaps(
     ID3D12GraphicsCommandList* command_list,
     UINT num_descriptor_heaps,
     ID3D12DescriptorHeap* const* descriptor_heaps);
-void STDMETHODCALLTYPE hook_rs_set_viewports(
-    ID3D12GraphicsCommandList* command_list,
-    UINT num_viewports,
-    const D3D12_VIEWPORT* viewports);
-void STDMETHODCALLTYPE hook_rs_set_scissor_rects(
-    ID3D12GraphicsCommandList* command_list,
-    UINT num_rects,
-    const D3D12_RECT* rects);
 void STDMETHODCALLTYPE hook_set_graphics_root_descriptor_table(
     ID3D12GraphicsCommandList* command_list,
     UINT root_parameter_index,
@@ -5776,6 +5759,8 @@ void update_taau_hot_hook_state() {
 void log_line(const char* fmt, ...);
 bool copy_gpu_va_bytes(
     D3D12_GPU_VIRTUAL_ADDRESS gpu_va, void* destination, size_t size);
+UINT cached_descriptor_increment(
+    ID3D12Device* device, D3D12_DESCRIPTOR_HEAP_TYPE type);
 bool load_cbv_descriptor(SIZE_T cpu_handle_ptr, CbvDescriptorInfo& info_out);
 bool taau_table_cpu_handle_locked(
     ID3D12DescriptorHeap* cbv_srv_uav_heap,
@@ -5808,7 +5793,8 @@ bool acquire_tiled_culling_override_slot(
     ID3D12GraphicsCommandList* command_list,
     uint32_t& slot_index_out);
 bool prepare_foliage_hmd_base_draw(
-    ID3D12GraphicsCommandList* command_list);
+    ID3D12GraphicsCommandList* command_list,
+    ID3D12PipelineState* pipeline);
 
 // Encode the omitted asymmetric center as a translated virtual tile extent
 // while preserving projection_scale * half_extent. The dimmer shader also
@@ -5837,15 +5823,16 @@ bool dispatch_asymmetric_tiled_culling_remap(
     }
 
     const auto note_fallback = [&](const char* reason) {
-        const uint64_t count = g_tiled_culling_fallbacks.fetch_add(
-            1, std::memory_order_relaxed) + 1;
-        if (g_config.runtime_diagnostics &&
-            (count <= 16 || (count & (count - 1)) == 0)) {
+        if (g_config.runtime_diagnostics) {
+            const uint64_t count = g_tiled_culling_fallbacks.fetch_add(
+                1, std::memory_order_relaxed) + 1;
+            if (count <= 16 || (count & (count - 1)) == 0) {
             log_line(
                 "V9233 tiled culling native fallback count=%llu reason=%s cs=0x%llX dispatch=%ux%ux%u",
                 static_cast<unsigned long long>(count), reason,
                 static_cast<unsigned long long>(pipeline_info.cs_hash),
                 x, y, z);
+            }
         }
         return false;
     };
@@ -5889,9 +5876,8 @@ bool dispatch_asymmetric_tiled_culling_remap(
         }
     }
 
-    const UINT source_descriptor_increment =
-        g_d3d12_device->GetDescriptorHandleIncrementSize(
-            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    const UINT source_descriptor_increment = cached_descriptor_increment(
+        g_d3d12_device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     const SIZE_T cb12_cpu = source_cbv.ptr +
         static_cast<SIZE_T>(kTiledCullingSharedPixelSlot) *
             source_descriptor_increment;
@@ -6108,17 +6094,18 @@ bool dispatch_asymmetric_tiled_culling_remap(
         }
     }
 
-    const uint64_t corrected = g_tiled_culling_corrected.fetch_add(
-        1, std::memory_order_relaxed) + 1;
-    if (g_config.runtime_diagnostics &&
-        (corrected <= 32 || (corrected % 240) == 0)) {
-        log_line(
-            "V9233 tiled culling corrected count=%llu cs=0x%llX dispatch=%ux%ux%u slot=%u projection=%.7f,%.7f center=%.7f,%.7f remap_projection=%.7f,%.7f dimensions=%.1f,%.1f remap_dimensions=%.1f,%.1f",
-            static_cast<unsigned long long>(corrected),
-            static_cast<unsigned long long>(pipeline_info.cs_hash),
-            x, y, z, slot_index, m00, m11, center_x, center_y,
-            remapped_m00, remapped_m11, render_width, render_height,
-            remapped_width, remapped_height);
+    if (g_config.runtime_diagnostics) {
+        const uint64_t corrected = g_tiled_culling_corrected.fetch_add(
+            1, std::memory_order_relaxed) + 1;
+        if (corrected <= 32 || (corrected % 240) == 0) {
+            log_line(
+                "V9233 tiled culling corrected count=%llu cs=0x%llX dispatch=%ux%ux%u slot=%u projection=%.7f,%.7f center=%.7f,%.7f remap_projection=%.7f,%.7f dimensions=%.1f,%.1f remap_dimensions=%.1f,%.1f",
+                static_cast<unsigned long long>(corrected),
+                static_cast<unsigned long long>(pipeline_info.cs_hash),
+                x, y, z, slot_index, m00, m11, center_x, center_y,
+                remapped_m00, remapped_m11, render_width, render_height,
+                remapped_width, remapped_height);
+        }
     }
     return true;
 }
@@ -14386,7 +14373,8 @@ void replay_native_temporal_terrain_indexed_motion(
     UINT index_count_per_instance, UINT instance_count,
     UINT start_index_location, INT base_vertex_location,
     UINT start_instance_location) {
-    if (command_list == nullptr || g_set_pipeline_state == nullptr ||
+    if (!native_temporal_terrain_motion_route_active() ||
+        command_list == nullptr || g_set_pipeline_state == nullptr ||
         g_draw_indexed_instanced == nullptr) {
         return;
     }
@@ -14415,7 +14403,8 @@ void replay_native_temporal_terrain_nonindexed_motion(
     ID3D12GraphicsCommandList* command_list,
     UINT vertex_count_per_instance, UINT instance_count,
     UINT start_vertex_location, UINT start_instance_location) {
-    if (command_list == nullptr || g_set_pipeline_state == nullptr ||
+    if (!native_temporal_terrain_motion_route_active() ||
+        command_list == nullptr || g_set_pipeline_state == nullptr ||
         g_draw_instanced == nullptr) {
         return;
     }
@@ -16903,10 +16892,10 @@ bool resolve_gpu_va(D3D12_GPU_VIRTUAL_ADDRESS gpu_va, ResourceInfo& out, size_t&
 }
 
 bool guarded_memcpy(void* destination, const void* source, size_t size) {
-    SIZE_T bytes_read{};
-    return ReadProcessMemory(
-               GetCurrentProcess(), source, destination, size, &bytes_read) != FALSE &&
-        bytes_read == size;
+    // [PERF:NOAA-GPU-VA-CACHE V1441 2/2] Both addresses belong to this
+    // process. The existing SEH copy provides the same fail-closed access
+    // guard without a ReadProcessMemory kernel transition on every CB read.
+    return safe_copy_asymmetric_authority(source, destination, size);
 }
 
 bool resolve_real_smoke_cbv(
@@ -17371,48 +17360,72 @@ bool copy_gpu_va_bytes(D3D12_GPU_VIRTUAL_ADDRESS gpu_va, void* destination, size
         return false;
     }
 
-    g_taau_cb_snapshots_in_progress.fetch_add(1, std::memory_order_acq_rel);
+    const bool protect_taau_unmap = taau_runtime_tracking_active();
+    if (protect_taau_unmap) {
+        g_taau_cb_snapshots_in_progress.fetch_add(
+            1, std::memory_order_acq_rel);
+    }
+    // [PERF:NOAA-GPU-VA-CACHE V1441 1/2] A cache hit already identifies one
+    // immutable registry epoch. Do the guarded read without serializing every
+    // foliage draw on the global reverse-state mutex, then validate that the
+    // epoch did not change. A miss retains the exact locked registry scan.
+    struct GpuVaReadCache {
+        D3D12_GPU_VIRTUAL_ADDRESS base{};
+        uint64_t width{};
+        const uint8_t* mapped{};
+        size_t mapped_size{};
+    };
+    struct GpuVaReadCacheSet {
+        uint64_t generation{};
+        size_t next{};
+        std::array<GpuVaReadCache, 8> entries{};
+    };
+    thread_local GpuVaReadCacheSet cache{};
+    const auto try_copy = [&](D3D12_GPU_VIRTUAL_ADDRESS base,
+                              uint64_t width,
+                              const uint8_t* mapped,
+                              size_t mapped_size) {
+        if (base == 0 || mapped == nullptr || gpu_va < base) {
+            return false;
+        }
+        const auto offset = static_cast<uint64_t>(gpu_va - base);
+        if (offset > width || size > width - offset ||
+            offset > mapped_size ||
+            size > mapped_size - static_cast<size_t>(offset)) {
+            return false;
+        }
+        return guarded_memcpy(
+            destination, mapped + static_cast<size_t>(offset), size);
+    };
+
     bool copied{};
-    {
+    const uint64_t observed_generation =
+        g_resource_registry_generation.load(std::memory_order_acquire);
+    if (cache.generation != observed_generation) {
+        cache = {};
+        cache.generation = observed_generation;
+    }
+    for (const auto& entry : cache.entries) {
+        if (entry.base != 0 &&
+            try_copy(entry.base, entry.width, entry.mapped,
+                entry.mapped_size) &&
+            g_resource_registry_generation.load(std::memory_order_acquire) ==
+                observed_generation) {
+            copied = true;
+            break;
+        }
+    }
+    if (!copied) {
         std::scoped_lock lock{g_reverse_mutex};
         // Creation, mapping and final Release each advance the registry epoch,
         // so the fast path can never retain a destroyed allocation.
-        struct GpuVaReadCache {
-            uint64_t generation{};
-            D3D12_GPU_VIRTUAL_ADDRESS base{};
-            uint64_t width{};
-            const uint8_t* mapped{};
-            size_t mapped_size{};
-        };
-        thread_local GpuVaReadCache cache{};
         const uint64_t generation = g_resource_registry_generation.load(
             std::memory_order_acquire);
-        const auto try_copy = [&](D3D12_GPU_VIRTUAL_ADDRESS base,
-                                  uint64_t width,
-                                  const uint8_t* mapped,
-                                  size_t mapped_size) {
-            if (base == 0 || mapped == nullptr || gpu_va < base) {
-                return false;
-            }
-            const auto offset = static_cast<uint64_t>(gpu_va - base);
-            if (offset > width || size > width - offset ||
-                offset > mapped_size ||
-                size > mapped_size - static_cast<size_t>(offset)) {
-                return false;
-            }
-            return guarded_memcpy(
-                destination, mapped + static_cast<size_t>(offset), size);
-        };
-
-        if (cache.generation == generation &&
-            try_copy(cache.base, cache.width, cache.mapped,
-                cache.mapped_size)) {
-            copied = true;
+        if (cache.generation != generation) {
+            cache = {};
+            cache.generation = generation;
         }
         for (const auto& [resource, info] : g_resource_infos) {
-            if (copied) {
-                break;
-            }
             if (info.gpu_va == 0 || info.desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER ||
                 info.mapped == nullptr || gpu_va < info.gpu_va) {
                 continue;
@@ -17421,16 +17434,20 @@ bool copy_gpu_va_bytes(D3D12_GPU_VIRTUAL_ADDRESS gpu_va, void* destination, size
             if (try_copy(info.gpu_va, info.desc.Width,
                     static_cast<const uint8_t*>(info.mapped),
                     info.mapped_size)) {
-                cache = GpuVaReadCache{
-                    generation, info.gpu_va, info.desc.Width,
+                cache.entries[cache.next] = GpuVaReadCache{
+                    info.gpu_va, info.desc.Width,
                     static_cast<const uint8_t*>(info.mapped),
                     info.mapped_size};
+                cache.next = (cache.next + 1) % cache.entries.size();
                 copied = true;
                 break;
             }
         }
     }
-    g_taau_cb_snapshots_in_progress.fetch_sub(1, std::memory_order_acq_rel);
+    if (protect_taau_unmap) {
+        g_taau_cb_snapshots_in_progress.fetch_sub(
+            1, std::memory_order_acq_rel);
+    }
     return copied;
 }
 
@@ -17928,7 +17945,11 @@ bool resolve_descriptor_table_resource(
         descriptor_out, cpu_handle_out);
 }
 
-void copy_cbv_descriptor_metadata(SIZE_T dest_cpu, SIZE_T src_cpu, UINT increment) {
+void copy_cbv_descriptor_metadata(
+    SIZE_T dest_cpu,
+    SIZE_T src_cpu,
+    UINT increment,
+    bool copy_legacy_resource_metadata) {
     CbvDescriptorInfo source_cbv{};
     const bool cbv_copied = load_cbv_descriptor(src_cpu, source_cbv);
     if (cbv_copied) {
@@ -17942,28 +17963,35 @@ void copy_cbv_descriptor_metadata(SIZE_T dest_cpu, SIZE_T src_cpu, UINT incremen
         store_resource_descriptor_fast(dest_cpu, fast_resource, fast_format);
         copied = true;
     }
-    auto resource_it = g_resource_descriptors.find(src_cpu);
-    if (resource_it != g_resource_descriptors.end()) {
-        g_resource_descriptors[dest_cpu] = resource_it->second;
-        store_resource_descriptor_fast(
-            dest_cpu, resource_it->second.resource,
-            resource_it->second.format);
-        const uint32_t propagated_bit =
-            resource_it->second.format == DXGI_FORMAT_R16G16B16A16_FLOAT ? 1u : 2u;
-        const uint32_t previous_mask =
-            g_taau_descriptor_propagated_mask.fetch_or(propagated_bit);
-        if ((previous_mask & propagated_bit) == 0) {
-            log_line("TAAU bootstrap propagated type=%s src=0x%zX dest=0x%zX",
-                propagated_bit == 1 ? "motion" : "depth", src_cpu, dest_cpu);
+    // [PERF:NOAA-DESCRIPTOR-COPY V1441 1/3] Smoke, foliage and focus consume
+    // the lock-free CBV cache; retained HUD consumes the lock-free resource
+    // mirror. The legacy map is populated only by TAAU, RT or diagnostics, so
+    // do not probe it (under g_reverse_mutex) in a clean No-AA run.
+    if (copy_legacy_resource_metadata) {
+        auto resource_it = g_resource_descriptors.find(src_cpu);
+        if (resource_it != g_resource_descriptors.end()) {
+            g_resource_descriptors[dest_cpu] = resource_it->second;
+            store_resource_descriptor_fast(
+                dest_cpu, resource_it->second.resource,
+                resource_it->second.format);
+            const uint32_t propagated_bit =
+                resource_it->second.format == DXGI_FORMAT_R16G16B16A16_FLOAT ? 1u : 2u;
+            const uint32_t previous_mask =
+                g_taau_descriptor_propagated_mask.fetch_or(propagated_bit);
+            if ((previous_mask & propagated_bit) == 0) {
+                log_line("TAAU bootstrap propagated type=%s src=0x%zX dest=0x%zX",
+                    propagated_bit == 1 ? "motion" : "depth", src_cpu, dest_cpu);
+            }
+            copied = true;
         }
-        copied = true;
     }
     if (!copied) {
         return;
     }
 
     static std::atomic<uint32_t> copy_log_count{};
-    if (cbv_copied && copy_log_count.fetch_add(1) < 40) {
+    if (g_config.runtime_diagnostics && cbv_copied &&
+        take_bounded_log_slot(copy_log_count, 40)) {
         log_line("Reverse CBV descriptor copy src=0x%zX dest=0x%zX gpuva=0x%llX size=%u inc=%u",
             src_cpu,
             dest_cpu,
@@ -18024,6 +18052,9 @@ void install_reverse_hooks() {
     const bool hud_descriptor_hooks = mode3_hud_descriptor_hooks_needed();
     const bool descriptor_hooks = descriptor_metadata_hooks_needed();
     const bool command_state_hooks = graphics_binding_hooks_needed();
+    const bool uav_metadata_hooks = taau_metadata_hooks_needed() ||
+        rt_symmetric_dlss_per_eye_ao_history_active();
+    const bool render_target_metadata_hooks = taau_metadata_hooks_needed();
     const bool puredark_afw_execute_publication =
         puredark_afw_mode3_aer_any_route_configured();
     const bool dlss_cache_execute_publication =
@@ -18084,7 +18115,7 @@ void install_reverse_hooks() {
         }
     }
 
-    if (metadata_hooks && g_create_uav == nullptr) {
+    if (uav_metadata_hooks && g_create_uav == nullptr) {
         auto target = method<void*>(g_d3d12_device, 19);
         if (MH_CreateHook(target, reinterpret_cast<void*>(&hook_create_uav), reinterpret_cast<void**>(&g_create_uav)) == MH_OK &&
             MH_EnableHook(target) == MH_OK) {
@@ -18092,7 +18123,7 @@ void install_reverse_hooks() {
         }
     }
 
-    if (metadata_hooks && g_create_rtv == nullptr) {
+    if (render_target_metadata_hooks && g_create_rtv == nullptr) {
         auto target = method<void*>(g_d3d12_device, 20);
         if (MH_CreateHook(target, reinterpret_cast<void*>(&hook_create_rtv),
                 reinterpret_cast<void**>(&g_create_rtv)) == MH_OK &&
@@ -18101,7 +18132,7 @@ void install_reverse_hooks() {
         }
     }
 
-    if (metadata_hooks && g_create_dsv == nullptr) {
+    if (render_target_metadata_hooks && g_create_dsv == nullptr) {
         auto target = method<void*>(g_d3d12_device, 21);
         if (MH_CreateHook(target, reinterpret_cast<void*>(&hook_create_dsv),
                 reinterpret_cast<void**>(&g_create_dsv)) == MH_OK &&
@@ -18248,6 +18279,9 @@ void install_command_list_hooks() {
     command_list->Close();
 
     const bool command_state_hooks = graphics_binding_hooks_needed();
+    const bool graphics_cbv_hooks =
+        native_temporal_terrain_motion_route_active() ||
+        (reverse_enabled() && g_config.reverse_cbv_probe);
     const bool compute_hooks = taau_compute_hooks_needed() ||
         rt_symmetric_dlss_per_eye_ao_history_active();
 
@@ -18276,26 +18310,6 @@ void install_command_list_hooks() {
         if (MH_CreateHook(target, reinterpret_cast<void*>(&hook_draw_indexed_instanced), reinterpret_cast<void**>(&g_draw_indexed_instanced)) == MH_OK &&
             MH_EnableHook(target) == MH_OK) {
             log_line("Reverse hooked ID3D12GraphicsCommandList::DrawIndexedInstanced at %p", target);
-        }
-    }
-
-    if (command_state_hooks && g_rs_set_viewports == nullptr) {
-        auto target = method<void*>(command_list, 21);
-        if (MH_CreateHook(target,
-                reinterpret_cast<void*>(&hook_rs_set_viewports),
-                reinterpret_cast<void**>(&g_rs_set_viewports)) == MH_OK &&
-            MH_EnableHook(target) == MH_OK) {
-            log_line("V1348 smoke visibility hooked RSSetViewports at %p", target);
-        }
-    }
-
-    if (command_state_hooks && g_rs_set_scissor_rects == nullptr) {
-        auto target = method<void*>(command_list, 22);
-        if (MH_CreateHook(target,
-                reinterpret_cast<void*>(&hook_rs_set_scissor_rects),
-                reinterpret_cast<void**>(&g_rs_set_scissor_rects)) == MH_OK &&
-            MH_EnableHook(target) == MH_OK) {
-            log_line("V1348 smoke visibility hooked RSSetScissorRects at %p", target);
         }
     }
 
@@ -18351,7 +18365,10 @@ void install_command_list_hooks() {
         }
     }
 
-    if (command_state_hooks && g_set_graphics_root_cbv == nullptr) {
+    // [PERF:NOAA-DEAD-CBV-HOOK V1441] Smoke, foliage and retained HUD consume
+    // descriptor tables, not direct root CBVs. Install this detour only for
+    // the temporal-terrain replay or the explicit reverse probe that reads it.
+    if (graphics_cbv_hooks && g_set_graphics_root_cbv == nullptr) {
         auto target = method<void*>(command_list, 38);
         if (MH_CreateHook(target, reinterpret_cast<void*>(&hook_set_graphics_root_cbv), reinterpret_cast<void**>(&g_set_graphics_root_cbv)) == MH_OK &&
             MH_EnableHook(target) == MH_OK) {
@@ -19302,6 +19319,16 @@ void STDMETHODCALLTYPE hook_execute_command_lists(
     const bool taau_cache_execute_publication =
         w3vr::mode3_transport::submission_queue_eligible(
             taau_submitted_resolve_route_active(), queue == g_command_queue);
+    // [PERF:NOAA-EXECUTE-ROUTES V1441 1/3] Foliage needs exact queue-fence
+    // retirement, but it does not activate the unrelated RT, TAAU or DLSS
+    // bookkeeping that shares this queue hook.
+    const bool rt_history_active =
+        rt_symmetric_dlss_per_eye_ao_history_active();
+    const bool taau_execute_tracking =
+        taau_functional_hooks_needed() ||
+        reverse_diagnostic_hooks_requested();
+    const bool dlss_luma_tracking =
+        g_config.runtime_diagnostics && temporal_backend_is_dlss();
     // [FIX:PUREDARK-AFW-CROSS-QUEUE-PUBLICATION V12099 2/6] The pending map
     // is keyed by exact command-list identity, so it is the safe queue filter.
     // Scan every hooked DIRECT queue; unrelated submissions return empty.
@@ -19337,9 +19364,11 @@ void STDMETHODCALLTYPE hook_execute_command_lists(
     // their command-list identity before post-submit ownership is attached.
     auto streamline_capture_pending = take_streamline_capture_submissions(
         num_command_lists, command_lists);
-    auto rt_private_history_uses = take_rt_private_history_submissions(
-        num_command_lists, command_lists);
-    const bool rt_history_dependencies_ordered =
+    auto rt_private_history_uses = rt_history_active
+        ? take_rt_private_history_submissions(
+            num_command_lists, command_lists)
+        : std::vector<RtPrivateHistoryPendingUse>{};
+    const bool rt_history_dependencies_ordered = !rt_history_active ||
         order_rt_private_history_submission(
             queue, rt_private_history_uses);
     const bool deferred_cross_queue_hud_publication =
@@ -19356,8 +19385,7 @@ void STDMETHODCALLTYPE hook_execute_command_lists(
     // Their command-list uses must reach the queue-fence retirement below even
     // in a release run; diagnostic mode previously disabled this early return
     // by accident and was the only reason those slots remained reusable.
-    const bool rt_slot_retirement_needed =
-        rt_symmetric_dlss_per_eye_ao_history_active();
+    const bool rt_slot_retirement_needed = rt_history_active;
     const bool foliage_slot_retirement_needed =
         foliage_bound_basis_route_active();
     // [FIX:TAAU-FUNCTIONAL-EXECUTE-LIFECYCLE V12127 1/1] TAAU resolve
@@ -19401,7 +19429,13 @@ void STDMETHODCALLTYPE hook_execute_command_lists(
         return;
     }
 
-    const auto count = ++g_execute_count;
+    const bool execute_counter_needed = reverse_enabled() ||
+        high_frequency_runtime_diagnostics_active() ||
+        taau_resolve_runtime_diagnostics_active() ||
+        taau_drop_diagnostics_active();
+    const auto count = execute_counter_needed
+        ? g_execute_count.fetch_add(1, std::memory_order_relaxed) + 1
+        : 0;
     if (reverse_enabled()) {
         const auto interval = static_cast<uint64_t>(g_config.reverse_execute_log_interval);
         if (interval > 0 && (count == 1 || count % interval == 0)) {
@@ -19457,20 +19491,8 @@ void STDMETHODCALLTYPE hook_execute_command_lists(
         }
     }
 
-    bool submits_taau_readback{};
-    auto* readback_list = g_taau_readback_command_list.load();
-    if (readback_list != nullptr && command_lists != nullptr &&
-        !g_taau_readback_submitted.load()) {
-        for (UINT index = 0; index < num_command_lists; ++index) {
-            if (command_lists[index] == static_cast<ID3D12CommandList*>(readback_list)) {
-                submits_taau_readback = true;
-                break;
-            }
-        }
-    }
-
     bool submits_dlss_output_luma[2]{};
-    if (command_lists != nullptr) {
+    if (dlss_luma_tracking && command_lists != nullptr) {
         for (uint32_t lane = 0; lane < 2; ++lane) {
             auto* output_luma_list = g_dlss_output_luma_command_lists[lane].load();
             if (output_luma_list == nullptr ||
@@ -19504,7 +19526,7 @@ void STDMETHODCALLTYPE hook_execute_command_lists(
     // V507 observes the authority REDengine actually gives the GPU. Recording
     // order is speculative; only command lists present in ExecuteCommandLists
     // form the real temporal sequence.
-    if (command_lists != nullptr) {
+    if (taau_execute_tracking && command_lists != nullptr) {
         for (UINT index = 0; index < num_command_lists; ++index) {
             TaauRecordedResolveIdentity submitted{};
             bool found{};
@@ -19652,21 +19674,17 @@ void STDMETHODCALLTYPE hook_execute_command_lists(
                 queue, taau_slot_uses.size());
         }
     }
-    if (submits_taau_readback && g_taau_readback_fence != nullptr &&
-        !g_taau_readback_submitted.exchange(true)) {
-        const HRESULT signal_hr = queue->Signal(g_taau_readback_fence, 1);
-        log_line("TAAU readback submitted command_list=%p signal_hr=0x%08X",
-            readback_list, static_cast<unsigned>(signal_hr));
-    }
-    for (uint32_t lane = 0; lane < 2; ++lane) {
-        if (submits_dlss_output_luma[lane] &&
-            g_dlss_output_luma_fences[lane] != nullptr &&
-            !g_dlss_output_luma_submitted[lane].exchange(true)) {
-            const HRESULT signal_hr = queue->Signal(
-                g_dlss_output_luma_fences[lane], 1);
-            log_line("DLSS output luminance submitted lane=%u command_list=%p signal_hr=0x%08X",
-                lane, g_dlss_output_luma_command_lists[lane].load(),
-                static_cast<unsigned>(signal_hr));
+    if (dlss_luma_tracking) {
+        for (uint32_t lane = 0; lane < 2; ++lane) {
+            if (submits_dlss_output_luma[lane] &&
+                g_dlss_output_luma_fences[lane] != nullptr &&
+                !g_dlss_output_luma_submitted[lane].exchange(true)) {
+                const HRESULT signal_hr = queue->Signal(
+                    g_dlss_output_luma_fences[lane], 1);
+                log_line("DLSS output luminance submitted lane=%u command_list=%p signal_hr=0x%08X",
+                    lane, g_dlss_output_luma_command_lists[lane].load(),
+                    static_cast<unsigned>(signal_hr));
+            }
         }
     }
 }
@@ -19775,20 +19793,9 @@ HRESULT STDMETHODCALLTYPE hook_create_committed_resource(
         }
 
         if (desc->Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) {
-            {
-                std::scoped_lock lock{g_reverse_mutex};
-                g_resource_infos[d3d_resource] = ResourceInfo{
-                    *desc,
-                    heap_type,
-                    d3d_resource->GetGPUVirtualAddress(),
-                    nullptr,
-                    static_cast<size_t>(std::min<uint64_t>(desc->Width, SIZE_MAX)),
-                    g_resource_registry_serial.fetch_add(
-                        1, std::memory_order_relaxed)};
-                g_resource_registry_generation.fetch_add(
-                    1, std::memory_order_release);
-            }
-
+            // [PERF:NOAA-MAPPED-REGISTRY V1441] GPU-VA readers can consume
+            // only mapped buffers. Install the resource hooks now, but defer
+            // registry insertion and epoch invalidation until the first Map.
             install_resource_hooks(d3d_resource);
 
             if (g_config.runtime_diagnostics && reverse_enabled() &&
@@ -20652,11 +20659,9 @@ void STDMETHODCALLTYPE hook_copy_descriptors(
         src_descriptor_range_sizes,
         descriptor_heaps_type);
 
-    const bool supported_heap =
-        descriptor_heaps_type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV ||
-        descriptor_heaps_type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV ||
-        descriptor_heaps_type == D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
-    if (!descriptor_metadata_hooks_needed() || !supported_heap ||
+    if (!descriptor_metadata_hooks_needed() ||
+        descriptor_heaps_type !=
+            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV ||
         dest_descriptor_range_starts == nullptr || src_descriptor_range_starts == nullptr) {
         return;
     }
@@ -20668,13 +20673,17 @@ void STDMETHODCALLTYPE hook_copy_descriptors(
     UINT src_range = 0;
     UINT dest_index = 0;
     UINT src_index = 0;
-    const bool full_metadata = taau_metadata_hooks_needed() ||
+    const bool cbv_metadata = taau_metadata_hooks_needed() ||
         real_smoke_world_up_binding_route_active() ||
         foliage_bound_basis_route_active() ||
         focus_projection_metadata_hooks_needed() ||
         rt_symmetric_dlss_per_eye_ao_history_active();
+    const bool legacy_resource_metadata = taau_metadata_hooks_needed() ||
+        rt_symmetric_dlss_per_eye_ao_history_active();
     std::unique_lock<std::mutex> lock{g_reverse_mutex, std::defer_lock};
-    if (full_metadata) {
+    if (descriptor_heaps_type ==
+            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV &&
+        legacy_resource_metadata) {
         lock.lock();
     }
 
@@ -20688,8 +20697,9 @@ void STDMETHODCALLTYPE hook_copy_descriptors(
         const auto dest_cpu = dest_descriptor_range_starts[dest_range].ptr + static_cast<SIZE_T>(dest_index) * increment;
         const auto src_cpu = src_descriptor_range_starts[src_range].ptr + static_cast<SIZE_T>(src_index) * increment;
         if (descriptor_heaps_type ==
-                D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV && full_metadata) {
-            copy_cbv_descriptor_metadata(dest_cpu, src_cpu, increment);
+                D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV && cbv_metadata) {
+            copy_cbv_descriptor_metadata(
+                dest_cpu, src_cpu, increment, legacy_resource_metadata);
         } else if (descriptor_heaps_type ==
                 D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV) {
             ID3D12Resource* resource{};
@@ -20725,11 +20735,9 @@ void STDMETHODCALLTYPE hook_copy_descriptors_simple(
         src_descriptor_range_start,
         descriptor_heaps_type);
 
-    const bool supported_heap =
-        descriptor_heaps_type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV ||
-        descriptor_heaps_type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV ||
-        descriptor_heaps_type == D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
-    if (!descriptor_metadata_hooks_needed() || !supported_heap ||
+    if (!descriptor_metadata_hooks_needed() ||
+        descriptor_heaps_type !=
+            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV ||
         dest_descriptor_range_start.ptr == 0 || src_descriptor_range_start.ptr == 0) {
         return;
     }
@@ -20737,21 +20745,26 @@ void STDMETHODCALLTYPE hook_copy_descriptors_simple(
     // [PERF:DESCRIPTOR-INCREMENT-CACHE 3/3]
     const auto increment =
         cached_descriptor_increment(device, descriptor_heaps_type);
-    const bool full_metadata = taau_metadata_hooks_needed() ||
+    const bool cbv_metadata = taau_metadata_hooks_needed() ||
         real_smoke_world_up_binding_route_active() ||
         foliage_bound_basis_route_active() ||
         focus_projection_metadata_hooks_needed() ||
         rt_symmetric_dlss_per_eye_ao_history_active();
+    const bool legacy_resource_metadata = taau_metadata_hooks_needed() ||
+        rt_symmetric_dlss_per_eye_ao_history_active();
     std::unique_lock<std::mutex> lock{g_reverse_mutex, std::defer_lock};
-    if (full_metadata) {
+    if (descriptor_heaps_type ==
+            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV &&
+        legacy_resource_metadata) {
         lock.lock();
     }
     for (UINT index = 0; index < num_descriptors; ++index) {
         const auto dest_cpu = dest_descriptor_range_start.ptr + static_cast<SIZE_T>(index) * increment;
         const auto src_cpu = src_descriptor_range_start.ptr + static_cast<SIZE_T>(index) * increment;
         if (descriptor_heaps_type ==
-                D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV && full_metadata) {
-            copy_cbv_descriptor_metadata(dest_cpu, src_cpu, increment);
+                D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV && cbv_metadata) {
+            copy_cbv_descriptor_metadata(
+                dest_cpu, src_cpu, increment, legacy_resource_metadata);
         } else if (descriptor_heaps_type ==
                 D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV) {
             ID3D12Resource* resource{};
@@ -20800,12 +20813,17 @@ HRESULT STDMETHODCALLTYPE hook_resource_map(
             std::scoped_lock lock{g_reverse_mutex};
             auto it = g_resource_infos.find(resource);
             if (it != g_resource_infos.end()) {
+                const auto previous_mapped = it->second.mapped;
+                const auto previous_mapped_size = it->second.mapped_size;
                 it->second.mapped = *data;
                 if (it->second.mapped_size == 0 && it->second.desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) {
                     it->second.mapped_size = static_cast<size_t>(std::min<uint64_t>(it->second.desc.Width, SIZE_MAX));
                 }
-                g_resource_registry_generation.fetch_add(
-                    1, std::memory_order_release);
+                if (it->second.mapped != previous_mapped ||
+                    it->second.mapped_size != previous_mapped_size) {
+                    g_resource_registry_generation.fetch_add(
+                        1, std::memory_order_release);
+                }
                 info = it->second;
                 tracked = true;
             }
@@ -20985,34 +21003,6 @@ void STDMETHODCALLTYPE hook_set_descriptor_heaps(
     g_set_descriptor_heaps(command_list, num_descriptor_heaps, descriptor_heaps);
 }
 
-void STDMETHODCALLTYPE hook_rs_set_viewports(
-    ID3D12GraphicsCommandList* command_list,
-    UINT num_viewports,
-    const D3D12_VIEWPORT* viewports) {
-    if (dlss_graphics_state_tracking_active()) {
-        if (auto* state = access_dlss_graphics_state(command_list, true)) {
-            state->viewport_count = num_viewports;
-            state->viewport = num_viewports != 0 && viewports != nullptr
-                ? viewports[0] : D3D12_VIEWPORT{};
-        }
-    }
-    g_rs_set_viewports(command_list, num_viewports, viewports);
-}
-
-void STDMETHODCALLTYPE hook_rs_set_scissor_rects(
-    ID3D12GraphicsCommandList* command_list,
-    UINT num_rects,
-    const D3D12_RECT* rects) {
-    if (dlss_graphics_state_tracking_active()) {
-        if (auto* state = access_dlss_graphics_state(command_list, true)) {
-            state->scissor_count = num_rects;
-            state->scissor = num_rects != 0 && rects != nullptr
-                ? rects[0] : D3D12_RECT{};
-        }
-    }
-    g_rs_set_scissor_rects(command_list, num_rects, rects);
-}
-
 // [FIX:COMMAND-LIST-RESET-EPOCH V1120] D3D12 invalidates descriptor heaps,
 // root signatures and root arguments when a command list begins a new
 // recording. The renderer tracker previously kept those bindings indefinitely,
@@ -21190,7 +21180,8 @@ void STDMETHODCALLTYPE hook_set_graphics_root_descriptor_table(
     ID3D12GraphicsCommandList* command_list,
     UINT root_parameter_index,
     D3D12_GPU_DESCRIPTOR_HANDLE base_descriptor) {
-    if (dlss_graphics_state_tracking_active() && root_parameter_index < 32) {
+    if (dlss_graphics_state_tracking_active() &&
+        root_parameter_index < 32) {
         if (auto* state = access_dlss_graphics_state(command_list, true)) {
             state->tables[root_parameter_index] = base_descriptor;
         }
@@ -21204,7 +21195,8 @@ void STDMETHODCALLTYPE hook_set_graphics_root_descriptor_table(
             g_command_list_infos[command_list].graphics_tables[root_parameter_index] = base_descriptor;
         }
 
-        if (base_descriptor.ptr != 0 && g_descriptor_table_bind_log_count.fetch_add(1) < 80) {
+        if (g_config.runtime_diagnostics && base_descriptor.ptr != 0 &&
+            take_bounded_log_slot(g_descriptor_table_bind_log_count, 80)) {
             log_line("Reverse descriptor table bind command_list=%p root=%u gpu=0x%zX",
                 command_list,
                 root_parameter_index,
@@ -21242,7 +21234,8 @@ void STDMETHODCALLTYPE hook_set_graphics_root_cbv(
     ID3D12GraphicsCommandList* command_list,
     UINT root_parameter_index,
     D3D12_GPU_VIRTUAL_ADDRESS buffer_location) {
-    if (dlss_graphics_state_tracking_active() && root_parameter_index < 32) {
+    if (native_temporal_terrain_motion_route_active() &&
+        root_parameter_index < 32) {
         if (auto* state = access_dlss_graphics_state(command_list, true)) {
             state->cbv[root_parameter_index] = buffer_location;
         }
@@ -22319,7 +22312,12 @@ void STDMETHODCALLTYPE hook_draw_indexed_instanced(
     UINT start_index_location,
     INT base_vertex_location,
     UINT start_instance_location) {
-    if (prepare_foliage_hmd_base_draw(command_list)) {
+    // [PERF:NOAA-PIPELINE-LOOKUP V1441 1/3] Foliage, smoke and focus inspect
+    // the same currently bound PSO. Publish one nonblocking snapshot for the
+    // draw instead of probing the command-list table up to three times.
+    auto* draw_pipeline =
+        load_command_list_pipeline_effect_nonblocking(command_list);
+    if (prepare_foliage_hmd_base_draw(command_list, draw_pipeline)) {
         g_draw_indexed_instanced(
             command_list, index_count_per_instance, instance_count,
             start_index_location, base_vertex_location,
@@ -22327,8 +22325,7 @@ void STDMETHODCALLTYPE hook_draw_indexed_instanced(
         return;
     }
 
-    auto* real_smoke_pipeline =
-        load_command_list_pipeline_effect_nonblocking(command_list);
+    auto* real_smoke_pipeline = draw_pipeline;
     const bool real_smoke_candidate =
         real_smoke_pipeline != nullptr &&
         real_smoke_pipeline ==
@@ -22447,7 +22444,8 @@ void STDMETHODCALLTYPE hook_draw_indexed_instanced(
     ID3D12PipelineState* focus_fire_original{};
     ID3D12PipelineState* focus_fire_selected{};
     if (native_asymmetric_transparent_center_route_active()) {
-        focus_fire_original = load_command_list_pipeline(command_list);
+        focus_fire_original = draw_pipeline != nullptr
+            ? draw_pipeline : load_command_list_pipeline(command_list);
         focus_fire_selected = resolve_focus_fire_horizontal_draw_pso(
             command_list, focus_fire_original);
     }
@@ -23499,7 +23497,9 @@ void STDMETHODCALLTYPE hook_draw_instanced(
     UINT instance_count,
     UINT start_vertex_location,
     UINT start_instance_location) {
-    if (prepare_foliage_hmd_base_draw(command_list)) {
+    auto* draw_pipeline =
+        load_command_list_pipeline_effect_nonblocking(command_list);
+    if (prepare_foliage_hmd_base_draw(command_list, draw_pipeline)) {
         g_draw_instanced(
             command_list, vertex_count_per_instance, instance_count,
             start_vertex_location, start_instance_location);
@@ -23879,6 +23879,10 @@ bool ensure_tiled_culling_override_resources() {
 }
 
 bool ensure_foliage_bound_basis_resources() {
+    if (g_foliage_bound_basis_resources_ready.load(
+            std::memory_order_acquire)) {
+        return true;
+    }
     std::call_once(g_foliage_bound_basis_resources_once, []() {
         if (g_d3d12_device == nullptr) {
             return;
@@ -23909,6 +23913,13 @@ bool ensure_foliage_bound_basis_resources() {
                 "V1419 foliage current/previous upload ring creation failed");
             return;
         }
+        g_foliage_bound_basis_upload_gpu_va =
+            g_foliage_bound_basis_upload->GetGPUVirtualAddress();
+        if (g_foliage_bound_basis_upload_gpu_va == 0) {
+            return;
+        }
+        g_foliage_bound_basis_resources_ready.store(
+            true, std::memory_order_release);
         if (g_config.runtime_diagnostics) {
             log_line(
                 "V1419 foliage current/previous resources ready slots=%zu bytes=%u",
@@ -23916,8 +23927,8 @@ bool ensure_foliage_bound_basis_resources() {
                 kFoliageBoundBasisSlotBytes);
         }
     });
-    return g_foliage_bound_basis_upload != nullptr &&
-        g_foliage_bound_basis_upload_mapped != nullptr;
+    return g_foliage_bound_basis_resources_ready.load(
+        std::memory_order_acquire);
 }
 
 bool initialize_taau_mvec_pipeline() {
@@ -24554,7 +24565,40 @@ bool private_resource_slot_retired(
         retirement_fence_value == UINT64_MAX) {
         return false;
     }
+    // [PERF:NOAA-FENCE-COMPLETION-CACHE V1441] Fence completion is monotonic
+    // and the queue timelines are process-lifetime objects. One query proves
+    // retirement for every foliage slot carrying the same or an older value.
+    struct FenceCompletionCacheEntry {
+        ID3D12Fence* fence{};
+        uint64_t completed{};
+    };
+    struct FenceCompletionCache {
+        size_t next{};
+        std::array<FenceCompletionCacheEntry, 4> entries{};
+    };
+    thread_local FenceCompletionCache cache{};
+    FenceCompletionCacheEntry* cache_entry{};
+    for (auto& entry : cache.entries) {
+        if (entry.fence == retirement_fence) {
+            cache_entry = &entry;
+            if (entry.completed >= retirement_fence_value) {
+                return true;
+            }
+            break;
+        }
+    }
     const uint64_t completed = retirement_fence->GetCompletedValue();
+    if (completed != UINT64_MAX) {
+        if (cache_entry == nullptr) {
+            cache_entry = &cache.entries[cache.next];
+            cache.next = (cache.next + 1) % cache.entries.size();
+            *cache_entry = FenceCompletionCacheEntry{
+                retirement_fence, completed};
+        } else {
+            cache_entry->completed = std::max(
+                cache_entry->completed, completed);
+        }
+    }
     return completed != UINT64_MAX && completed >= retirement_fence_value;
 }
 
@@ -24565,7 +24609,14 @@ void track_taau_slot_use(
     bool tiled_culling = false,
     bool foliage_bound_basis = false) {
     std::scoped_lock lock{g_taau_slot_mutex};
-    g_taau_pending_slot_uses[command_list].push_back(
+    auto& pending = g_taau_pending_slot_uses[command_list];
+    // A reference frame contains roughly one hundred foliage owners. Reserve
+    // once per recording list instead of repeatedly reallocating the vector;
+    // ownership and per-slot fence retirement remain unchanged.
+    if (foliage_bound_basis && pending.capacity() < 128) {
+        pending.reserve(128);
+    }
+    pending.push_back(
         {compose, index, tiled_culling, foliage_bound_basis});
 }
 
@@ -24733,8 +24784,16 @@ bool resolve_foliage_hmd_base_camera(
             }
         };
         if (expected_eye >= 0 && expected_pair != 0) {
-            for (const auto& candidate : g_engine_temporal_matrix_ring) {
-                consider(candidate, true);
+            const size_t exact_index =
+                (expected_pair %
+                    (g_engine_temporal_matrix_ring.size() / 2)) * 2 +
+                static_cast<size_t>(expected_eye);
+            consider(g_engine_temporal_matrix_ring[exact_index], true);
+            if (best.pair_id == 0) {
+                for (const auto& candidate :
+                     g_engine_temporal_matrix_ring) {
+                    consider(candidate, true);
+                }
             }
         }
         if (best.pair_id == 0) {
@@ -24781,13 +24840,13 @@ bool resolve_foliage_hmd_base_previous_camera(
     EngineTemporalMatrixPair best{};
     {
         std::scoped_lock lock{g_engine_temporal_matrix_mutex};
-        for (const auto& candidate : g_engine_temporal_matrix_ring) {
+        const auto consider = [&](const EngineTemporalMatrixPair& candidate) {
             if (!candidate.corrected_valid || !candidate.hmd_pose_valid ||
                 candidate.eye != current.eye ||
                 candidate.generation != current.generation ||
                 candidate.pair_id == 0 || candidate.pair_id == UINT64_MAX ||
                 candidate.pair_id >= current.pair_id) {
-                continue;
+                return;
             }
 
             float position_distance{};
@@ -24806,7 +24865,7 @@ bool resolve_foliage_hmd_base_previous_camera(
             const float direction_distance = std::min(
                 direct_direction_distance, inverse_direction_distance);
             if (position_distance > 0.04f || direction_distance > 0.04f) {
-                continue;
+                return;
             }
             const float score = position_distance + direction_distance;
             if (score < best_score ||
@@ -24814,6 +24873,19 @@ bool resolve_foliage_hmd_base_previous_camera(
                     candidate.pair_id > best.pair_id)) {
                 best_score = score;
                 best = candidate;
+            }
+        };
+        if (current.pair_id > 1) {
+            const uint64_t previous_pair = current.pair_id - 1;
+            const size_t exact_index =
+                (previous_pair %
+                    (g_engine_temporal_matrix_ring.size() / 2)) * 2 +
+                static_cast<size_t>(current.eye);
+            consider(g_engine_temporal_matrix_ring[exact_index]);
+        }
+        if (best_score > 1.0e-9f) {
+            for (const auto& candidate : g_engine_temporal_matrix_ring) {
+                consider(candidate);
             }
         }
     }
@@ -24852,27 +24924,27 @@ bool foliage_bound_basis_table_cpu_handle(
 }
 
 void note_foliage_bound_basis_fallback(const char* reason) {
-    const uint64_t count = g_foliage_bound_basis_fallbacks.fetch_add(
-        1, std::memory_order_relaxed) + 1;
-    if (g_config.runtime_diagnostics &&
-        (count <= 16 || (count & (count - 1)) == 0)) {
+    if (g_config.runtime_diagnostics) {
+        const uint64_t count = g_foliage_bound_basis_fallbacks.fetch_add(
+            1, std::memory_order_relaxed) + 1;
+        if (count <= 16 || (count & (count - 1)) == 0) {
         log_line(
             "V1419 foliage current/previous fallback count=%llu reason=%s present=%llu",
             static_cast<unsigned long long>(count), reason,
             static_cast<unsigned long long>(
                 g_present_count.load(std::memory_order_relaxed)));
+        }
     }
 }
 
 bool prepare_foliage_hmd_base_draw(
-    ID3D12GraphicsCommandList* command_list) {
+    ID3D12GraphicsCommandList* command_list,
+    ID3D12PipelineState* pipeline) {
     if (!foliage_bound_basis_route_active() || command_list == nullptr ||
         g_create_cbv == nullptr || g_d3d12_device == nullptr) {
         return false;
     }
 
-    auto* pipeline =
-        load_command_list_pipeline_effect_nonblocking(command_list);
     const auto* owner = lookup_foliage_bound_basis_pipeline(pipeline);
     if (owner == nullptr) {
         return false;
@@ -24918,9 +24990,9 @@ bool prepare_foliage_hmd_base_draw(
     }
 
     std::array<float,
-        kFoliageBoundBasisB0Bytes / sizeof(float)> private_b0{};
+        kFoliageBoundBasisB0Bytes / sizeof(float)> private_b0;
     std::array<float,
-        kFoliageBoundBasisB12Bytes / sizeof(float)> private_b12{};
+        kFoliageBoundBasisB12Bytes / sizeof(float)> private_b12;
     if (!copy_gpu_va_bytes(
             source_b0.gpu_va, private_b0.data(),
             source_b0.size_in_bytes) ||
@@ -25010,7 +25082,7 @@ bool prepare_foliage_hmd_base_draw(
 
     D3D12_CONSTANT_BUFFER_VIEW_DESC private_b0_desc{};
     private_b0_desc.BufferLocation =
-        g_foliage_bound_basis_upload->GetGPUVirtualAddress() + upload_offset;
+        g_foliage_bound_basis_upload_gpu_va + upload_offset;
     private_b0_desc.SizeInBytes = source_b0.size_in_bytes;
     g_create_cbv(
         g_d3d12_device, &private_b0_desc, native_b0_descriptor);
@@ -25021,8 +25093,7 @@ bool prepare_foliage_hmd_base_draw(
     if (previous_compensated) {
         D3D12_CONSTANT_BUFFER_VIEW_DESC private_b12_desc{};
         private_b12_desc.BufferLocation =
-            g_foliage_bound_basis_upload->GetGPUVirtualAddress() +
-                previous_upload_offset;
+            g_foliage_bound_basis_upload_gpu_va + previous_upload_offset;
         private_b12_desc.SizeInBytes = source_b12.size_in_bytes;
         g_create_cbv(
             g_d3d12_device, &private_b12_desc, native_b12_descriptor);
@@ -25033,22 +25104,22 @@ bool prepare_foliage_hmd_base_draw(
                 private_b12_desc.SizeInBytes});
     }
 
-    const uint64_t corrected = g_foliage_bound_basis_corrected.fetch_add(
-        1, std::memory_order_relaxed) + 1;
-    if (g_config.runtime_diagnostics &&
-        g_foliage_bound_basis_route_logs.fetch_add(
-            1, std::memory_order_relaxed) < 24) {
-        const auto info = lookup_pipeline_info(pipeline);
-        log_line(
-            "V1419 foliage current/previous draw=%llu vs=0x%llX ps=0x%llX b0_size=%u b12_size=%u authority=%u current_descriptor_cpu=0x%zX previous_descriptor_cpu=0x%zX previous_pair=%llu previous_compensated=%u compensated=b0_rows_12_14_yz,b0_row17_xyz,b12_rows_4_6_yz,b12_row9_xyz source=engine_base_corrected_camera",
-            static_cast<unsigned long long>(corrected),
-            static_cast<unsigned long long>(info.vs_hash),
-            static_cast<unsigned long long>(info.ps_hash),
-            source_b0.size_in_bytes, source_b12.size_in_bytes,
-            authority_route, native_b0_descriptor.ptr,
-            native_b12_descriptor.ptr,
-            static_cast<unsigned long long>(previous_camera.pair_id),
-            previous_compensated ? 1u : 0u);
+    if (g_config.runtime_diagnostics) {
+        const uint64_t corrected = g_foliage_bound_basis_corrected.fetch_add(
+            1, std::memory_order_relaxed) + 1;
+        if (take_bounded_log_slot(g_foliage_bound_basis_route_logs, 24)) {
+            const auto info = lookup_pipeline_info(pipeline);
+            log_line(
+                "V1419 foliage current/previous draw=%llu vs=0x%llX ps=0x%llX b0_size=%u b12_size=%u authority=%u current_descriptor_cpu=0x%zX previous_descriptor_cpu=0x%zX previous_pair=%llu previous_compensated=%u compensated=b0_rows_12_14_yz,b0_row17_xyz,b12_rows_4_6_yz,b12_row9_xyz source=engine_base_corrected_camera",
+                static_cast<unsigned long long>(corrected),
+                static_cast<unsigned long long>(info.vs_hash),
+                static_cast<unsigned long long>(info.ps_hash),
+                source_b0.size_in_bytes, source_b12.size_in_bytes,
+                authority_route, native_b0_descriptor.ptr,
+                native_b12_descriptor.ptr,
+                static_cast<unsigned long long>(previous_camera.pair_id),
+                previous_compensated ? 1u : 0u);
+        }
     }
     return true;
 }
@@ -26875,34 +26946,34 @@ void STDMETHODCALLTYPE hook_dispatch(
     UINT thread_group_count_z) {
     if (high_frequency_runtime_diagnostics_active()) {
     }
-    // Each helper records its selected dispatch so it can restore descriptor
-    // heaps
-    // and transition the private history around the exact GPU operation.
-    if (dispatch_rt_symmetric_dlss_per_eye_ao_output_publish(
-            command_list, thread_group_count_x, thread_group_count_y,
-            thread_group_count_z)) {
-        return;
-    }
-    if (dispatch_rt_symmetric_dlss_per_eye_sigma_shadow_history(
-            command_list, thread_group_count_x, thread_group_count_y,
-            thread_group_count_z)) {
-        return;
-    }
-    // Execute the exact 208C reader with one coherent same-eye permanent
-    // bundle and its
-    // matching previous-camera tuple.
-    if (dispatch_rt_symmetric_dlss_per_eye_specular_history(
-            command_list, thread_group_count_x, thread_group_count_y,
-            thread_group_count_z)) {
-        return;
-    }
-    // 7234 is downstream from the 208C reader and therefore needs its own
-    // CB-only
-    // same-eye translation override.
-    if (dispatch_rt_symmetric_dlss_specular_stabilization_camera_translation(
-            command_list, thread_group_count_x, thread_group_count_y,
-            thread_group_count_z)) {
-        return;
+    // [PERF:NOAA-DISPATCH-ROUTE V1441] The four RT helpers all begin with the
+    // same route predicate. Avoid four calls and their argument setup on every
+    // No-AA dispatch while preserving their exact order when RTX history is
+    // active.
+    if (rt_symmetric_dlss_per_eye_ao_history_active()) {
+        // Each helper records its selected dispatch so it can restore
+        // descriptor heaps and transition private history around the exact GPU
+        // operation.
+        if (dispatch_rt_symmetric_dlss_per_eye_ao_output_publish(
+                command_list, thread_group_count_x, thread_group_count_y,
+                thread_group_count_z)) {
+            return;
+        }
+        if (dispatch_rt_symmetric_dlss_per_eye_sigma_shadow_history(
+                command_list, thread_group_count_x, thread_group_count_y,
+                thread_group_count_z)) {
+            return;
+        }
+        if (dispatch_rt_symmetric_dlss_per_eye_specular_history(
+                command_list, thread_group_count_x, thread_group_count_y,
+                thread_group_count_z)) {
+            return;
+        }
+        if (dispatch_rt_symmetric_dlss_specular_stabilization_camera_translation(
+                command_list, thread_group_count_x, thread_group_count_y,
+                thread_group_count_z)) {
+            return;
+        }
     }
     if (dispatch_asymmetric_tiled_culling_remap(
             command_list, thread_group_count_x, thread_group_count_y,
@@ -41732,7 +41803,7 @@ void ensure_initialized() {
                 "focus_fire_b1=stereo_and_aer_centered_draw_proven "
                 "aer_taau_hud=scene_and_retained_pair_fail_open");
             log_line(
-                "witcher3vr dxgi proxy initialized build=V1424 base=V1422_full_vr_fallback_raw_fov "
+                "witcher3vr dxgi proxy initialized build=V1441 base=V1424_noaa_safe_optimization "
                 "anchor_smoothing_ini=%d anchor_smoothing_seconds=%.4f "
                 "first_person_strafe_ini=%d mode3_aer_presentation=%d raytracing_enabled=%d raytracing_history_buffers=%d "
                 "aer_afw_enabled=%d persistent_registry=%d optiscaler_enabled=%d "
@@ -41794,6 +41865,8 @@ void ensure_initialized() {
                 "V1422 smoke exact_eye_identity=selected_squared_distance_bit_exact_zero peer_distance=positive generic_distance_guard=unchanged_0.0049 generic_separation_guard=unchanged_0.0005 identical_eye_pair=reject");
             log_line(
                 "V1424 full_vr_fallback_fov_source=raw_openxr_eye recursive_shared_fov_input=removed shared_fov_publication=retained taau_dlss_common=1 native_factory=unchanged");
+            log_line(
+                "V1441 noaa_optimization=safe descriptor_copy=lock_free_functional_metadata gpu_va=epoch_validated_tls_hit foliage=pso_reused diagnostics=release_zero_cost base=V1424");
             log_line(
                 "V1363 dlss_scene_history_reset=removed_rejected_V1340 projection_switch_reset=V1331_only");
             log_line(
@@ -49986,7 +50059,7 @@ void handle_f3_capture_hotkey(IDXGISwapChain* swapchain) {
     if (w3vr::pipeline_flight::enabled()) {
         w3vr::pipeline_flight::dump_last_ten_seconds();
     }
-    w3vr::route_flight::dump_last_seconds("V1424", 15);
+    w3vr::route_flight::dump_last_seconds("V1441", 15);
     trigger_renderdoc_capture(
         g_game_swapchain != nullptr ? g_game_swapchain : swapchain);
 }

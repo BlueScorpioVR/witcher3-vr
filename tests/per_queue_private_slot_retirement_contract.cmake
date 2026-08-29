@@ -13,8 +13,8 @@ set(required_fragments
     "std::unordered_map<ID3D12CommandQueue*, PrivateResourceQueueTimeline>"
     "slot.retirement_fence = private_resource_ordered"
     "private_resource_slot_retired("
-    "build=V1424"
-    "dump_last_seconds(\"V1424\", 15)")
+    "build=V1441"
+    "dump_last_seconds(\"V1441\", 15)")
 
 foreach(required_fragment IN LISTS required_fragments)
     string(FIND "${source}" "${required_fragment}" fragment_index)

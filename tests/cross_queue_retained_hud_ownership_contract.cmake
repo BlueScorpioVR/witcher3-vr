@@ -20,7 +20,7 @@ foreach(required_fragment IN ITEMS
         "capture_ordered_for_present"
         "[FIX:CROSS-QUEUE-RETAINED-HUD-OWNERSHIP V1366 6/6]"
         "V1366 retained_hud_ownership=exact_ordered_submission"
-        "dump_last_seconds(\"V1424\", 15)")
+        "dump_last_seconds(\"V1441\", 15)")
     string(FIND "${dxgi_proxy}" "${required_fragment}" position)
     if(position EQUAL -1)
         message(FATAL_ERROR

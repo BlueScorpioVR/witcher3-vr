@@ -26,7 +26,7 @@ set(required_fragments
     "paired_camera_match_passes_guards("
     "paired_distance, eye, 0.0049f, 0.0005f"
     "smoke selector flight=cpu_pod_per_canonical_draw"
-    "dump_last_seconds(\"V1424\", 15)"
+    "dump_last_seconds(\"V1441\", 15)"
     "V1421 smoke coherent_pair_selection=minimum_draw_b1_squared_distance"
     "V1422 smoke exact_eye_identity=selected_squared_distance_bit_exact_zero")
 
