@@ -5,7 +5,6 @@ endif()
 file(READ "${DXGI_PROXY_SOURCE}" source)
 
 set(required_fragments
-    "build=V1441 base=V1424_noaa_safe_optimization"
     "PERF:NOAA-DESCRIPTOR-COPY V1441"
     "bool copy_legacy_resource_metadata"
     "if (copy_legacy_resource_metadata)"

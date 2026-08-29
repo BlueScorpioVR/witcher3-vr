@@ -37,6 +37,10 @@
 #include "smoke_eye_authority_policy.h"
 #include "taau_submission_policy.h"
 
+// V1442 starts physically from V1441 and removes additional CPU bookkeeping
+// from the clean No-AA path. Tiled-culling bindings remain recording-thread
+// local, foliage upload slots are reserved and retired in exact-fence chunks,
+// and irrelevant non-indexed draws bypass the general diagnostic route.
 // V1441 starts physically from V1424 and removes equivalent work from the
 // release No-AA hot paths without changing the rendered command stream.
 // V1424 starts physically from V1422 and replaces the automatic Full-VR
@@ -3646,6 +3650,10 @@ struct TiledCullingBindingSnapshot {
 struct DlssGraphicsStateSnapshot {
     std::array<D3D12_GPU_VIRTUAL_ADDRESS, 32> cbv{};
     std::array<D3D12_GPU_DESCRIPTOR_HANDLE, 32> tables{};
+    // [PERF:NOAA-TILED-TLS V1442 1/6] The command-list recording thread
+    // already owns this lock-free snapshot for graphics state. Keep the four
+    // native tiled-culling compute tables in the same recording epoch.
+    std::array<D3D12_GPU_DESCRIPTOR_HANDLE, 32> compute_tables{};
     ID3D12DescriptorHeap* cbv_srv_uav_heap{};
     ID3D12DescriptorHeap* sampler_heap{};
     ID3D12PipelineState* pipeline_state{};
@@ -3661,6 +3669,10 @@ struct DlssGraphicsStateSnapshot {
     uint64_t native_focus_eye_present{UINT64_MAX};
     uint64_t native_focus_eye_pair_id{};
     uint32_t native_focus_eye{UINT32_MAX};
+    uint64_t foliage_chunk_epoch{};
+    uint32_t foliage_chunk_start{UINT32_MAX};
+    uint32_t foliage_chunk_next{16};
+    uint64_t recording_epoch{};
     bool valid{};
 };
 
@@ -3701,6 +3713,7 @@ std::array<FoliageBoundBasisPipelineSlot,
     kFoliageBoundBasisPipelineTableSize> g_foliage_bound_basis_pipelines{};
 
 constexpr size_t kFoliageBoundBasisSlotCount = 2048;
+constexpr uint32_t kFoliageBoundBasisChunkSize = 16;
 constexpr UINT kFoliageBoundBasisB0Bytes = 1024;
 constexpr UINT kFoliageBoundBasisB12Bytes = 256;
 constexpr UINT kFoliageBoundBasisSlotBytes =
@@ -4238,6 +4251,7 @@ constexpr uintptr_t kCommandListPipelineClaimed = ~uintptr_t{};
 struct CommandListPipelineSlot {
     std::atomic<uintptr_t> key{};
     std::atomic<ID3D12PipelineState*> pipeline{};
+    std::atomic<uint64_t> recording_epoch{};
 };
 std::array<CommandListPipelineSlot, kCommandListPipelineSlotCount>
     g_command_list_pipeline_slots{};
@@ -4246,6 +4260,7 @@ constexpr size_t kDlssGraphicsStateSlotCount = 64;
 constexpr size_t kDlssGraphicsStateProbeCount = 16;
 struct DlssGraphicsStateSlot {
     ID3D12GraphicsCommandList* command_list{};
+    std::atomic<uint64_t>* recording_epoch_source{};
     DlssGraphicsStateSnapshot state{};
 };
 thread_local std::array<DlssGraphicsStateSlot, kDlssGraphicsStateSlotCount>
@@ -4261,12 +4276,17 @@ bool dlss_graphics_state_tracking_active() {
     // [FIX:WORLD-UP-BINDING-CENTER-SPLIT V1156 2/3] The world-up draw owns
     // the graphics snapshot it consumes; retained HUD and TAAU may still
     // provide the same state, but are no longer hidden prerequisites.
-    return real_smoke_world_up_binding_route_active() ||
+    return asymmetric_tiled_culling_fix_needed() ||
+        real_smoke_world_up_binding_route_active() ||
         foliage_bound_basis_route_active() ||
         retained_hud_projection_route_configured();
 }
 
 size_t dlss_graphics_state_slot_index(
+    ID3D12GraphicsCommandList* command_list);
+std::atomic<uint64_t>* command_list_recording_epoch_source(
+    ID3D12GraphicsCommandList* command_list);
+uint64_t load_command_list_recording_epoch(
     ID3D12GraphicsCommandList* command_list);
 
 size_t dlss_graphics_state_slot_index(
@@ -4288,6 +4308,25 @@ DlssGraphicsStateSnapshot* access_dlss_graphics_state(
         auto& slot = g_dlss_graphics_state_slots[
             (base + probe) & (kDlssGraphicsStateSlotCount - 1)];
         if (slot.command_list == command_list) {
+            if (slot.recording_epoch_source == nullptr) {
+                slot.recording_epoch_source =
+                    command_list_recording_epoch_source(command_list);
+            }
+            const uint64_t recording_epoch =
+                slot.recording_epoch_source != nullptr
+                ? slot.recording_epoch_source->load(
+                    std::memory_order_acquire)
+                : 0;
+            // [PERF:NOAA-TILED-TLS V1442 2/6] Reset can legally happen on a
+            // different recording worker. Lazily invalidate that worker's
+            // stale TLS snapshot before any read or write, preserving V1120's
+            // fresh-recording root-table contract without the global map. The
+            // fixed table slot is resolved once, so steady-state access costs
+            // only one direct atomic load rather than another hash probe.
+            if (slot.state.recording_epoch != recording_epoch) {
+                slot.state = {};
+                slot.state.recording_epoch = recording_epoch;
+            }
             return &slot.state;
         }
         if (slot.command_list == nullptr) {
@@ -4295,7 +4334,14 @@ DlssGraphicsStateSnapshot* access_dlss_graphics_state(
                 return nullptr;
             }
             slot.command_list = command_list;
+            slot.recording_epoch_source =
+                command_list_recording_epoch_source(command_list);
             slot.state = {};
+            if (slot.recording_epoch_source != nullptr) {
+                slot.state.recording_epoch =
+                    slot.recording_epoch_source->load(
+                        std::memory_order_acquire);
+            }
             return &slot.state;
         }
     }
@@ -4304,7 +4350,14 @@ DlssGraphicsStateSnapshot* access_dlss_graphics_state(
     }
     auto& replacement = g_dlss_graphics_state_slots[base];
     replacement.command_list = command_list;
+    replacement.recording_epoch_source =
+        command_list_recording_epoch_source(command_list);
     replacement.state = {};
+    if (replacement.recording_epoch_source != nullptr) {
+        replacement.state.recording_epoch =
+            replacement.recording_epoch_source->load(
+                std::memory_order_acquire);
+    }
     return &replacement.state;
 }
 
@@ -4937,6 +4990,27 @@ size_t command_list_pipeline_slot_index(ID3D12GraphicsCommandList* command_list)
     return static_cast<size_t>(value) & (kCommandListPipelineSlotCount - 1);
 }
 
+std::atomic<uint64_t>* command_list_recording_epoch_source(
+    ID3D12GraphicsCommandList* command_list) {
+    if (command_list == nullptr) {
+        return nullptr;
+    }
+    const auto key_value = reinterpret_cast<uintptr_t>(command_list);
+    const auto base = command_list_pipeline_slot_index(command_list);
+    for (size_t probe = 0; probe < kCommandListPipelineProbeCount; ++probe) {
+        auto& slot = g_command_list_pipeline_slots[
+            (base + probe) & (kCommandListPipelineSlotCount - 1)];
+        const auto key = slot.key.load(std::memory_order_acquire);
+        if (key == 0 || key == kCommandListPipelineClaimed) {
+            return nullptr;
+        }
+        if (key == key_value) {
+            return &slot.recording_epoch;
+        }
+    }
+    return nullptr;
+}
+
 bool store_command_list_pipeline(
     ID3D12GraphicsCommandList* command_list,
     ID3D12PipelineState* pipeline) {
@@ -5020,6 +5094,35 @@ ID3D12PipelineState* load_command_list_pipeline_effect_nonblocking(
     return nullptr;
 }
 
+uint64_t load_command_list_recording_epoch(
+    ID3D12GraphicsCommandList* command_list) {
+    auto* source = command_list_recording_epoch_source(command_list);
+    return source != nullptr
+        ? source->load(std::memory_order_acquire)
+        : 0;
+}
+
+void advance_command_list_recording_epoch(
+    ID3D12GraphicsCommandList* command_list) {
+    if (command_list == nullptr) {
+        return;
+    }
+    const auto key_value = reinterpret_cast<uintptr_t>(command_list);
+    const auto base = command_list_pipeline_slot_index(command_list);
+    for (size_t probe = 0; probe < kCommandListPipelineProbeCount; ++probe) {
+        auto& slot = g_command_list_pipeline_slots[
+            (base + probe) & (kCommandListPipelineSlotCount - 1)];
+        const auto key = slot.key.load(std::memory_order_acquire);
+        if (key == 0 || key == kCommandListPipelineClaimed) {
+            return;
+        }
+        if (key == key_value) {
+            slot.recording_epoch.fetch_add(1, std::memory_order_acq_rel);
+            return;
+        }
+    }
+}
+
 ID3D12RootSignature* g_taau_mvec_root_signature{};
 ID3D12PipelineState* g_taau_mvec_pipeline{};
 ID3D12DescriptorHeap* g_taau_mvec_heap{};
@@ -5041,6 +5144,7 @@ struct TaauPendingSlotUse {
     uint32_t index{};
     bool tiled_culling{};
     bool foliage_bound_basis{};
+    uint32_t slot_count{1};
 };
 // [FIX:PER-QUEUE-PRIVATE-SLOT-RETIREMENT V1367 1/5] Fence values are ordered
 // only within one command queue. A single fence signaled by independent queues
@@ -5845,35 +5949,54 @@ bool dispatch_asymmetric_tiled_culling_remap(
     D3D12_CPU_DESCRIPTOR_HANDLE source_cbv{};
     D3D12_CPU_DESCRIPTOR_HANDLE source_srv{};
     D3D12_CPU_DESCRIPTOR_HANDLE source_uav{};
-    {
-        std::scoped_lock lock{g_reverse_mutex};
-        const auto found = g_command_list_infos.find(command_list);
-        if (found == g_command_list_infos.end()) {
-            return note_fallback("command_state");
+    const auto* state = access_dlss_graphics_state(command_list, false);
+    if (state == nullptr) {
+        return note_fallback("command_state");
+    }
+    snapshot.graphics_tables = state->tables;
+    snapshot.compute_tables = state->compute_tables;
+    snapshot.cbv_srv_uav_heap = state->cbv_srv_uav_heap;
+    snapshot.sampler_heap = state->sampler_heap;
+    if (snapshot.cbv_srv_uav_heap == nullptr ||
+        snapshot.sampler_heap == nullptr ||
+        snapshot.compute_tables[0].ptr == 0 ||
+        snapshot.compute_tables[1].ptr == 0 ||
+        snapshot.compute_tables[2].ptr == 0 ||
+        snapshot.compute_tables[3].ptr == 0) {
+        return note_fallback("root_tables");
+    }
+    const auto table_cpu_handle = [&](
+                                      D3D12_GPU_DESCRIPTOR_HANDLE table,
+                                      UINT descriptor_count,
+                                      D3D12_CPU_DESCRIPTOR_HANDLE& cpu_out) {
+        if (table.ptr == 0 || state->cbv_gpu_start.ptr == 0 ||
+            state->cbv_cpu_start.ptr == 0 ||
+            state->cbv_descriptor_increment == 0 ||
+            table.ptr < state->cbv_gpu_start.ptr) {
+            return false;
         }
-        snapshot.graphics_tables = found->second.graphics_tables;
-        snapshot.compute_tables = found->second.compute_tables;
-        snapshot.cbv_srv_uav_heap = found->second.cbv_srv_uav_heap;
-        snapshot.sampler_heap = found->second.sampler_heap;
-        if (snapshot.cbv_srv_uav_heap == nullptr ||
-            snapshot.sampler_heap == nullptr ||
-            snapshot.compute_tables[0].ptr == 0 ||
-            snapshot.compute_tables[1].ptr == 0 ||
-            snapshot.compute_tables[2].ptr == 0 ||
-            snapshot.compute_tables[3].ptr == 0) {
-            return note_fallback("root_tables");
+        const UINT64 byte_offset = table.ptr - state->cbv_gpu_start.ptr;
+        if (byte_offset % state->cbv_descriptor_increment != 0) {
+            return false;
         }
-        if (!taau_table_cpu_handle_locked(
-                snapshot.cbv_srv_uav_heap, snapshot.compute_tables[0],
-                kTiledCullingCbvCount, source_cbv) ||
-            !taau_table_cpu_handle_locked(
-                snapshot.cbv_srv_uav_heap, snapshot.compute_tables[1],
-                kTiledCullingSrvCount, source_srv) ||
-            !taau_table_cpu_handle_locked(
-                snapshot.cbv_srv_uav_heap, snapshot.compute_tables[3],
-                kTiledCullingUavCount, source_uav)) {
-            return note_fallback("descriptor_translation");
+        const UINT64 descriptor_index =
+            byte_offset / state->cbv_descriptor_increment;
+        if (descriptor_index + descriptor_count >
+            state->cbv_descriptor_count) {
+            return false;
         }
+        cpu_out.ptr = state->cbv_cpu_start.ptr +
+            static_cast<SIZE_T>(descriptor_index) *
+                state->cbv_descriptor_increment;
+        return true;
+    };
+    if (!table_cpu_handle(
+            snapshot.compute_tables[0], kTiledCullingCbvCount, source_cbv) ||
+        !table_cpu_handle(
+            snapshot.compute_tables[1], kTiledCullingSrvCount, source_srv) ||
+        !table_cpu_handle(
+            snapshot.compute_tables[3], kTiledCullingUavCount, source_uav)) {
+        return note_fallback("descriptor_translation");
     }
 
     const UINT source_descriptor_increment = cached_descriptor_increment(
@@ -19636,13 +19759,20 @@ void STDMETHODCALLTYPE hook_execute_command_lists(
         for (const auto& use : taau_slot_uses) {
             if (use.foliage_bound_basis &&
                 use.index < g_foliage_bound_basis_override_slots.size()) {
-                auto& slot =
-                    g_foliage_bound_basis_override_slots[use.index];
-                slot.retirement_fence = private_resource_ordered
-                    ? private_resource_fence : nullptr;
-                slot.retirement_fence_value = private_resource_ordered
-                    ? private_resource_fence_value : UINT64_MAX;
-                slot.reserved.store(false, std::memory_order_release);
+                const uint32_t count = std::min<uint32_t>(
+                    std::max(use.slot_count, 1u),
+                    static_cast<uint32_t>(
+                        g_foliage_bound_basis_override_slots.size() -
+                        use.index));
+                for (uint32_t offset = 0; offset < count; ++offset) {
+                    auto& slot = g_foliage_bound_basis_override_slots[
+                        use.index + offset];
+                    slot.retirement_fence = private_resource_ordered
+                        ? private_resource_fence : nullptr;
+                    slot.retirement_fence_value = private_resource_ordered
+                        ? private_resource_fence_value : UINT64_MAX;
+                    slot.reserved.store(false, std::memory_order_release);
+                }
             } else if (use.tiled_culling &&
                 use.index < g_tiled_culling_override_slots.size()) {
                 auto& slot = g_tiled_culling_override_slots[use.index];
@@ -20927,8 +21057,8 @@ void STDMETHODCALLTYPE hook_set_descriptor_heaps(
                     state->cbv_gpu_start =
                         heap->GetGPUDescriptorHandleForHeapStart();
                     state->cbv_descriptor_increment = g_d3d12_device != nullptr
-                        ? g_d3d12_device->GetDescriptorHandleIncrementSize(
-                            desc.Type)
+                        ? cached_descriptor_increment(
+                            g_d3d12_device, desc.Type)
                         : 0;
                 } else if (desc.Type == D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER) {
                     state->sampler_heap = heap;
@@ -20939,7 +21069,6 @@ void STDMETHODCALLTYPE hook_set_descriptor_heaps(
     if (((reverse_enabled() && g_config.reverse_cbv_probe) ||
             (taau_functional_hooks_needed() &&
                 taau_runtime_tracking_active()) ||
-            asymmetric_tiled_culling_fix_needed() ||
             // Record the live descriptor heaps used by private RT histories.
             rt_symmetric_dlss_per_eye_ao_history_active()) &&
         descriptor_heaps != nullptr) {
@@ -21035,8 +21164,16 @@ HRESULT STDMETHODCALLTYPE hook_reset_command_list(
                 }
                 if (it->index <
                     g_foliage_bound_basis_override_slots.size()) {
-                    g_foliage_bound_basis_override_slots[it->index].reserved.store(
-                        false, std::memory_order_release);
+                    const uint32_t count = std::min<uint32_t>(
+                        std::max(it->slot_count, 1u),
+                        static_cast<uint32_t>(
+                            g_foliage_bound_basis_override_slots.size() -
+                            it->index));
+                    for (uint32_t offset = 0; offset < count; ++offset) {
+                        g_foliage_bound_basis_override_slots[
+                            it->index + offset].reserved.store(
+                                false, std::memory_order_release);
+                    }
                 }
                 it = uses.erase(it);
             }
@@ -21047,9 +21184,12 @@ HRESULT STDMETHODCALLTYPE hook_reset_command_list(
     }
 
     store_command_list_pipeline(command_list, initial_state);
+    advance_command_list_recording_epoch(command_list);
     if (auto* local = access_dlss_graphics_state(command_list, false)) {
         *local = {};
         local->pipeline_state = initial_state;
+        local->recording_epoch =
+            load_command_list_recording_epoch(command_list);
     }
     {
         std::scoped_lock lock{g_reverse_mutex};
@@ -21187,7 +21327,6 @@ void STDMETHODCALLTYPE hook_set_graphics_root_descriptor_table(
         }
     }
     if (((reverse_enabled() && g_config.reverse_cbv_probe) ||
-            asymmetric_tiled_culling_fix_needed() ||
             rt_symmetric_dlss_per_eye_ao_history_active()) &&
         root_parameter_index < 32) {
         {
@@ -21215,13 +21354,18 @@ void STDMETHODCALLTYPE hook_set_compute_root_descriptor_table(
         (reverse_enabled() ||
             g_compute_probe_active.load(std::memory_order_relaxed));
     const bool functional_tracking =
-        asymmetric_tiled_culling_fix_needed() ||
         (root_parameter_index < 4 &&
             taau_functional_hooks_needed() &&
             taau_runtime_tracking_active()) ||
         // Record the four compute tables consumed by the RT history override
         // after its PSOs have been enrolled.
         rt_symmetric_dlss_per_eye_ao_history_active();
+    if (asymmetric_tiled_culling_fix_needed() &&
+        root_parameter_index < 32) {
+        if (auto* state = access_dlss_graphics_state(command_list, true)) {
+            state->compute_tables[root_parameter_index] = base_descriptor;
+        }
+    }
     if (root_parameter_index < 32 &&
         (diagnostic_tracking || functional_tracking)) {
         std::scoped_lock lock{g_reverse_mutex};
@@ -21740,7 +21884,6 @@ void STDMETHODCALLTYPE hook_set_graphics_root_signature(
         }
     }
     if ((reverse_enabled() && g_config.reverse_cbv_probe) ||
-        asymmetric_tiled_culling_fix_needed() ||
         rt_symmetric_dlss_per_eye_ao_history_active()) {
         std::scoped_lock lock{g_reverse_mutex};
         auto& info = g_command_list_infos[command_list];
@@ -21761,10 +21904,15 @@ void STDMETHODCALLTYPE hook_set_compute_root_signature(
     const bool functional_tracking =
         (taau_functional_hooks_needed() &&
             taau_runtime_tracking_active()) ||
-        asymmetric_tiled_culling_fix_needed() ||
         // A root-signature change invalidates the old compute-table snapshot;
         // retain that boundary for the RT history helper as functional state.
         rt_symmetric_dlss_per_eye_ao_history_active();
+    if (asymmetric_tiled_culling_fix_needed()) {
+        if (auto* state = access_dlss_graphics_state(command_list, true)) {
+            state->compute_tables.fill(
+                D3D12_GPU_DESCRIPTOR_HANDLE{});
+        }
+    }
     if (diagnostic_tracking || functional_tracking) {
         std::scoped_lock lock{g_reverse_mutex};
         auto& info = g_command_list_infos[command_list];
@@ -23506,6 +23654,32 @@ void STDMETHODCALLTYPE hook_draw_instanced(
         return;
     }
 
+    // [PERF:NOAA-NONINDEXED-FAST-PATH V1442] A clean Strict-Stereo No-AA
+    // draw outside the known HUD family has no remaining functional consumer
+    // below. Preserve the 6x1 aim candidate and every diagnostic/temporal/AER
+    // route; forward all other native draws immediately.
+    const bool functional_aim_candidate =
+        vertex_count_per_instance == 6 && instance_count == 1;
+    const bool clean_strict_noaa =
+        g_clean_mode3_indexed_draw_fast_path &&
+        g_config.temporal_backend == TemporalBackend::None &&
+        mode3_stereo_transport_active() &&
+        !mode3_aer_presentation_active() &&
+        !native_temporal_terrain_motion_route_active() &&
+        !g_config.runtime_diagnostics &&
+        !g_config.logging_enabled &&
+        !reverse_enabled() &&
+        !g_compute_probe_active.load(std::memory_order_relaxed) &&
+        !g_aim_pso_probe_active.load(std::memory_order_relaxed);
+    if (clean_strict_noaa && !functional_aim_candidate &&
+        draw_pipeline != nullptr &&
+        !mode3_hud_pipeline_family(draw_pipeline)) {
+        g_draw_instanced(
+            command_list, vertex_count_per_instance, instance_count,
+            start_vertex_location, start_instance_location);
+        return;
+    }
+
     if (high_frequency_runtime_diagnostics_active()) {
         g_fingerprint_nonindexed_draw_count.fetch_add(1, std::memory_order_relaxed);
     }
@@ -24607,7 +24781,8 @@ void track_taau_slot_use(
     bool compose,
     uint32_t index,
     bool tiled_culling = false,
-    bool foliage_bound_basis = false) {
+    bool foliage_bound_basis = false,
+    uint32_t slot_count = 1) {
     std::scoped_lock lock{g_taau_slot_mutex};
     auto& pending = g_taau_pending_slot_uses[command_list];
     // A reference frame contains roughly one hundred foliage owners. Reserve
@@ -24617,7 +24792,7 @@ void track_taau_slot_use(
         pending.reserve(128);
     }
     pending.push_back(
-        {compose, index, tiled_culling, foliage_bound_basis});
+        {compose, index, tiled_culling, foliage_bound_basis, slot_count});
 }
 
 bool acquire_taau_override_slot(
@@ -24686,27 +24861,71 @@ bool acquire_foliage_bound_basis_override_slot(
         !ensure_foliage_bound_basis_resources()) {
         return false;
     }
-    const auto start = g_foliage_bound_basis_slot_index.fetch_add(
-        1, std::memory_order_relaxed);
-    for (uint32_t offset = 0;
-         offset < g_foliage_bound_basis_override_slots.size(); ++offset) {
-        const auto index = (start + offset) % static_cast<uint32_t>(
-            g_foliage_bound_basis_override_slots.size());
-        auto& slot = g_foliage_bound_basis_override_slots[index];
-        bool expected{};
-        if (!slot.reserved.compare_exchange_strong(
-                expected, true, std::memory_order_acq_rel)) {
+    auto* state = access_dlss_graphics_state(command_list, true);
+    if (state == nullptr) {
+        return false;
+    }
+    const uint64_t recording_epoch = state->recording_epoch;
+    if (state->foliage_chunk_epoch != recording_epoch) {
+        state->foliage_chunk_epoch = recording_epoch;
+        state->foliage_chunk_start = UINT32_MAX;
+        state->foliage_chunk_next = kFoliageBoundBasisChunkSize;
+    }
+    if (state->foliage_chunk_start != UINT32_MAX &&
+        state->foliage_chunk_next < kFoliageBoundBasisChunkSize) {
+        slot_index_out =
+            state->foliage_chunk_start + state->foliage_chunk_next;
+        ++state->foliage_chunk_next;
+        return true;
+    }
+
+    // [PERF:NOAA-FOLIAGE-CHUNKS V1442 1/3] Reserve and retire one contiguous
+    // block per recording list. Every slot keeps the same exact submitting
+    // queue fence as V1441, while the render worker pays the pending-map mutex
+    // only once per sixteen foliage draws.
+    static_assert(
+        kFoliageBoundBasisSlotCount % kFoliageBoundBasisChunkSize == 0);
+    const uint32_t start = g_foliage_bound_basis_slot_index.fetch_add(
+        kFoliageBoundBasisChunkSize, std::memory_order_relaxed);
+    for (uint32_t chunk_offset = 0;
+         chunk_offset < g_foliage_bound_basis_override_slots.size();
+         chunk_offset += kFoliageBoundBasisChunkSize) {
+        const uint32_t chunk_start =
+            (start + chunk_offset) % static_cast<uint32_t>(
+                g_foliage_bound_basis_override_slots.size());
+        uint32_t reserved_count{};
+        for (; reserved_count < kFoliageBoundBasisChunkSize;
+             ++reserved_count) {
+            auto& slot = g_foliage_bound_basis_override_slots[
+                chunk_start + reserved_count];
+            bool expected{};
+            if (!slot.reserved.compare_exchange_strong(
+                    expected, true, std::memory_order_acq_rel)) {
+                break;
+            }
+            if (!private_resource_slot_retired(
+                    slot.retirement_fence,
+                    slot.retirement_fence_value)) {
+                slot.reserved.store(false, std::memory_order_release);
+                break;
+            }
+        }
+        if (reserved_count != kFoliageBoundBasisChunkSize) {
+            for (uint32_t rollback = 0; rollback < reserved_count;
+                 ++rollback) {
+                g_foliage_bound_basis_override_slots[
+                    chunk_start + rollback].reserved.store(
+                        false, std::memory_order_release);
+            }
             continue;
         }
-        if (private_resource_slot_retired(
-                slot.retirement_fence,
-                slot.retirement_fence_value)) {
-            slot_index_out = index;
-            track_taau_slot_use(
-                command_list, false, index, false, true);
-            return true;
-        }
-        slot.reserved.store(false, std::memory_order_release);
+        track_taau_slot_use(
+            command_list, false, chunk_start, false, true,
+            kFoliageBoundBasisChunkSize);
+        state->foliage_chunk_start = chunk_start;
+        state->foliage_chunk_next = 1;
+        slot_index_out = chunk_start;
+        return true;
     }
     return false;
 }
@@ -41803,7 +42022,7 @@ void ensure_initialized() {
                 "focus_fire_b1=stereo_and_aer_centered_draw_proven "
                 "aer_taau_hud=scene_and_retained_pair_fail_open");
             log_line(
-                "witcher3vr dxgi proxy initialized build=V1441 base=V1424_noaa_safe_optimization "
+                "witcher3vr dxgi proxy initialized build=V1442 base=V1441_noaa_aggressive_optimization "
                 "anchor_smoothing_ini=%d anchor_smoothing_seconds=%.4f "
                 "first_person_strafe_ini=%d mode3_aer_presentation=%d raytracing_enabled=%d raytracing_history_buffers=%d "
                 "aer_afw_enabled=%d persistent_registry=%d optiscaler_enabled=%d "
@@ -41867,6 +42086,8 @@ void ensure_initialized() {
                 "V1424 full_vr_fallback_fov_source=raw_openxr_eye recursive_shared_fov_input=removed shared_fov_publication=retained taau_dlss_common=1 native_factory=unchanged");
             log_line(
                 "V1441 noaa_optimization=safe descriptor_copy=lock_free_functional_metadata gpu_va=epoch_validated_tls_hit foliage=pso_reused diagnostics=release_zero_cost base=V1424");
+            log_line(
+                "V1442 noaa_optimization=aggressive tiled_culling=tls_bindings foliage=16_slot_chunks nonindexed=clean_route_fast_path gpu_command_stream=unchanged base=V1441");
             log_line(
                 "V1363 dlss_scene_history_reset=removed_rejected_V1340 projection_switch_reset=V1331_only");
             log_line(
@@ -50059,7 +50280,7 @@ void handle_f3_capture_hotkey(IDXGISwapChain* swapchain) {
     if (w3vr::pipeline_flight::enabled()) {
         w3vr::pipeline_flight::dump_last_ten_seconds();
     }
-    w3vr::route_flight::dump_last_seconds("V1441", 15);
+    w3vr::route_flight::dump_last_seconds("V1442", 15);
     trigger_renderdoc_capture(
         g_game_swapchain != nullptr ? g_game_swapchain : swapchain);
 }

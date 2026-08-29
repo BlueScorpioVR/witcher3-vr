@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(witcher3vr VERSION 0.1441.0 LANGUAGES C CXX)
+project(witcher3vr VERSION 0.1442.0 LANGUAGES C CXX)
 
 include(CTest)
 
@@ -452,6 +452,13 @@ if(BUILD_TESTING)
         COMMAND "${CMAKE_COMMAND}"
             "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/noaa_safe_optimization_contract.cmake"
+    )
+
+    add_test(
+        NAME renderer_noaa_aggressive_optimization_contract
+        COMMAND "${CMAKE_COMMAND}"
+            "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/noaa_aggressive_optimization_contract.cmake"
     )
 
     add_test(

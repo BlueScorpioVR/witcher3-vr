@@ -10,7 +10,7 @@ file(READ "${DXGI_PROXY_SOURCE}" dxgi_proxy)
 file(READ "${OPTISCALER_BRIDGE_INI}" bridge_ini)
 
 foreach(required_fragment IN ITEMS
-        "build=V1441 base=V1424_noaa_safe_optimization"
+        "build=V1442 base=V1441_noaa_aggressive_optimization"
         "bool optiscaler_enabled{false};"
         "\"optiscaler_bridge.ini\", \"optiscaler\", \"enabled\", false"
         "bool native_dlss_public_streamline_owner_active()"
