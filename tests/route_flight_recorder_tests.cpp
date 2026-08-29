@@ -52,6 +52,9 @@ int main() {
     require(std::string(event_code_name(EventCode::AfwPublish)) ==
             "afw_publish",
         "event name table is incomplete");
+    require(std::string(event_code_name(EventCode::SmokeSelect)) ==
+            "smoke_select",
+        "smoke selector event name is missing");
 
     LARGE_INTEGER now{};
     require(QueryPerformanceCounter(&now) != FALSE,

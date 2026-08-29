@@ -30,6 +30,7 @@ enum class EventCode : uint16_t {
     AfwPublish,
     HudState,
     RouteReset,
+    SmokeSelect,
     Count,
 };
 

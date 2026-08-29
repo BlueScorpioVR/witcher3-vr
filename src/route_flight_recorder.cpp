@@ -162,6 +162,10 @@ bool dump_last_seconds(
         "# No GPU readbacks, descriptor scans, per-draw timing, text formatting, or file I/O occur before F3.\n");
     fprintf(file,
         "# Common flags: success=0x1 exact=0x2 active=0x4 fallback=0x8 stale=0x10 reset=0x20. Event-specific details follow the source marker.\n");
+    fprintf(file,
+        "# smoke_select: stage=1 eye_variant_draw, 2 zero_center_draw, 3 original_draw; d=reason,final_variant(0/1/2/UINT_MAX),selected_distance_float_bits,separation_margin_float_bits.\n");
+    fprintf(file,
+        "# smoke_select reason: 1=asym_inactive 2=dlss_tag 3=eye_cache 4=exact_camera 5=paired_camera 10=no_state 11=no_cbv 12=small_cbv 13=no_mapped_camera 14=bad_matrix 15=bad_camera 16=camera_rejected 17=no_eye_pso 18=no_zero_pso 19=no_root_tables 20=route_inactive 21=no_hooks.\n");
 
     std::array<uint64_t, static_cast<size_t>(EventCode::Count)> counts{};
     for (const auto& event : snapshot.events) {
@@ -224,6 +228,7 @@ const char* event_code_name(EventCode code) noexcept {
     case EventCode::AfwPublish: return "afw_publish";
     case EventCode::HudState: return "hud_state";
     case EventCode::RouteReset: return "route_reset";
+    case EventCode::SmokeSelect: return "smoke_select";
     case EventCode::Count: break;
     }
     return "unknown";

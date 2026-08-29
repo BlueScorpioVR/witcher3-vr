@@ -18,14 +18,13 @@
 #include "aer_scheduler.h"
 #include "cbv_descriptor_cache_policy.h"
 #include "cinema_aspect.h"
-#include "foliage_shader_orientation_policy.h"
-#include "foliage_shader_resources.h"
 #include "openxr_eye_geometry.h"
 #include "puredark_afw_bridge.h"
 #include "puredark_afw_camera.h"
 #include "first_person_combat_lock.h"
 #include "first_person_anchor_smoothing.h"
 #include "first_person_horse_gallop_offset.h"
+#include "foliage_hmd_base_policy.h"
 #include "hmd_camera_orientation.h"
 #include "mode3_transport_policy.h"
 #include "mode3_dlss_constants_policy.h"
@@ -35,60 +34,33 @@
 #include "route_flight_recorder.h"
 #include "rt_ingress_join.h"
 #include "shadow_cascade_authority_policy.h"
+#include "smoke_eye_authority_policy.h"
 #include "taau_submission_policy.h"
 
-// V1417 pairs the final Presentation Size FOV with the exact pixel subimage
-// that represents it. This keeps OpenXR projection metadata reciprocal with
-// the submitted rays and avoids both resampling and the rejected FOV-only fisheye.
-// V1416 restores V1409's public Streamline owner for every native-DLSS route.
-// Private NGX Create/Evaluate/Release belongs exclusively to OptiScaler when
-// its sidecar is explicitly enabled; the native nvngx_dlss.dll is never hooked
-// directly. Presentation Size remains universal and final-only; V1417 uses one
-// reciprocal subimage/FOV pair. Rendering,
-// temporal paths and transport stay unchanged. V1414 makes the AFW
-// F6 visual diagnostic available independently from all logging controls.
-// V1411 replaces the legacy launcher RTX/ASYM controls with an OptiScaler
-// sidecar switch, always-on ASYM startup, independent lightweight route and
-// performance logging, and reorganized runtime/HUD/debug bindings.
-// V1410 ports V21008's clean OptiScaler integration onto V1409. Public
-// Streamline remains a strict native-viewport pass-through, while the private
-// NGX Create/Evaluate/Release owner keeps two eye histories. Clean Mono retains
-// its independent pre-evaluate native command-list motion dispatch.
-// V1409 adds V18021's fixed-only foliage orientation replacement to V1408.
-// The two immutable corrected PSOs are always selected on an OpenXR HMD-
-// freelook route; the superseded V18020 runtime A/B is physically absent.
-// V1408 ports the complete V19005 clean-Mono route and its Mono-first launcher
-// onto V1391. Presentation Size retains V1391's final-OpenXR-only ownership;
-// no V1357/V19005 producer or swapchain slider dependency is restored.
-// V1391 removes Presentation Size from every producer and swapchain-sizing
-// decision. The setting remains readable only by the final OpenXR presenter.
-// V1369 carries every private RT AO/SIGMA/REBLUR history use across its exact
-// submitting queue. Readers wait on the last physical owner, and pair metadata
-// becomes visible only with the post-Execute fence that produced its pixels.
-// V1368 publishes packed scene captures only after their exact command list is
-// submitted and transfers the producing queue's GPU ownership to OpenXR. Ring
-// reuse follows the last producer or packed-cache consumer fence carried by
-// the physical resource.
-// V1367 replaces the cross-queue-invalid global TAAU/RT slot retirement fence
-// with one persistent timeline per submitting queue. Every reusable slot owns
-// the exact fence object and value that follows its real GPU submission.
-// V1366 carries retained-HUD ownership across an exact ordered producer queue
-// submission, so the late compositor is independent of REDengine's queue
-// topology. V1365's native Streamline command-list repair remains unchanged.
-// V1365 unwraps Streamline's public command-list wrapper before V1352 records
-// its private AFW motion-normalization compute work. The public wrapper remains
-// the owner of slEvaluateFeature; raw D3D12 trampolines receive only a proven
-// native runtime command list and fail closed otherwise.
-// V1364 re-enters REDengine's original DLSS constants builder only when strict
-// Stereo has produced the exact current eye-1 constants but eye 0 is still
-// missing. It forwards only the engine-owned reset bit; no constants payload,
-// camera matrix or temporal recipe is copied between eyes. AER is unchanged.
-// V1363 physically removes V1340's ineffective DLSS scene-boundary reset.
-// V1362 makes the exact producer record behind TAAU CB10 the sole owner of a
-// strict-Stereo resolve identity. The completed-task queue and committed eye
-// history can no longer substitute an old pair while the producer task is
-// still in flight. V1361 is the clean V1359 smoke fix: it combines V1358's
-// diagnostic-free
+// V1424 starts physically from V1422 and replaces the automatic Full-VR
+// symmetric-fallback FOV input with the raw OpenXR eye FOV. The shared FOV
+// published by V1418 remains presentation output only and can no longer feed
+// the next producer frame, be cover-scaled again and diverge toward 180 deg.
+// V1422 starts physically from V1421 and admits a deferred smoke pair below
+// the generic eye-separation margin only when draw-local b1 is a bit-exact
+// match for one eye and the peer eye remains distinct. Ambiguous identical-eye
+// pairs, the 7 cm distance bound and the generic 0.0005 margin are unchanged.
+// V1421 starts physically from V1420 and changes only the existing deferred
+// smoke fallback's coherent-pair ranking: the pair spatially closest to the
+// draw-local b1 camera wins, with the newer pair breaking an exact tie. Pair
+// validity, age, 7 cm distance and eye-separation guards remain unchanged.
+// V1420 starts physically from V1419 and adds one CPU-only route-flight event
+// for each canonical smoke draw. It records only the final eye/zero/original
+// variant, authority source, pair and matcher distance/margin; it adds no GPU
+// query, hidden draw, readback, wait or rendering change. V1419 starts
+// physically from V1418 and replaces V1409/V18021's immutable
+// b12 shader variants with the complete validated V18025 foliage path. The
+// original shaders and PSOs now consume draw-local native-table b0/b12 CBVs
+// whose current and previous nine-value orientation blocks are transformed
+// from the HMD-corrected engine camera into the matching base-camera basis.
+// V1418's opening-cutscene fallback-FOV publication and every unrelated
+// renderer, launcher, OptiScaler and Presentation Size path remain unchanged.
+// V1361 is the clean V1359 smoke fix: it combines V1358's diagnostic-free
 // renderer with V1359's full-handle CBV cache hash. No smoke GPU queries,
 // hidden probe draws or smoke-specific F3 recorder remain in this source.
 // V1358 combines V1357's passive smoke baseline with V1356's validated
@@ -305,7 +277,6 @@ HMODULE g_real_dxgi{};
 HMODULE g_real_d3d12{};
 HMODULE g_openxr_loader{};
 HMODULE g_dxcompiler{};
-HMODULE g_proxy_module{};
 HMODULE g_renderdoc_module{};
 RENDERDOC_API_1_6_0* g_renderdoc_api{};
 std::mutex g_renderdoc_api_mutex{};
@@ -961,6 +932,11 @@ bool real_smoke_world_up_route_active() {
         g_config.hmd_freelook;
 }
 
+bool foliage_bound_basis_route_active() {
+    return w3vr::foliage_hmd_base::route_active(
+        g_config.openxr_enabled, g_config.hmd_freelook);
+}
+
 bool real_smoke_world_up_binding_route_active() {
     // [FIX:WORLD-UP-BINDING-CENTER-SPLIT V1156 1/3] The V1080 world-up
     // replacement consumes heap/root-table/CBV state independently from the
@@ -998,6 +974,7 @@ bool descriptor_metadata_hooks_needed() {
     return taau_metadata_hooks_needed() ||
         mode3_hud_descriptor_hooks_needed() ||
         real_smoke_world_up_binding_route_active() ||
+        foliage_bound_basis_route_active() ||
         focus_projection_metadata_hooks_needed() ||
         asymmetric_tiled_culling_fix_needed() ||
         native_temporal_terrain_motion_route_active() ||
@@ -1008,6 +985,7 @@ bool graphics_binding_hooks_needed() {
     return temporal_backend_is_dlss() || taau_metadata_hooks_needed() ||
         mode3_hud_descriptor_hooks_needed() ||
         real_smoke_world_up_binding_route_active() ||
+        foliage_bound_basis_route_active() ||
         asymmetric_tiled_culling_fix_needed();
 }
 
@@ -1029,14 +1007,8 @@ bool common_renderer_pipeline_hooks_needed() {
     return supported_projection_transport_active();
 }
 
-bool foliage_shader_orientation_route_active() {
-    return w3vr::foliage_shader_orientation::route_active(
-        g_config.openxr_enabled, g_config.hmd_freelook);
-}
-
 bool renderer_hook_installation_needed() {
     return common_renderer_pipeline_hooks_needed() ||
-        foliage_shader_orientation_route_active() ||
         descriptor_metadata_hooks_needed() || graphics_binding_hooks_needed() ||
         temporal_compute_hooks_needed();
 }
@@ -2819,6 +2791,28 @@ bool snapshot_shared_mode3_projection_fov(XrFovf& fov) {
         fov, 1, 1, descriptor);
 }
 
+// [FIX:OPENING-CUTSCENE-ASYM-FALLBACK-FOV V1418 1/2] Keep one publication
+// owner for the centered projection actually rendered into a shared Mode-3
+// source. The final asymmetric OpenXR submit uses this exact envelope to
+// derive its reciprocal per-eye subimages.
+bool publish_shared_mode3_projection_fov(
+    float horizontal_span,
+    float vertical_fov) {
+    if (!std::isfinite(horizontal_span) ||
+        !std::isfinite(vertical_fov) ||
+        horizontal_span <= 0.1f || vertical_fov <= 0.1f) {
+        return false;
+    }
+    const float horizontal_half = atanf(horizontal_span * 0.5f);
+    const float vertical_half = vertical_fov * 0.5f;
+    g_hmd_render_fov_left.store(-horizontal_half);
+    g_hmd_render_fov_right.store(horizontal_half);
+    g_hmd_render_fov_up.store(vertical_half);
+    g_hmd_render_fov_down.store(-vertical_half);
+    g_hmd_render_fov_valid.store(true);
+    return true;
+}
+
 w3vr::mode3_transport::AfwPixelProjection
 completed_engine_frame_pixel_projection(uint64_t pair_id, uint32_t eye) {
     using Projection = w3vr::mode3_transport::AfwPixelProjection;
@@ -3699,20 +3693,43 @@ struct PipelineInfo {
     BOOL depth_clip_enable{};
 };
 
-// V18021/V1409 replaces the two exact foliage vertex shaders once at PSO
-// creation. Draw-time routing only swaps the immutable PSO pointer already
-// being bound; it performs no CBV read/copy, descriptor allocation, heap
-// switch or root-table replay.
-constexpr size_t kFoliageOrientationPipelineTableSize = 64;
-constexpr uintptr_t kFoliageOrientationPipelineClaimed = ~uintptr_t{};
-struct FoliageOrientationPipelineSlot {
+// V18025 preserves V18024's native transient-table publication and extends the
+// exact orientation compensation to the shader's previous-frame b12 half.
+// RenderDoc proves all 119 owner draws in the reference frame have distinct
+// root-3 allocations and none shares one with its immediate neighbors. Both
+// descriptor zero (b0) and descriptor twelve (b12) can therefore be replaced
+// in place without a private heap, table copy, heap switch or root-table replay.
+constexpr size_t kFoliageBoundBasisPipelineTableSize = 64;
+constexpr uintptr_t kFoliageBoundBasisPipelineClaimed = ~uintptr_t{};
+struct FoliageBoundBasisPipelineSlot {
     std::atomic<uintptr_t> original{};
-    std::atomic<ID3D12PipelineState*> replacement{};
+    ID3D12RootSignature* root_signature{};
 };
-std::array<FoliageOrientationPipelineSlot,
-    kFoliageOrientationPipelineTableSize> g_foliage_orientation_pipelines{};
-std::atomic<uint32_t> g_foliage_orientation_creation_failure_logs{};
-std::atomic<uint32_t> g_foliage_orientation_route_logs{};
+std::array<FoliageBoundBasisPipelineSlot,
+    kFoliageBoundBasisPipelineTableSize> g_foliage_bound_basis_pipelines{};
+
+constexpr size_t kFoliageBoundBasisSlotCount = 2048;
+constexpr UINT kFoliageBoundBasisB0Bytes = 1024;
+constexpr UINT kFoliageBoundBasisB12Bytes = 256;
+constexpr UINT kFoliageBoundBasisSlotBytes =
+    kFoliageBoundBasisB0Bytes + kFoliageBoundBasisB12Bytes;
+constexpr UINT kFoliageBoundBasisVertexCbvRoot = 3;
+constexpr UINT kFoliageBoundBasisPreviousCbvOffset = 12;
+
+struct FoliageBoundBasisOverrideSlot {
+    ID3D12Fence* retirement_fence{};
+    uint64_t retirement_fence_value{};
+    std::atomic<bool> reserved{};
+};
+std::array<FoliageBoundBasisOverrideSlot, kFoliageBoundBasisSlotCount>
+    g_foliage_bound_basis_override_slots{};
+ID3D12Resource* g_foliage_bound_basis_upload{};
+uint8_t* g_foliage_bound_basis_upload_mapped{};
+std::once_flag g_foliage_bound_basis_resources_once{};
+std::atomic<uint32_t> g_foliage_bound_basis_slot_index{};
+std::atomic<uint64_t> g_foliage_bound_basis_corrected{};
+std::atomic<uint64_t> g_foliage_bound_basis_fallbacks{};
+std::atomic<uint32_t> g_foliage_bound_basis_route_logs{};
 
 // [FIX:NATIVE-TEMPORAL-TERRAIN-FAMILY V15018] The validated floors share one
 // exact VS/DS and PSO contract, use two known HS variants, and can vary their
@@ -3765,6 +3782,38 @@ constexpr uint64_t kRealSmokePsHash = 0x88504F5A627B9F03ull;
 std::atomic<ID3D12PipelineState*> g_real_smoke_pipeline{};
 std::array<std::atomic<ID3D12PipelineState*>, 3>
     g_real_smoke_center_pipelines{};
+
+// [DIAG:SMOKE-SELECTOR-FLIGHT V1420] These values describe why the exact
+// canonical smoke draw selected an eye variant or fell back. They are POD
+// payload only; no diagnostic value participates in rendering decisions.
+enum class RealSmokeSelectionReason : uint32_t {
+    AsymmetricCenterInactive = 1,
+    DlssCommandTag = 2,
+    CommandListEyeCache = 3,
+    ExactCameraMatch = 4,
+    PairedCameraMatch = 5,
+    MissingGraphicsState = 10,
+    MissingCbvDescriptor = 11,
+    CbvDescriptorTooSmall = 12,
+    MissingMappedCameraResource = 13,
+    InvalidCameraMatrix = 14,
+    InvalidCameraPosition = 15,
+    CameraMatchRejected = 16,
+    EyePipelineMissing = 17,
+    ZeroCenterPipelineMissing = 18,
+    MissingRootTables = 19,
+    WorldUpRouteInactive = 20,
+    HookDependencyMissing = 21,
+};
+
+struct RealSmokeSelectionTrace {
+    RealSmokeSelectionReason reason{
+        RealSmokeSelectionReason::MissingGraphicsState};
+    int32_t eye{-1};
+    uint64_t pair_id{};
+    float selected_distance{std::numeric_limits<float>::infinity()};
+    float separation_margin{};
+};
 
 // The automatic focus path reads the vertex-visible b1/b12 table at root 3.
 constexpr uint32_t kFocusVsCbvRoot = 3;
@@ -4219,6 +4268,7 @@ bool dlss_graphics_state_tracking_active() {
     // the graphics snapshot it consumes; retained HUD and TAAU may still
     // provide the same state, but are no longer hidden prerequisites.
     return real_smoke_world_up_binding_route_active() ||
+        foliage_bound_basis_route_active() ||
         retained_hud_projection_route_configured();
 }
 
@@ -4999,6 +5049,7 @@ struct TaauPendingSlotUse {
     bool compose{};
     uint32_t index{};
     bool tiled_culling{};
+    bool foliage_bound_basis{};
 };
 // [FIX:PER-QUEUE-PRIVATE-SLOT-RETIREMENT V1367 1/5] Fence values are ordered
 // only within one command queue. A single fence signaled by independent queues
@@ -5389,6 +5440,38 @@ void record_route_flight(
     w3vr::route_flight::record(event);
 }
 
+uint32_t route_flight_float_bits(float value) {
+    uint32_t bits{};
+    static_assert(sizeof(bits) == sizeof(value));
+    memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+void record_real_smoke_selection(
+    const RealSmokeSelectionTrace& trace,
+    uint16_t final_stage,
+    uint32_t final_variant,
+    bool asymmetric_center,
+    bool variant_drawn) {
+    const uint32_t flags =
+        (variant_drawn ? 0x01u : 0u) |
+        (final_variant <= 1 ? 0x02u : 0u) |
+        (asymmetric_center ? 0x04u : 0u) |
+        (final_variant >= 2 ? 0x08u : 0u);
+    record_route_flight(
+        w3vr::route_flight::EventCode::SmokeSelect,
+        trace.eye,
+        trace.pair_id,
+        g_engine_completed_pair_id.load(std::memory_order_relaxed),
+        UINT32_MAX,
+        final_stage,
+        flags,
+        static_cast<uint32_t>(trace.reason),
+        final_variant,
+        route_flight_float_bits(trace.selected_distance),
+        route_flight_float_bits(trace.separation_margin));
+}
+
 class TaauRouteFlightScope {
 public:
     TaauRouteFlightScope(UINT x, UINT y, UINT z)
@@ -5724,6 +5807,8 @@ bool resolve_descriptor_table_cbv(
 bool acquire_tiled_culling_override_slot(
     ID3D12GraphicsCommandList* command_list,
     uint32_t& slot_index_out);
+bool prepare_foliage_hmd_base_draw(
+    ID3D12GraphicsCommandList* command_list);
 
 // Encode the omitted asymmetric center as a translated virtual tile extent
 // while preserving projection_scale * half_extent. The dimmer shader also
@@ -14062,164 +14147,81 @@ void create_native_temporal_terrain_motion_replay_pso(
         original, replay, desc.pRootSignature, camera_source, camera_target);
 }
 
-size_t foliage_orientation_pipeline_slot_index(
-    ID3D12PipelineState* original) {
-    const auto bits = reinterpret_cast<uintptr_t>(original);
-    return ((bits >> 4) ^ (bits >> 13)) &
-        (kFoliageOrientationPipelineTableSize - 1);
-}
-
-bool map_foliage_orientation_pipeline(
-    ID3D12PipelineState* original,
-    ID3D12PipelineState* replacement) {
-    if (original == nullptr || replacement == nullptr) {
-        return false;
-    }
-    const auto key = reinterpret_cast<uintptr_t>(original);
-    const size_t base = foliage_orientation_pipeline_slot_index(original);
-    for (size_t probe = 0;
-         probe < kFoliageOrientationPipelineTableSize; ++probe) {
-        auto& slot = g_foliage_orientation_pipelines[
-            (base + probe) & (kFoliageOrientationPipelineTableSize - 1)];
-        auto current = slot.original.load(std::memory_order_acquire);
-        if (current == key) {
-            slot.replacement.store(replacement, std::memory_order_release);
-            return true;
-        }
-        if (current == kFoliageOrientationPipelineClaimed) {
-            YieldProcessor();
-            --probe;
-            continue;
-        }
-        if (current != 0 || !slot.original.compare_exchange_strong(
-                current, kFoliageOrientationPipelineClaimed,
-                std::memory_order_acq_rel, std::memory_order_acquire)) {
-            continue;
-        }
-        slot.replacement.store(replacement, std::memory_order_release);
-        slot.original.store(key, std::memory_order_release);
-        return true;
-    }
-    return false;
-}
-
-ID3D12PipelineState* lookup_foliage_orientation_pipeline(
-    ID3D12PipelineState* original) {
-    if (original == nullptr) {
-        return nullptr;
-    }
-    const auto key = reinterpret_cast<uintptr_t>(original);
-    const size_t base = foliage_orientation_pipeline_slot_index(original);
-    for (size_t probe = 0;
-         probe < kFoliageOrientationPipelineTableSize; ++probe) {
-        const auto& slot = g_foliage_orientation_pipelines[
-            (base + probe) & (kFoliageOrientationPipelineTableSize - 1)];
-        const auto current = slot.original.load(std::memory_order_acquire);
-        if (current == key) {
-            return slot.replacement.load(std::memory_order_acquire);
-        }
-        if (current == 0 || current == kFoliageOrientationPipelineClaimed) {
-            return nullptr;
-        }
-    }
-    return nullptr;
-}
-
-bool load_foliage_orientation_vertex_shader(
-    w3vr::foliage_shader_orientation::Owner owner,
-    D3D12_SHADER_BYTECODE& bytecode) {
-    int resource_id{};
-    switch (owner) {
-    case w3vr::foliage_shader_orientation::Owner::DistantTrees:
-        resource_id = IDR_W3VR_FOLIAGE_DISTANT_B12_VS;
-        break;
-    case w3vr::foliage_shader_orientation::Owner::NearFronds:
-        resource_id = IDR_W3VR_FOLIAGE_FROND_B12_VS;
-        break;
-    default:
-        return false;
-    }
-    if (g_proxy_module == nullptr) {
-        return false;
-    }
-    const auto resource = FindResourceW(
-        g_proxy_module, MAKEINTRESOURCEW(resource_id), MAKEINTRESOURCEW(10));
-    if (resource == nullptr) {
-        return false;
-    }
-    const auto size = SizeofResource(g_proxy_module, resource);
-    const auto loaded = LoadResource(g_proxy_module, resource);
-    const auto* data = loaded != nullptr ? LockResource(loaded) : nullptr;
-    if (data == nullptr || size == 0) {
-        return false;
-    }
-    bytecode = D3D12_SHADER_BYTECODE{data, size};
-    return true;
-}
-
-void create_foliage_orientation_pipeline(
-    ID3D12Device* device,
-    ID3D12PipelineState* original,
-    const D3D12_GRAPHICS_PIPELINE_STATE_DESC& desc,
-    const PipelineInfo& info,
-    w3vr::foliage_shader_orientation::Owner owner) {
-    if (device == nullptr || original == nullptr ||
-        owner == w3vr::foliage_shader_orientation::Owner::None) {
-        return;
-    }
-
-    D3D12_SHADER_BYTECODE replacement_vertex_shader{};
-    if (!load_foliage_orientation_vertex_shader(
-            owner, replacement_vertex_shader)) {
-        if (g_foliage_orientation_creation_failure_logs.fetch_add(
-                1, std::memory_order_relaxed) < 4) {
-            log_line(
-                "V1409 foliage embedded vertex shader unavailable owner=%u",
-                static_cast<unsigned>(owner));
-        }
-        return;
-    }
-
-    auto replacement_desc = desc;
-    replacement_desc.VS = replacement_vertex_shader;
-    replacement_desc.CachedPSO = {};
-    ID3D12PipelineState* replacement{};
-    const auto create_hr = g_create_graphics_pipeline_state(
-        device, &replacement_desc, IID_PPV_ARGS(&replacement));
-    if (FAILED(create_hr) || replacement == nullptr) {
-        if (g_foliage_orientation_creation_failure_logs.fetch_add(
-                1, std::memory_order_relaxed) < 4) {
-            log_line(
-                "V1409 foliage replacement PSO creation failed owner=%u hr=0x%08X",
-                static_cast<unsigned>(owner),
-                static_cast<unsigned>(create_hr));
-        }
-        return;
-    }
-    if (!map_foliage_orientation_pipeline(original, replacement)) {
-        replacement->Release();
-        if (g_foliage_orientation_creation_failure_logs.fetch_add(
-                1, std::memory_order_relaxed) < 4) {
-            log_line("V1409 foliage replacement PSO table full");
-        }
-        return;
-    }
-    {
-        std::scoped_lock lock{g_reverse_mutex};
-        g_pipeline_infos[replacement] = info;
-    }
-    log_line(
-        "V1409 foliage replacement PSO created owner=%u original=%p replacement=%p vs_bytes=%zu loads=b12_rows_4_6_yz,b12_row9_xyz draw_overhead=pointer_substitution",
-        static_cast<unsigned>(owner), original, replacement,
-        replacement_vertex_shader.BytecodeLength);
-}
-
 struct NativeTemporalTerrainCameraRestore {
     uint32_t kind{};
     uint32_t root{};
     D3D12_GPU_VIRTUAL_ADDRESS cbv{};
     D3D12_GPU_DESCRIPTOR_HANDLE table{};
 };
+
+size_t foliage_bound_basis_pipeline_slot_index(
+    ID3D12PipelineState* original) {
+    const auto bits = reinterpret_cast<uintptr_t>(original);
+    return ((bits >> 4) ^ (bits >> 13)) &
+        (kFoliageBoundBasisPipelineTableSize - 1);
+}
+
+bool register_foliage_bound_basis_pipeline(
+    ID3D12PipelineState* original,
+    ID3D12RootSignature* root_signature,
+    uint64_t vs_hash) {
+    if (original == nullptr || root_signature == nullptr) {
+        return false;
+    }
+    const auto key = reinterpret_cast<uintptr_t>(original);
+    const size_t base = foliage_bound_basis_pipeline_slot_index(original);
+    for (size_t probe = 0;
+         probe < kFoliageBoundBasisPipelineTableSize; ++probe) {
+        auto& slot = g_foliage_bound_basis_pipelines[
+            (base + probe) & (kFoliageBoundBasisPipelineTableSize - 1)];
+        auto current = slot.original.load(std::memory_order_acquire);
+        if (current == key) {
+            return true;
+        }
+        if (current == kFoliageBoundBasisPipelineClaimed) {
+            YieldProcessor();
+            --probe;
+            continue;
+        }
+        if (current != 0 || !slot.original.compare_exchange_strong(
+                current, kFoliageBoundBasisPipelineClaimed,
+                std::memory_order_acq_rel)) {
+            continue;
+        }
+        slot.root_signature = root_signature;
+        slot.original.store(key, std::memory_order_release);
+        if (g_config.runtime_diagnostics) {
+            log_line(
+                "V1419 foliage current/previous PSO registered pso=%p rs=%p vs=0x%llX",
+                original, root_signature,
+                static_cast<unsigned long long>(vs_hash));
+        }
+        return true;
+    }
+    return false;
+}
+
+const FoliageBoundBasisPipelineSlot* lookup_foliage_bound_basis_pipeline(
+    ID3D12PipelineState* original) {
+    if (original == nullptr) {
+        return nullptr;
+    }
+    const auto key = reinterpret_cast<uintptr_t>(original);
+    const size_t base = foliage_bound_basis_pipeline_slot_index(original);
+    for (size_t probe = 0;
+         probe < kFoliageBoundBasisPipelineTableSize; ++probe) {
+        const auto& slot = g_foliage_bound_basis_pipelines[
+            (base + probe) & (kFoliageBoundBasisPipelineTableSize - 1)];
+        const auto current = slot.original.load(std::memory_order_acquire);
+        if (current == key) {
+            return &slot;
+        }
+        if (current == 0 || current == kFoliageBoundBasisPipelineClaimed) {
+            return nullptr;
+        }
+    }
+    return nullptr;
+}
 
 bool resolve_native_temporal_terrain_table_descriptor(
     const DlssGraphicsStateSnapshot& state,
@@ -17022,7 +17024,10 @@ bool match_native_focus_draw_eye(
         }
         // A deferred draw can precede publication of the current eye's exact
         // temporal sample. In that case compare against one coherent recent
-        // pair, retaining the already validated bounded-distance guard.
+        // pair, retaining the already validated bounded-distance guard. A
+        // delayed draw-local b1 can correspond to an older pair still present
+        // in the ring, so rank coherent pairs by spatial distance rather than
+        // pair recency.
         for (const auto& eye0 : g_engine_temporal_matrix_ring) {
             if (!eye0.corrected_valid || !eye0.render_views_valid ||
                 eye0.eye != 0 || eye0.pair_id == 0 ||
@@ -17037,9 +17042,6 @@ bool match_native_focus_draw_eye(
                     (present > eye1.present && present - eye1.present > 64)) {
                     continue;
                 }
-                if (eye0.pair_id < paired_pair) {
-                    continue;
-                }
                 std::array<float, 2> distances{};
                 for (size_t component = 0; component < 3; ++component) {
                     const float delta0 = camera_position[component] -
@@ -17048,6 +17050,12 @@ bool match_native_focus_draw_eye(
                         eye1.corrected_camera[component];
                     distances[0] += delta0 * delta0;
                     distances[1] += delta1 * delta1;
+                }
+                if (!w3vr::smoke_eye_authority::
+                        prefer_closest_coherent_pair(
+                            eye0.pair_id, distances,
+                            paired_pair, paired_distance)) {
+                    continue;
                 }
                 paired_pair = eye0.pair_id;
                 paired_distance = distances;
@@ -17065,8 +17073,17 @@ bool match_native_focus_draw_eye(
         best_pair[eye] == 0) {
         eye = paired_distance[0] <= paired_distance[1] ? 0u : 1u;
         other_eye = eye ^ 1u;
-        if (paired_pair == 0 || paired_distance[eye] > 0.0049f ||
-            paired_distance[other_eye] - paired_distance[eye] < 0.0005f) {
+        authority.eye = eye;
+        authority.pair_id = paired_pair;
+        authority.fov = paired_fov[eye];
+        authority.route = 3;
+        authority.selected_distance = paired_distance[eye];
+        authority.separation_margin =
+            paired_distance[other_eye] - paired_distance[eye];
+        if (paired_pair == 0 ||
+            !w3vr::smoke_eye_authority::
+                paired_camera_match_passes_guards(
+                    paired_distance, eye, 0.0049f, 0.0005f)) {
             g_native_focus_eye_authority_failures.fetch_add(
                 1, std::memory_order_relaxed);
             return false;
@@ -17077,15 +17094,6 @@ bool match_native_focus_draw_eye(
         route = 3;
     }
 
-    w3vr::openxr_eye_geometry::AsymmetricProjectionDescriptor descriptor{};
-    if (!w3vr::openxr_eye_geometry::derive_asymmetric_projection_descriptor(
-            best_fov[eye], 1, 1, descriptor) ||
-        !std::isfinite(descriptor.center_ndc_x) ||
-        !std::isfinite(descriptor.center_ndc_y)) {
-        g_native_focus_eye_authority_failures.fetch_add(
-            1, std::memory_order_relaxed);
-        return false;
-    }
     authority.eye = eye;
     authority.pair_id = best_pair[eye];
     authority.fov = best_fov[eye];
@@ -17093,6 +17101,16 @@ bool match_native_focus_draw_eye(
     authority.selected_distance = best_distance[eye];
     authority.separation_margin =
         best_distance[other_eye] - best_distance[eye];
+
+    w3vr::openxr_eye_geometry::AsymmetricProjectionDescriptor descriptor{};
+    if (!w3vr::openxr_eye_geometry::derive_asymmetric_projection_descriptor(
+            authority.fov, 1, 1, descriptor) ||
+        !std::isfinite(descriptor.center_ndc_x) ||
+        !std::isfinite(descriptor.center_ndc_y)) {
+        g_native_focus_eye_authority_failures.fetch_add(
+            1, std::memory_order_relaxed);
+        return false;
+    }
     g_native_focus_eye_authority_routes[route].fetch_add(
         1, std::memory_order_relaxed);
     return true;
@@ -17226,8 +17244,10 @@ bool resolve_focus_fire_b1_authority(
 
 bool select_real_smoke_offaxis_pipeline(
     ID3D12GraphicsCommandList* command_list,
-    ID3D12PipelineState*& variant_pipeline) {
+    ID3D12PipelineState*& variant_pipeline,
+    RealSmokeSelectionTrace& trace) {
     variant_pipeline = nullptr;
+    trace = {};
     const auto* state = access_dlss_graphics_state(command_list, false);
     if (state == nullptr) {
         return false;
@@ -17247,24 +17267,40 @@ bool select_real_smoke_offaxis_pipeline(
         if (tag.task_provenance_valid && tag.eye <= 1 &&
             tag.pair_id != 0 && tag.pair_id != UINT64_MAX &&
             tag.generation == generation) {
+            trace.reason = RealSmokeSelectionReason::DlssCommandTag;
+            trace.eye = static_cast<int32_t>(tag.eye);
+            trace.pair_id = tag.pair_id;
             store_native_focus_draw_eye(
                 command_list, present, tag.eye, tag.pair_id);
             variant_pipeline =
                 g_real_smoke_center_pipelines[tag.eye].load(
                     std::memory_order_acquire);
+            if (variant_pipeline == nullptr) {
+                trace.reason = RealSmokeSelectionReason::EyePipelineMissing;
+            }
             return variant_pipeline != nullptr;
         }
     }
     NativeFocusDrawEyeAuthority authority{};
     if (load_native_focus_draw_eye(command_list, present, authority)) {
+        trace.reason = RealSmokeSelectionReason::CommandListEyeCache;
+        trace.eye = static_cast<int32_t>(authority.eye);
+        trace.pair_id = authority.pair_id;
         variant_pipeline =
             g_real_smoke_center_pipelines[authority.eye].load(
                 std::memory_order_acquire);
+        if (variant_pipeline == nullptr) {
+            trace.reason = RealSmokeSelectionReason::EyePipelineMissing;
+        }
         return variant_pipeline != nullptr;
     }
     CbvDescriptorInfo cbv{};
-    if (!resolve_real_smoke_cbv(*state, 1, cbv) ||
-        cbv.size_in_bytes < 0x24Cu) {
+    if (!resolve_real_smoke_cbv(*state, 1, cbv)) {
+        trace.reason = RealSmokeSelectionReason::MissingCbvDescriptor;
+        return false;
+    }
+    if (cbv.size_in_bytes < 0x24Cu) {
+        trace.reason = RealSmokeSelectionReason::CbvDescriptorTooSmall;
         return false;
     }
     ResourceInfo resource_info{};
@@ -17276,35 +17312,57 @@ bool select_real_smoke_offaxis_pipeline(
             cbv.gpu_va, resource_info, resource_offset, resource) ||
         resource_info.mapped == nullptr ||
         resource_offset > resource_info.mapped_size ||
-        resource_info.mapped_size - resource_offset < 0x24Cu ||
-        !guarded_memcpy(matrix.data(),
+        resource_info.mapped_size - resource_offset < 0x24Cu) {
+        trace.reason = RealSmokeSelectionReason::MissingMappedCameraResource;
+        return false;
+    }
+    if (!guarded_memcpy(matrix.data(),
             static_cast<const uint8_t*>(resource_info.mapped) +
-                resource_offset, sizeof(matrix)) ||
-        !guarded_memcpy(camera_position.data(),
-            static_cast<const uint8_t*>(resource_info.mapped) +
-                resource_offset + 0x240, sizeof(camera_position))) {
+                resource_offset, sizeof(matrix))) {
+        trace.reason = RealSmokeSelectionReason::InvalidCameraMatrix;
         return false;
     }
     for (const float value : matrix) {
         if (!std::isfinite(value)) {
+            trace.reason = RealSmokeSelectionReason::InvalidCameraMatrix;
             return false;
         }
     }
+    if (!guarded_memcpy(camera_position.data(),
+            static_cast<const uint8_t*>(resource_info.mapped) +
+                resource_offset + 0x240, sizeof(camera_position))) {
+        trace.reason = RealSmokeSelectionReason::InvalidCameraPosition;
+        return false;
+    }
     for (const float value : camera_position) {
         if (!std::isfinite(value)) {
+            trace.reason = RealSmokeSelectionReason::InvalidCameraPosition;
             return false;
         }
     }
 
-    if (!match_native_focus_draw_eye(
-            camera_position, present, authority)) {
+    const bool matched = match_native_focus_draw_eye(
+        camera_position, present, authority);
+    trace.eye = authority.eye <= 1
+        ? static_cast<int32_t>(authority.eye) : -1;
+    trace.pair_id = authority.pair_id;
+    trace.selected_distance = authority.selected_distance;
+    trace.separation_margin = authority.separation_margin;
+    if (!matched) {
+        trace.reason = RealSmokeSelectionReason::CameraMatchRejected;
         return false;
     }
+    trace.reason = authority.route == 2
+        ? RealSmokeSelectionReason::ExactCameraMatch
+        : RealSmokeSelectionReason::PairedCameraMatch;
     store_native_focus_draw_eye(
         command_list, present, authority.eye, authority.pair_id);
     variant_pipeline =
         g_real_smoke_center_pipelines[authority.eye].load(
             std::memory_order_acquire);
+    if (variant_pipeline == nullptr) {
+        trace.reason = RealSmokeSelectionReason::EyePipelineMissing;
+    }
     return variant_pipeline != nullptr;
 }
 
@@ -17957,6 +18015,7 @@ void install_reverse_hooks() {
     const bool metadata_hooks = taau_metadata_hooks_needed() ||
         focus_projection_metadata_hooks_needed() ||
         asymmetric_tiled_culling_fix_needed() ||
+        foliage_bound_basis_route_active() ||
         // Descriptor metadata and queue retirement are functional state for
         // the private per-eye history tables, not diagnostic instrumentation.
         rt_symmetric_dlss_per_eye_ao_history_active();
@@ -18136,6 +18195,7 @@ void install_resource_hooks(ID3D12Resource* resource) {
     if (resource == nullptr ||
         (!taau_metadata_hooks_needed() &&
             !real_smoke_world_up_binding_route_active() &&
+            !foliage_bound_basis_route_active() &&
             !focus_projection_metadata_hooks_needed() &&
             !rt_symmetric_dlss_per_eye_ao_history_active())) {
         return;
@@ -19298,6 +19358,8 @@ void STDMETHODCALLTYPE hook_execute_command_lists(
     // by accident and was the only reason those slots remained reusable.
     const bool rt_slot_retirement_needed =
         rt_symmetric_dlss_per_eye_ao_history_active();
+    const bool foliage_slot_retirement_needed =
+        foliage_bound_basis_route_active();
     // [FIX:TAAU-FUNCTIONAL-EXECUTE-LIFECYCLE V12127 1/1] TAAU resolve
     // retirement, slot-fence publication and reservation release are also
     // functional synchronization and must survive diagnostics-off runs.
@@ -19306,7 +19368,8 @@ void STDMETHODCALLTYPE hook_execute_command_lists(
             taau_cache_execute_publication) &&
         !taau_functional_hooks_needed() &&
         !reverse_diagnostic_hooks_requested() &&
-        !rt_slot_retirement_needed) {
+        !rt_slot_retirement_needed &&
+        !foliage_slot_retirement_needed) {
         // Keep the gaming path narrower than the temporal detour: no TAAU
         // tracking, readback scan, slot fence or diagnostic atomics.
         {
@@ -19549,7 +19612,16 @@ void STDMETHODCALLTYPE hook_execute_command_lists(
         // placed after the exact Execute which owns the collected command-list
         // uses. Store its fence object as well as its value in every slot.
         for (const auto& use : taau_slot_uses) {
-            if (use.tiled_culling &&
+            if (use.foliage_bound_basis &&
+                use.index < g_foliage_bound_basis_override_slots.size()) {
+                auto& slot =
+                    g_foliage_bound_basis_override_slots[use.index];
+                slot.retirement_fence = private_resource_ordered
+                    ? private_resource_fence : nullptr;
+                slot.retirement_fence_value = private_resource_ordered
+                    ? private_resource_fence_value : UINT64_MAX;
+                slot.reserved.store(false, std::memory_order_release);
+            } else if (use.tiled_culling &&
                 use.index < g_tiled_culling_override_slots.size()) {
                 auto& slot = g_tiled_culling_override_slots[use.index];
                 slot.retirement_fence = private_resource_ordered
@@ -19780,6 +19852,7 @@ void STDMETHODCALLTYPE hook_create_cbv(
 
     if ((!taau_metadata_hooks_needed() &&
             !real_smoke_world_up_binding_route_active() &&
+            !foliage_bound_basis_route_active() &&
             !focus_projection_metadata_hooks_needed() &&
             !rt_symmetric_dlss_per_eye_ao_history_active()) ||
         desc == nullptr ||
@@ -19805,8 +19878,7 @@ HRESULT STDMETHODCALLTYPE hook_create_graphics_pipeline_state(
     void** pipeline_state) {
     const auto hr = g_create_graphics_pipeline_state(device, desc, riid, pipeline_state);
     if ((!common_renderer_pipeline_hooks_needed() &&
-            !foliage_shader_orientation_route_active() &&
-            !reverse_enabled()) ||
+            !foliage_bound_basis_route_active() && !reverse_enabled()) ||
         FAILED(hr) || desc == nullptr || pipeline_state == nullptr ||
         *pipeline_state == nullptr) {
         return hr;
@@ -19840,12 +19912,9 @@ HRESULT STDMETHODCALLTYPE hook_create_graphics_pipeline_state(
         info.blend_op = blend.BlendOp;
     }
 
-    // Create the motion-only correction beside the exact original terrain PSO.
-    // Generated PSOs call the real function pointer and cannot recurse here.
-    create_native_temporal_terrain_motion_replay_pso(device, pso, *desc);
-
-    const auto foliage_owner =
-        w3vr::foliage_shader_orientation::classify_owner(
+    const bool foliage_bound_basis_owner =
+        foliage_bound_basis_route_active() &&
+        w3vr::foliage_hmd_base::is_owner(
             info.vs_hash, info.ps_hash,
             desc->HS.pShaderBytecode != nullptr &&
                 desc->HS.BytecodeLength != 0,
@@ -19856,12 +19925,15 @@ HRESULT STDMETHODCALLTYPE hook_create_graphics_pipeline_state(
             desc->PrimitiveTopologyType ==
                 D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE,
             desc->DepthStencilState.DepthEnable != FALSE);
-    if (foliage_shader_orientation_route_active() &&
-        foliage_owner !=
-            w3vr::foliage_shader_orientation::Owner::None) {
-        create_foliage_orientation_pipeline(
-            device, pso, *desc, info, foliage_owner);
+    if (foliage_bound_basis_owner) {
+        register_foliage_bound_basis_pipeline(
+            pso, desc->pRootSignature, info.vs_hash);
+        store_effect_pipeline_info(pso, info);
     }
+
+    // Create the motion-only correction beside the exact original terrain PSO.
+    // Generated PSOs call the real function pointer and cannot recurse here.
+    create_native_temporal_terrain_motion_replay_pso(device, pso, *desc);
 
     const auto stereo_dump_candidate =
         (info.vs_hash == 0xEDFD76797EB58077ull && info.ps_hash == 0xBB5967B70E8594BFull) ||
@@ -20598,6 +20670,7 @@ void STDMETHODCALLTYPE hook_copy_descriptors(
     UINT src_index = 0;
     const bool full_metadata = taau_metadata_hooks_needed() ||
         real_smoke_world_up_binding_route_active() ||
+        foliage_bound_basis_route_active() ||
         focus_projection_metadata_hooks_needed() ||
         rt_symmetric_dlss_per_eye_ao_history_active();
     std::unique_lock<std::mutex> lock{g_reverse_mutex, std::defer_lock};
@@ -20666,6 +20739,7 @@ void STDMETHODCALLTYPE hook_copy_descriptors_simple(
         cached_descriptor_increment(device, descriptor_heaps_type);
     const bool full_metadata = taau_metadata_hooks_needed() ||
         real_smoke_world_up_binding_route_active() ||
+        foliage_bound_basis_route_active() ||
         focus_projection_metadata_hooks_needed() ||
         rt_symmetric_dlss_per_eye_ao_history_active();
     std::unique_lock<std::mutex> lock{g_reverse_mutex, std::defer_lock};
@@ -20954,6 +21028,32 @@ HRESULT STDMETHODCALLTYPE hook_reset_command_list(
         g_reset_command_list(command_list, allocator, initial_state);
     if (FAILED(result)) {
         return result;
+    }
+
+    // Reset discards recorded draws. Release any private foliage upload slot
+    // owned by this abandoned recording instead of waiting for a queue fence
+    // that can never be signalled.
+    {
+        std::scoped_lock lock{g_taau_slot_mutex};
+        const auto found = g_taau_pending_slot_uses.find(command_list);
+        if (found != g_taau_pending_slot_uses.end()) {
+            auto& uses = found->second;
+            for (auto it = uses.begin(); it != uses.end();) {
+                if (!it->foliage_bound_basis) {
+                    ++it;
+                    continue;
+                }
+                if (it->index <
+                    g_foliage_bound_basis_override_slots.size()) {
+                    g_foliage_bound_basis_override_slots[it->index].reserved.store(
+                        false, std::memory_order_release);
+                }
+                it = uses.erase(it);
+            }
+            if (uses.empty()) {
+                g_taau_pending_slot_uses.erase(found);
+            }
+        }
     }
 
     store_command_list_pipeline(command_list, initial_state);
@@ -21599,27 +21699,8 @@ void STDMETHODCALLTYPE hook_set_pipeline_state(
         }
     }
 
-    // V1409 always selects V18021's corrected immutable replacement. Native
-    // heaps, tables, CBVs and command-list resources remain untouched.
-    if (foliage_shader_orientation_route_active() &&
-        pipeline_state != nullptr) {
-        if (auto* replacement =
-                lookup_foliage_orientation_pipeline(pipeline_state)) {
-            bound_pipeline_state = replacement;
-            if (g_config.runtime_diagnostics &&
-                g_foliage_orientation_route_logs.fetch_add(
-                    1, std::memory_order_relaxed) < 16) {
-                log_line(
-                    "V1409 foliage replacement routed original=%p replacement=%p present=%llu",
-                    pipeline_state, replacement,
-                    static_cast<unsigned long long>(
-                        g_present_count.load(std::memory_order_relaxed)));
-            }
-        }
-    }
-
     if (common_renderer_pipeline_hooks_needed() ||
-        foliage_shader_orientation_route_active() || reverse_enabled()) {
+        foliage_bound_basis_route_active() || reverse_enabled()) {
         const bool stored = store_command_list_pipeline(command_list, bound_pipeline_state);
         const bool legacy_pipeline_tracking =
             g_config.reverse_cbv_probe || g_config.reverse_stereo_probe ||
@@ -22238,6 +22319,14 @@ void STDMETHODCALLTYPE hook_draw_indexed_instanced(
     UINT start_index_location,
     INT base_vertex_location,
     UINT start_instance_location) {
+    if (prepare_foliage_hmd_base_draw(command_list)) {
+        g_draw_indexed_instanced(
+            command_list, index_count_per_instance, instance_count,
+            start_index_location, base_vertex_location,
+            start_instance_location);
+        return;
+    }
+
     auto* real_smoke_pipeline =
         load_command_list_pipeline_effect_nonblocking(command_list);
     const bool real_smoke_candidate =
@@ -22251,6 +22340,8 @@ void STDMETHODCALLTYPE hook_draw_indexed_instanced(
             start_instance_location);
     };
 
+    RealSmokeSelectionTrace real_smoke_trace{};
+    bool real_smoke_asymmetric_center{};
     if (real_smoke_world_up_route_active() &&
         real_smoke_candidate &&
         g_set_pipeline_state != nullptr &&
@@ -22262,16 +22353,16 @@ void STDMETHODCALLTYPE hook_draw_indexed_instanced(
         // gate as the automatic transparent family and retain the exact
         // command-list eye selector below. Missing eye authority still falls
         // closed to V1157's immutable zero-centre world-up variant.
-        const bool asymmetric_center = w3vr::mode3_transport::
+        real_smoke_asymmetric_center = w3vr::mode3_transport::
             native_asymmetric_effect_center_application_active(
                 real_smoke_center_fix_route_configured(),
                 native_stereo_runtime_enabled(),
                 native_asymmetric_cinema_panel_active(),
                 native_asymmetric_full_vr_scene_active());
         bool variant_selected{};
-        if (asymmetric_center) {
+        if (real_smoke_asymmetric_center) {
             variant_selected = select_real_smoke_offaxis_pipeline(
-                command_list, variant_pipeline);
+                command_list, variant_pipeline, real_smoke_trace);
             if (!variant_selected) {
                 // [FIX:WORLD-UP-ZERO-CENTER-FALLBACK V1157 1/1] Off-axis
                 // authority is a spatial refinement, not permission to apply
@@ -22282,17 +22373,37 @@ void STDMETHODCALLTYPE hook_draw_indexed_instanced(
                 variant_pipeline = g_real_smoke_center_pipelines[2].load(
                     std::memory_order_acquire);
                 variant_selected = variant_pipeline != nullptr;
+                if (!variant_selected) {
+                    real_smoke_trace.reason =
+                        RealSmokeSelectionReason::ZeroCenterPipelineMissing;
+                }
             }
         } else {
+            real_smoke_trace.reason =
+                RealSmokeSelectionReason::AsymmetricCenterInactive;
             variant_pipeline = g_real_smoke_center_pipelines[2].load(
                 std::memory_order_acquire);
             variant_selected = variant_pipeline != nullptr;
+            if (!variant_selected) {
+                real_smoke_trace.reason =
+                    RealSmokeSelectionReason::ZeroCenterPipelineMissing;
+            }
         }
         if (variant_selected) {
             const auto* state = access_dlss_graphics_state(
                 command_list, false);
             if (state != nullptr && state->tables[3].ptr != 0 &&
                 state->tables[6].ptr != 0) {
+                uint32_t final_variant = 2;
+                if (variant_pipeline ==
+                    g_real_smoke_center_pipelines[0].load(
+                        std::memory_order_relaxed)) {
+                    final_variant = 0;
+                } else if (variant_pipeline ==
+                    g_real_smoke_center_pipelines[1].load(
+                        std::memory_order_relaxed)) {
+                    final_variant = 1;
+                }
                 const auto original_geometry_table = state->tables[6];
                 // Root 3 and root 6 are the matching VS/GS CBV tables in the
                 // REDengine stage schema. Give the local GS the exact b1 used
@@ -22301,13 +22412,34 @@ void STDMETHODCALLTYPE hook_draw_indexed_instanced(
                 g_set_graphics_root_descriptor_table(
                     command_list, 6, state->tables[3]);
                 g_set_pipeline_state(command_list, variant_pipeline);
+                record_real_smoke_selection(
+                    real_smoke_trace,
+                    final_variant <= 1 ? 1u : 2u,
+                    final_variant,
+                    real_smoke_asymmetric_center,
+                    true);
                 issue_draw();
                 g_set_pipeline_state(command_list, real_smoke_pipeline);
                 g_set_graphics_root_descriptor_table(
                     command_list, 6, original_geometry_table);
                 return;
             }
+            real_smoke_trace.reason =
+                RealSmokeSelectionReason::MissingRootTables;
         }
+    }
+    if (real_smoke_candidate) {
+        if (!real_smoke_world_up_route_active()) {
+            real_smoke_trace.reason =
+                RealSmokeSelectionReason::WorldUpRouteInactive;
+        } else if (g_set_pipeline_state == nullptr ||
+            g_set_graphics_root_descriptor_table == nullptr) {
+            real_smoke_trace.reason =
+                RealSmokeSelectionReason::HookDependencyMissing;
+        }
+        record_real_smoke_selection(
+            real_smoke_trace, 3, UINT32_MAX,
+            real_smoke_asymmetric_center, false);
     }
     // Resolve the automatic family's read-only b12/b1 contract only after the
     // root tables are final, bind one immutable eye variant for this draw, and
@@ -23367,6 +23499,13 @@ void STDMETHODCALLTYPE hook_draw_instanced(
     UINT instance_count,
     UINT start_vertex_location,
     UINT start_instance_location) {
+    if (prepare_foliage_hmd_base_draw(command_list)) {
+        g_draw_instanced(
+            command_list, vertex_count_per_instance, instance_count,
+            start_vertex_location, start_instance_location);
+        return;
+    }
+
     if (high_frequency_runtime_diagnostics_active()) {
         g_fingerprint_nonindexed_draw_count.fetch_add(1, std::memory_order_relaxed);
     }
@@ -23737,6 +23876,48 @@ bool ensure_tiled_culling_override_resources() {
         g_tiled_culling_upload != nullptr &&
         g_tiled_culling_upload_mapped != nullptr &&
         g_tiled_culling_descriptor_increment != 0;
+}
+
+bool ensure_foliage_bound_basis_resources() {
+    std::call_once(g_foliage_bound_basis_resources_once, []() {
+        if (g_d3d12_device == nullptr) {
+            return;
+        }
+        D3D12_HEAP_PROPERTIES upload_heap{};
+        upload_heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+        upload_heap.CreationNodeMask = 1;
+        upload_heap.VisibleNodeMask = 1;
+        D3D12_RESOURCE_DESC upload_desc{};
+        upload_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        upload_desc.Width = static_cast<UINT64>(
+            kFoliageBoundBasisSlotCount * kFoliageBoundBasisSlotBytes);
+        upload_desc.Height = 1;
+        upload_desc.DepthOrArraySize = 1;
+        upload_desc.MipLevels = 1;
+        upload_desc.Format = DXGI_FORMAT_UNKNOWN;
+        upload_desc.SampleDesc.Count = 1;
+        upload_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        if (FAILED(g_d3d12_device->CreateCommittedResource(
+                &upload_heap, D3D12_HEAP_FLAG_NONE, &upload_desc,
+                D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                IID_PPV_ARGS(&g_foliage_bound_basis_upload))) ||
+            FAILED(g_foliage_bound_basis_upload->Map(
+                0, nullptr,
+                reinterpret_cast<void**>(
+                    &g_foliage_bound_basis_upload_mapped)))) {
+            log_line(
+                "V1419 foliage current/previous upload ring creation failed");
+            return;
+        }
+        if (g_config.runtime_diagnostics) {
+            log_line(
+                "V1419 foliage current/previous resources ready slots=%zu bytes=%u",
+                g_foliage_bound_basis_override_slots.size(),
+                kFoliageBoundBasisSlotBytes);
+        }
+    });
+    return g_foliage_bound_basis_upload != nullptr &&
+        g_foliage_bound_basis_upload_mapped != nullptr;
 }
 
 bool initialize_taau_mvec_pipeline() {
@@ -24381,10 +24562,11 @@ void track_taau_slot_use(
     ID3D12GraphicsCommandList* command_list,
     bool compose,
     uint32_t index,
-    bool tiled_culling = false) {
+    bool tiled_culling = false,
+    bool foliage_bound_basis = false) {
     std::scoped_lock lock{g_taau_slot_mutex};
     g_taau_pending_slot_uses[command_list].push_back(
-        {compose, index, tiled_culling});
+        {compose, index, tiled_culling, foliage_bound_basis});
 }
 
 bool acquire_taau_override_slot(
@@ -24444,6 +24626,431 @@ bool acquire_tiled_culling_override_slot(
         slot.reserved.store(false, std::memory_order_release);
     }
     return false;
+}
+
+bool acquire_foliage_bound_basis_override_slot(
+    ID3D12GraphicsCommandList* command_list,
+    uint32_t& slot_index_out) {
+    if (command_list == nullptr ||
+        !ensure_foliage_bound_basis_resources()) {
+        return false;
+    }
+    const auto start = g_foliage_bound_basis_slot_index.fetch_add(
+        1, std::memory_order_relaxed);
+    for (uint32_t offset = 0;
+         offset < g_foliage_bound_basis_override_slots.size(); ++offset) {
+        const auto index = (start + offset) % static_cast<uint32_t>(
+            g_foliage_bound_basis_override_slots.size());
+        auto& slot = g_foliage_bound_basis_override_slots[index];
+        bool expected{};
+        if (!slot.reserved.compare_exchange_strong(
+                expected, true, std::memory_order_acq_rel)) {
+            continue;
+        }
+        if (private_resource_slot_retired(
+                slot.retirement_fence,
+                slot.retirement_fence_value)) {
+            slot_index_out = index;
+            track_taau_slot_use(
+                command_list, false, index, false, true);
+            return true;
+        }
+        slot.reserved.store(false, std::memory_order_release);
+    }
+    return false;
+}
+
+// Select the exact base/corrected camera pair that produced this foliage draw.
+// Position matching is only a final identity check; base-camera orientation is
+// obtained from the engine temporal ring and never inferred from vertex b12.
+bool resolve_foliage_hmd_base_camera(
+    ID3D12GraphicsCommandList* command_list,
+    const std::array<float, 3>& camera_position,
+    EngineTemporalMatrixPair& selected,
+    uint32_t& authority_route) {
+    authority_route = 0;
+    int expected_eye{-1};
+    uint64_t expected_pair{};
+    const uint32_t generation =
+        g_streamline_capture_generation.load(std::memory_order_acquire);
+    if (g_streamline_dlss_route_tag_valid &&
+        g_streamline_dlss_route_tag.task_provenance_valid &&
+        g_streamline_dlss_route_tag.eye <= 1 &&
+        g_streamline_dlss_route_tag.pair_id != 0 &&
+        g_streamline_dlss_route_tag.generation == generation) {
+        expected_eye = static_cast<int>(g_streamline_dlss_route_tag.eye);
+        expected_pair = g_streamline_dlss_route_tag.pair_id;
+        authority_route = 1;
+    } else if (g_engine_render_eye >= 0 && g_engine_render_eye <= 1 &&
+        g_engine_render_pair_id != 0 &&
+        g_engine_render_pair_id != UINT64_MAX) {
+        expected_eye = g_engine_render_eye;
+        expected_pair = g_engine_render_pair_id;
+        authority_route = 2;
+    } else {
+        EngineFrameTag command_tag{};
+        if (resolve_aer_cinema_command_list_tag(command_list, command_tag) &&
+            command_tag.eye <= 1 && command_tag.pair_id != 0 &&
+            command_tag.generation == generation) {
+            expected_eye = static_cast<int>(command_tag.eye);
+            expected_pair = command_tag.pair_id;
+            authority_route = 3;
+        }
+    }
+
+    const uint64_t present =
+        g_present_count.load(std::memory_order_relaxed);
+    float best_distance = std::numeric_limits<float>::infinity();
+    EngineTemporalMatrixPair best{};
+    {
+        std::scoped_lock lock{g_engine_temporal_matrix_mutex};
+        const auto consider = [&](const EngineTemporalMatrixPair& candidate,
+                                  bool exact) {
+            if (!candidate.corrected_valid || !candidate.hmd_pose_valid ||
+                candidate.eye < 0 || candidate.eye > 1 ||
+                candidate.pair_id == 0 || candidate.pair_id == UINT64_MAX ||
+                candidate.generation != generation ||
+                candidate.present > present + 2 ||
+                (present > candidate.present &&
+                    present - candidate.present > (exact ? 32 : 16))) {
+                return;
+            }
+            if (exact && (candidate.eye != expected_eye ||
+                    candidate.pair_id != expected_pair)) {
+                return;
+            }
+            float distance{};
+            for (size_t component = 0; component < 3; ++component) {
+                const float delta = camera_position[component] -
+                    candidate.corrected_camera[component];
+                distance += delta * delta;
+            }
+            if (distance < best_distance ||
+                (std::fabs(distance - best_distance) < 1.0e-9f &&
+                    candidate.pair_id > best.pair_id)) {
+                best_distance = distance;
+                best = candidate;
+            }
+        };
+        if (expected_eye >= 0 && expected_pair != 0) {
+            for (const auto& candidate : g_engine_temporal_matrix_ring) {
+                consider(candidate, true);
+            }
+        }
+        if (best.pair_id == 0) {
+            best_distance = std::numeric_limits<float>::infinity();
+            for (const auto& candidate : g_engine_temporal_matrix_ring) {
+                consider(candidate, false);
+            }
+            authority_route = 4;
+        }
+    }
+    if (best.pair_id == 0 || best_distance > 0.01f) {
+        return false;
+    }
+    selected = best;
+    return true;
+}
+
+// Match the bound PrevFrameConstants camera to the exact prior engine camera
+// transaction. Position alone is ambiguous while the player is stationary,
+// so include the bound previous forward vector in the identity check. The
+// shader stores a convention-equivalent direction in b12[9].xyz; accepting the
+// opposite sign only handles matrix-vector convention without weakening the
+// orientation match.
+bool resolve_foliage_hmd_base_previous_camera(
+    const EngineTemporalMatrixPair& current,
+    const std::array<float, 3>& previous_position,
+    const std::array<float, 3>& previous_direction,
+    EngineTemporalMatrixPair& selected) {
+    float direction_length_squared{};
+    for (size_t component = 0; component < 3; ++component) {
+        if (!std::isfinite(previous_position[component]) ||
+            !std::isfinite(previous_direction[component])) {
+            return false;
+        }
+        direction_length_squared +=
+            previous_direction[component] * previous_direction[component];
+    }
+    if (direction_length_squared < 0.64f ||
+        direction_length_squared > 1.44f) {
+        return false;
+    }
+
+    float best_score = std::numeric_limits<float>::infinity();
+    EngineTemporalMatrixPair best{};
+    {
+        std::scoped_lock lock{g_engine_temporal_matrix_mutex};
+        for (const auto& candidate : g_engine_temporal_matrix_ring) {
+            if (!candidate.corrected_valid || !candidate.hmd_pose_valid ||
+                candidate.eye != current.eye ||
+                candidate.generation != current.generation ||
+                candidate.pair_id == 0 || candidate.pair_id == UINT64_MAX ||
+                candidate.pair_id >= current.pair_id) {
+                continue;
+            }
+
+            float position_distance{};
+            float direct_direction_distance{};
+            float inverse_direction_distance{};
+            for (size_t component = 0; component < 3; ++component) {
+                const float position_delta = previous_position[component] -
+                    candidate.corrected_camera[component];
+                position_distance += position_delta * position_delta;
+                const float forward = candidate.corrected_camera[9 + component];
+                const float direct_delta = previous_direction[component] - forward;
+                const float inverse_delta = previous_direction[component] + forward;
+                direct_direction_distance += direct_delta * direct_delta;
+                inverse_direction_distance += inverse_delta * inverse_delta;
+            }
+            const float direction_distance = std::min(
+                direct_direction_distance, inverse_direction_distance);
+            if (position_distance > 0.04f || direction_distance > 0.04f) {
+                continue;
+            }
+            const float score = position_distance + direction_distance;
+            if (score < best_score ||
+                (std::fabs(score - best_score) < 1.0e-9f &&
+                    candidate.pair_id > best.pair_id)) {
+                best_score = score;
+                best = candidate;
+            }
+        }
+    }
+    if (best.pair_id == 0) {
+        return false;
+    }
+    selected = best;
+    return true;
+}
+
+bool foliage_bound_basis_table_cpu_handle(
+    const DlssGraphicsStateSnapshot& state,
+    D3D12_GPU_DESCRIPTOR_HANDLE table,
+    UINT descriptor_count,
+    D3D12_CPU_DESCRIPTOR_HANDLE& cpu_out) {
+    if (table.ptr == 0 || state.cbv_gpu_start.ptr == 0 ||
+        state.cbv_cpu_start.ptr == 0 ||
+        state.cbv_descriptor_increment == 0 ||
+        table.ptr < state.cbv_gpu_start.ptr) {
+        return false;
+    }
+    const UINT64 byte_offset = table.ptr - state.cbv_gpu_start.ptr;
+    if (byte_offset % state.cbv_descriptor_increment != 0) {
+        return false;
+    }
+    const UINT64 descriptor_index =
+        byte_offset / state.cbv_descriptor_increment;
+    if (descriptor_index + descriptor_count >
+        state.cbv_descriptor_count) {
+        return false;
+    }
+    cpu_out.ptr = state.cbv_cpu_start.ptr +
+        static_cast<SIZE_T>(descriptor_index) *
+            state.cbv_descriptor_increment;
+    return true;
+}
+
+void note_foliage_bound_basis_fallback(const char* reason) {
+    const uint64_t count = g_foliage_bound_basis_fallbacks.fetch_add(
+        1, std::memory_order_relaxed) + 1;
+    if (g_config.runtime_diagnostics &&
+        (count <= 16 || (count & (count - 1)) == 0)) {
+        log_line(
+            "V1419 foliage current/previous fallback count=%llu reason=%s present=%llu",
+            static_cast<unsigned long long>(count), reason,
+            static_cast<unsigned long long>(
+                g_present_count.load(std::memory_order_relaxed)));
+    }
+}
+
+bool prepare_foliage_hmd_base_draw(
+    ID3D12GraphicsCommandList* command_list) {
+    if (!foliage_bound_basis_route_active() || command_list == nullptr ||
+        g_create_cbv == nullptr || g_d3d12_device == nullptr) {
+        return false;
+    }
+
+    auto* pipeline =
+        load_command_list_pipeline_effect_nonblocking(command_list);
+    const auto* owner = lookup_foliage_bound_basis_pipeline(pipeline);
+    if (owner == nullptr) {
+        return false;
+    }
+    const auto* state = access_dlss_graphics_state(command_list, false);
+    if (state == nullptr || state->root_signature != owner->root_signature ||
+        state->cbv_srv_uav_heap == nullptr ||
+        state->tables[kFoliageBoundBasisVertexCbvRoot].ptr == 0) {
+        note_foliage_bound_basis_fallback("graphics_state");
+        return false;
+    }
+
+    D3D12_CPU_DESCRIPTOR_HANDLE native_b0_descriptor{};
+    if (!foliage_bound_basis_table_cpu_handle(
+            *state, state->tables[kFoliageBoundBasisVertexCbvRoot],
+            kFoliageBoundBasisPreviousCbvOffset + 1,
+            native_b0_descriptor)) {
+        note_foliage_bound_basis_fallback("native_vertex_table");
+        return false;
+    }
+    D3D12_CPU_DESCRIPTOR_HANDLE native_b12_descriptor{
+        native_b0_descriptor.ptr +
+            static_cast<SIZE_T>(kFoliageBoundBasisPreviousCbvOffset) *
+                state->cbv_descriptor_increment};
+
+    CbvDescriptorInfo source_b0{};
+    CbvDescriptorInfo source_b12{};
+    if (!load_cbv_descriptor(native_b0_descriptor.ptr, source_b0) ||
+        source_b0.size_in_bytes < 772 ||
+        source_b0.size_in_bytes > kFoliageBoundBasisB0Bytes ||
+        source_b0.size_in_bytes %
+            D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT != 0) {
+        note_foliage_bound_basis_fallback("b0_cbv_contract");
+        return false;
+    }
+    if (!load_cbv_descriptor(native_b12_descriptor.ptr, source_b12) ||
+        source_b12.size_in_bytes < 160 ||
+        source_b12.size_in_bytes > kFoliageBoundBasisB12Bytes ||
+        source_b12.size_in_bytes %
+            D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT != 0) {
+        note_foliage_bound_basis_fallback("b12_cbv_contract");
+        return false;
+    }
+
+    std::array<float,
+        kFoliageBoundBasisB0Bytes / sizeof(float)> private_b0{};
+    std::array<float,
+        kFoliageBoundBasisB12Bytes / sizeof(float)> private_b12{};
+    if (!copy_gpu_va_bytes(
+            source_b0.gpu_va, private_b0.data(),
+            source_b0.size_in_bytes) ||
+        !copy_gpu_va_bytes(
+            source_b12.gpu_va, private_b12.data(),
+            source_b12.size_in_bytes)) {
+        note_foliage_bound_basis_fallback("cbv_copy");
+        return false;
+    }
+
+    const std::array<float, 3> camera_position{
+        private_b0[16 * 4 + 0], private_b0[16 * 4 + 1],
+        private_b0[16 * 4 + 2]};
+    if (!std::all_of(
+            camera_position.begin(), camera_position.end(),
+            [](float value) { return std::isfinite(value); })) {
+        note_foliage_bound_basis_fallback("camera_position");
+        return false;
+    }
+    EngineTemporalMatrixPair camera{};
+    uint32_t authority_route{};
+    if (!resolve_foliage_hmd_base_camera(
+            command_list, camera_position, camera, authority_route)) {
+        note_foliage_bound_basis_fallback("camera_authority");
+        return false;
+    }
+    std::array<float, 9> base_basis{};
+    std::array<float, 9> corrected_basis{};
+    std::copy_n(camera.base_camera.begin() + 3, 9, base_basis.begin());
+    std::copy_n(
+        camera.corrected_camera.begin() + 3, 9,
+        corrected_basis.begin());
+    if (!w3vr::foliage_hmd_base::compensate_b0_orientation(
+            private_b0.data(),
+            source_b0.size_in_bytes / sizeof(float),
+            base_basis, corrected_basis)) {
+        note_foliage_bound_basis_fallback("nine_value_compensation");
+        return false;
+    }
+
+    const std::array<float, 3> previous_camera_position{
+        private_b12[8 * 4 + 0], private_b12[8 * 4 + 1],
+        private_b12[8 * 4 + 2]};
+    const std::array<float, 3> previous_camera_direction{
+        private_b12[9 * 4 + 0], private_b12[9 * 4 + 1],
+        private_b12[9 * 4 + 2]};
+    EngineTemporalMatrixPair previous_camera{};
+    bool previous_compensated{};
+    if (resolve_foliage_hmd_base_previous_camera(
+            camera, previous_camera_position, previous_camera_direction,
+            previous_camera)) {
+        std::array<float, 9> previous_base_basis{};
+        std::array<float, 9> previous_corrected_basis{};
+        std::copy_n(
+            previous_camera.base_camera.begin() + 3, 9,
+            previous_base_basis.begin());
+        std::copy_n(
+            previous_camera.corrected_camera.begin() + 3, 9,
+            previous_corrected_basis.begin());
+        previous_compensated =
+            w3vr::foliage_hmd_base::compensate_b12_orientation(
+                private_b12.data(),
+                source_b12.size_in_bytes / sizeof(float),
+                previous_base_basis, previous_corrected_basis);
+    }
+    if (!previous_compensated) {
+        note_foliage_bound_basis_fallback("previous_camera_authority");
+    }
+
+    uint32_t slot_index{};
+    if (!acquire_foliage_bound_basis_override_slot(
+            command_list, slot_index)) {
+        note_foliage_bound_basis_fallback("slot");
+        return false;
+    }
+    const size_t upload_offset =
+        static_cast<size_t>(slot_index) * kFoliageBoundBasisSlotBytes;
+    const size_t previous_upload_offset =
+        upload_offset + kFoliageBoundBasisB0Bytes;
+    memcpy(g_foliage_bound_basis_upload_mapped + upload_offset,
+        private_b0.data(), source_b0.size_in_bytes);
+    if (previous_compensated) {
+        memcpy(
+            g_foliage_bound_basis_upload_mapped + previous_upload_offset,
+            private_b12.data(), source_b12.size_in_bytes);
+    }
+
+    D3D12_CONSTANT_BUFFER_VIEW_DESC private_b0_desc{};
+    private_b0_desc.BufferLocation =
+        g_foliage_bound_basis_upload->GetGPUVirtualAddress() + upload_offset;
+    private_b0_desc.SizeInBytes = source_b0.size_in_bytes;
+    g_create_cbv(
+        g_d3d12_device, &private_b0_desc, native_b0_descriptor);
+    store_cbv_descriptor(
+        native_b0_descriptor.ptr,
+        CbvDescriptorInfo{
+            private_b0_desc.BufferLocation, private_b0_desc.SizeInBytes});
+    if (previous_compensated) {
+        D3D12_CONSTANT_BUFFER_VIEW_DESC private_b12_desc{};
+        private_b12_desc.BufferLocation =
+            g_foliage_bound_basis_upload->GetGPUVirtualAddress() +
+                previous_upload_offset;
+        private_b12_desc.SizeInBytes = source_b12.size_in_bytes;
+        g_create_cbv(
+            g_d3d12_device, &private_b12_desc, native_b12_descriptor);
+        store_cbv_descriptor(
+            native_b12_descriptor.ptr,
+            CbvDescriptorInfo{
+                private_b12_desc.BufferLocation,
+                private_b12_desc.SizeInBytes});
+    }
+
+    const uint64_t corrected = g_foliage_bound_basis_corrected.fetch_add(
+        1, std::memory_order_relaxed) + 1;
+    if (g_config.runtime_diagnostics &&
+        g_foliage_bound_basis_route_logs.fetch_add(
+            1, std::memory_order_relaxed) < 24) {
+        const auto info = lookup_pipeline_info(pipeline);
+        log_line(
+            "V1419 foliage current/previous draw=%llu vs=0x%llX ps=0x%llX b0_size=%u b12_size=%u authority=%u current_descriptor_cpu=0x%zX previous_descriptor_cpu=0x%zX previous_pair=%llu previous_compensated=%u compensated=b0_rows_12_14_yz,b0_row17_xyz,b12_rows_4_6_yz,b12_row9_xyz source=engine_base_corrected_camera",
+            static_cast<unsigned long long>(corrected),
+            static_cast<unsigned long long>(info.vs_hash),
+            static_cast<unsigned long long>(info.ps_hash),
+            source_b0.size_in_bytes, source_b12.size_in_bytes,
+            authority_route, native_b0_descriptor.ptr,
+            native_b12_descriptor.ptr,
+            static_cast<unsigned long long>(previous_camera.pair_id),
+            previous_compensated ? 1u : 0u);
+    }
+    return true;
 }
 
 bool acquire_taau_compose_slot(
@@ -31087,11 +31694,12 @@ bool prepare_full_vr_frame_camera(
     // consume it. The original descriptor is restored immediately afterward.
     std::array<float, 512> corrected = original_camera;
     bool native_asymmetric_full_vr_projection_applied{};
+    bool shared_asymmetric_fallback_fov_ready{};
+    bool shared_asymmetric_fallback_fov_published{};
+    float shared_asymmetric_fallback_horizontal_span{};
+    float shared_asymmetric_fallback_vertical_fov{};
     NativeAsymmetricPairSlot* native_asymmetric_full_vr_slot{};
     uint8_t native_asymmetric_full_vr_eye_bit{};
-    const XrFovf* xr_fov = render_view_valid
-        ? &render_view.fov
-        : (g_xr_views.empty() ? nullptr : &g_xr_views[0].fov);
     const bool automatic_full_vr =
         g_config.cinema_full_vr &&
         g_automatic_full_vr_camera_active.load(std::memory_order_acquire) &&
@@ -31107,6 +31715,25 @@ bool prepare_full_vr_frame_camera(
             frame_fallback_uses_symmetric_projection({
                 native_asymmetric_noaa_route_active(),
                 automatic_full_vr});
+    const XrFovf* xr_fov{};
+    if (symmetric_asymmetric_full_vr_fallback) {
+        // [FIX:FULL-VR-FALLBACK-RAW-FOV V1424] V1418 publishes the centered
+        // fallback envelope for the final OpenXR submit. Under AER that
+        // published FOV returns in the next immutable render tag. Treating it
+        // as raw runtime geometry applies the 1/cover producer expansion again
+        // every frame (112 -> 123 -> ... -> 180 degrees) until REDengine
+        // culling reaches FLT_MAX sentinels and crashes. This producer is
+        // defined from the current raw runtime eye FOV only; if it is absent,
+        // fail closed instead of reviving the recursive input.
+        if (static_cast<size_t>(eye) >= g_xr_views.size()) {
+            return false;
+        }
+        xr_fov = &g_xr_views[static_cast<size_t>(eye)].fov;
+    } else {
+        xr_fov = render_view_valid
+            ? &render_view.fov
+            : (g_xr_views.empty() ? nullptr : &g_xr_views[0].fov);
+    }
     if (xr_fov != nullptr) {
         const float left = tanf(xr_fov->angleLeft);
         const float right = tanf(xr_fov->angleRight);
@@ -31156,6 +31783,11 @@ bool prepare_full_vr_frame_camera(
             corrected[7] = vertical_fov *
                 (180.0f / 3.14159265358979323846f);
             corrected[10] = horizontal_span / vertical_span;
+            if (symmetric_asymmetric_full_vr_fallback) {
+                shared_asymmetric_fallback_horizontal_span = horizontal_span;
+                shared_asymmetric_fallback_vertical_fov = vertical_fov;
+                shared_asymmetric_fallback_fov_ready = true;
+            }
         }
         // [FIX:FULL-VR-ASYMMETRIC-FALLBACK V1255 1/2] Normal factory pairs keep
         // their raw-FOV descriptor. A reused-camera fallback is centered in
@@ -31368,6 +32000,19 @@ bool prepare_full_vr_frame_camera(
             frame_camera, corrected.data(), sizeof(corrected))) {
         return false;
     }
+    // [FIX:OPENING-CUTSCENE-ASYM-FALLBACK-FOV V1418 2/2] Opening cutscenes
+    // can bypass the normal view factory while ASYM remains requested. Their
+    // proven fallback producer is deliberately centered, so publish its exact
+    // content FOV only after that corrected camera has been written. Mono and
+    // native asymmetric factory pairs remain unchanged.
+    if (symmetric_asymmetric_full_vr_fallback &&
+        !native_asymmetric_full_vr_projection_applied &&
+        shared_asymmetric_fallback_fov_ready) {
+        shared_asymmetric_fallback_fov_published =
+            publish_shared_mode3_projection_fov(
+                shared_asymmetric_fallback_horizontal_span,
+                shared_asymmetric_fallback_vertical_fov);
+    }
     if (native_asymmetric_full_vr_projection_applied &&
         native_asymmetric_full_vr_slot != nullptr &&
         native_asymmetric_full_vr_slot->pair_id.load(
@@ -31439,7 +32084,7 @@ bool prepare_full_vr_frame_camera(
         1, std::memory_order_relaxed) + 1;
     if (count <= 32 || count % 120 == 0) {
         log_cinema_camera_diagnostic(
-            "Full VR final frame camera applied count=%llu present=%llu eye=%d pair=%llu taau_reset=%d asymmetric=%d symmetric_asym_fallback=%d matrix_hash=0x%llX pos=%.5f,%.5f,%.5f fov=%.4f aspect=%.6f",
+            "Full VR final frame camera applied count=%llu present=%llu eye=%d pair=%llu taau_reset=%d asymmetric=%d symmetric_asym_fallback=%d shared_fov_published=%d matrix_hash=0x%llX pos=%.5f,%.5f,%.5f fov=%.4f aspect=%.6f",
             static_cast<unsigned long long>(count),
             static_cast<unsigned long long>(present),
             eye,
@@ -31447,6 +32092,7 @@ bool prepare_full_vr_frame_camera(
             new_fallback_episode ? 1 : 0,
             native_asymmetric_full_vr_projection_applied ? 1 : 0,
             symmetric_asymmetric_full_vr_fallback ? 1 : 0,
+            shared_asymmetric_fallback_fov_published ? 1 : 0,
             static_cast<unsigned long long>(fnv1a64(
                 corrected_matrix.data(), sizeof(corrected_matrix))),
             corrected_camera[0], corrected_camera[1], corrected_camera[2],
@@ -34637,13 +35283,8 @@ void __fastcall hook_engine_view_rebuild(float* view) {
                 native_asymmetric_marker_projection_valid = true;
             }
             if (g_config.hmd_freelook) {
-                const float horizontal_half = atanf(horizontal_span * 0.5f);
-                const float vertical_half = vertical_fov * 0.5f;
-                g_hmd_render_fov_left.store(-horizontal_half);
-                g_hmd_render_fov_right.store(horizontal_half);
-                g_hmd_render_fov_up.store(vertical_half);
-                g_hmd_render_fov_down.store(-vertical_half);
-                g_hmd_render_fov_valid.store(true);
+                publish_shared_mode3_projection_fov(
+                    horizontal_span, vertical_fov);
             }
         }
     }
@@ -41091,7 +41732,7 @@ void ensure_initialized() {
                 "focus_fire_b1=stereo_and_aer_centered_draw_proven "
                 "aer_taau_hud=scene_and_retained_pair_fail_open");
             log_line(
-                "witcher3vr dxgi proxy initialized build=V1417 base=V1416_final_openxr_subimage_fov_pair "
+                "witcher3vr dxgi proxy initialized build=V1424 base=V1422_full_vr_fallback_raw_fov "
                 "anchor_smoothing_ini=%d anchor_smoothing_seconds=%.4f "
                 "first_person_strafe_ini=%d mode3_aer_presentation=%d raytracing_enabled=%d raytracing_history_buffers=%d "
                 "aer_afw_enabled=%d persistent_registry=%d optiscaler_enabled=%d "
@@ -41146,6 +41787,14 @@ void ensure_initialized() {
             log_line(
                 "V1362 smoke world-up depth=reprojected_from_new_world_row10 cbv_cache=full_handle_hash_lock_free taau_stereo_identity=exact_cb10_producer_no_history_fallback projection_PSO=deferred_exact_runtime_fov smoke_visibility_diagnostic=removed hidden_draws=0 gpu_queries=0 f3=route_pipeline_renderdoc_only");
             log_line(
+                "V1420 smoke selector flight=cpu_pod_per_canonical_draw f3=variant_authority_pair_distance_margin rendering_changes=0 hidden_draws=0 gpu_queries=0 readbacks=0 waits=0");
+            log_line(
+                "V1421 smoke coherent_pair_selection=minimum_draw_b1_squared_distance exact_tie=newest pair_age_guard=unchanged_64 distance_guard=unchanged_0.0049 separation_guard=unchanged_0.0005");
+            log_line(
+                "V1422 smoke exact_eye_identity=selected_squared_distance_bit_exact_zero peer_distance=positive generic_distance_guard=unchanged_0.0049 generic_separation_guard=unchanged_0.0005 identical_eye_pair=reject");
+            log_line(
+                "V1424 full_vr_fallback_fov_source=raw_openxr_eye recursive_shared_fov_input=removed shared_fov_publication=retained taau_dlss_common=1 native_factory=unchanged");
+            log_line(
                 "V1363 dlss_scene_history_reset=removed_rejected_V1340 projection_switch_reset=V1331_only");
             log_line(
                 "V1364 strict_stereo_dlss_constants=original_builder_per_eye guard=state_0x6c peer_payload_replay=0 aer=unchanged route_flight=always_on_ram_f3");
@@ -41164,11 +41813,15 @@ void ensure_initialized() {
             log_line(
                 "V1408 clean_mono=V19005_net_port_from_V1357 launcher=mono_first schema=15 mode3_v1391_preserved=1");
             log_line(
-                "V1409 foliage=V18021_net_port_from_V1361 owners=5E2E73E55B072A74_7FC495F2BB36CAC0,F9282625E62BCC6A_5B6F5C6CA86B8C9D delivery=immutable_replacement_pso fixed=always_on runtime_ab=absent");
+                "V1419 foliage=V18025_net_port_from_V1361 owners=5E2E73E55B072A74_7FC495F2BB36CAC0,F9282625E62BCC6A_5B6F5C6CA86B8C9D camera_authority=engine_temporal_base_corrected target=native_transient_vertex_table_b0_b12 changed_floats_current=9 changed_floats_previous=9 retirement=exact_submitting_queue private_heap=0 descriptor_copies=0 heap_switches=0 root_rebinds=0 global_openxr_modes=1 shaders=original geometry=original culling=original");
             log_line(
                 "V1416 native_dlss_owner=public_streamline_v1409 mono=v19005_public_streamline aer_stereo=v1289_public_completion split_viewports=mode3_only private_ngx=optiscaler_only native_nvngx_direct_hooks=absent fallback=none");
             log_line(
                 "V1417 presentation_size=universal_final_openxr_subimage_fov_pair scale1=exact_identity pixels=resample_free foveated_rendering=preserved producer_temporal_transport=unchanged");
+            log_line(
+                "V1418 opening_cutscene_asym_fallback_fov=published_after_corrected_camera_write mono=unchanged native_asymmetric_factory=unchanged");
+            log_line(
+                "V1279 DLSS compatibility=public_streamline_aer_private_history_ngx_stereo legacy_module_agnostic_discovery=disabled_by_V1288");
             log_line(
                 "V1144 native temporal terrain family source=V15018 validated_via=V15017 terrain_match=exact_vs_ds_two_hs_pso_contract material_ps=wildcard terrain_hs=5B33D68BABD52A7E,9ABE7F60D2CFC2EB mode3_taau_native_full_motion=1 taau_terrain_replay=aer_and_stereo native_temporal_terrain_motion=1 diagnostic_independent=1 diagnostic_off_log_io=none locator_code=absent camera_binding=ds_b1_to_ps_b6_alias motion_formula=current_ndc_minus_history_ndc velocity_target=rt3_only overlay_psos=inherit_base_motion afw_compatible=1");
         }
@@ -46142,7 +46795,7 @@ void render_openxr_test_frame(
                     g_xr_cinema_projection_pipeline != nullptr &&
                     g_xr_cinema_projection_root_signature != nullptr &&
                     g_xr_cinema_projection_srv_heap != nullptr;
-                // V1417 freezes the established scale-1 transport rectangle.
+                // V1415 freezes the established scale-1 transport rectangle.
                 // Presentation Size no longer changes any copy, crop, fit,
                 // source selection or destination extent.
                 const UINT projection_width = copy_width;
@@ -46350,7 +47003,7 @@ void render_openxr_test_frame(
                     if (full_surface_projection &&
                         !full_surface_projection_logged.exchange(true)) {
                         log_line(
-                            "V1417 symmetric subimage candidate=%d "
+                            "V1415 symmetric subimage candidate=%d "
                             "mask=%d half_tan=%.6f,%.6f "
                             "image_rect=%d,%d %dx%d "
                             "crop0=%d,%d %dx%d crop1=%d,%d %dx%d "
@@ -47969,7 +48622,7 @@ void render_openxr_test_frame(
                         symmetric_subimage_route_logged{};
                     if (!symmetric_subimage_route_logged.exchange(true)) {
                         log_line(
-                            "V1417 projection transport fullscreen=%d "
+                            "V1415 projection transport fullscreen=%d "
                             "symmetric_direct=%d "
                             "native_asymmetric=%d native_direct=%d "
                             "crop0=%d,%d %dx%d crop1=%d,%d %dx%d "
@@ -49333,7 +49986,7 @@ void handle_f3_capture_hotkey(IDXGISwapChain* swapchain) {
     if (w3vr::pipeline_flight::enabled()) {
         w3vr::pipeline_flight::dump_last_ten_seconds();
     }
-    w3vr::route_flight::dump_last_seconds("V1417", 15);
+    w3vr::route_flight::dump_last_seconds("V1424", 15);
     trigger_renderdoc_capture(
         g_game_swapchain != nullptr ? g_game_swapchain : swapchain);
 }
@@ -50389,7 +51042,6 @@ extern "C" HRESULT WINAPI DXGIDisableVBlankVirtualization() {
 
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, void* reserved) {
     if (reason == DLL_PROCESS_ATTACH) {
-        g_proxy_module = module;
         DisableThreadLibraryCalls(module);
     } else if (reason == DLL_PROCESS_DETACH) {
         // At process termination dependency teardown order is unspecified and
