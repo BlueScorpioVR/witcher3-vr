@@ -37,7 +37,11 @@
 #include "shadow_cascade_authority_policy.h"
 #include "taau_submission_policy.h"
 
-// V1414 makes the AFW F6 visual diagnostic available independently from all
+// V1416 restores V1409's public Streamline owner for every native-DLSS route.
+// Private NGX Create/Evaluate/Release belongs exclusively to OptiScaler when
+// its sidecar is explicitly enabled; the native nvngx_dlss.dll is never hooked
+// directly. V1414 makes the AFW F6 visual diagnostic available independently
+// from all
 // logging controls. V1411 replaces the legacy launcher RTX/ASYM controls with an OptiScaler
 // sidecar switch, always-on ASYM startup, independent lightweight route and
 // performance logging, and reorganized runtime/HUD/debug bindings.
@@ -604,6 +608,18 @@ bool temporal_backend_is_taau() {
 
 bool temporal_backend_is_dlss() {
     return g_config.temporal_backend == TemporalBackend::Dlss;
+}
+
+// [FIX:NATIVE-DLSS-OWNER-ISOLATION V1416 1/8] Native Mode-3 DLSS keeps the
+// validated public Streamline completion owner from V1409. Private direct NGX
+// belongs exclusively to the explicitly enabled OptiScaler backend.
+bool native_dlss_public_streamline_owner_active() {
+    return temporal_backend_is_dlss() && !g_config.optiscaler_enabled &&
+        g_config.openxr_enabled && g_config.openxr_mode == 3;
+}
+
+bool optiscaler_private_ngx_owner_active() {
+    return temporal_backend_is_dlss() && g_config.optiscaler_enabled;
 }
 
 bool high_frequency_runtime_diagnostics_active() {
@@ -3363,6 +3379,49 @@ struct StreamlineOutputFrameState {
     bool render_view_valid{};
 };
 thread_local StreamlineOutputFrameState g_streamline_output_frame{};
+struct StreamlineDlssEvaluateSnapshot {
+    EngineFrameTag route_tag{};
+    ID3D12Resource* depth{};
+    ID3D12Resource* motion_vectors{};
+    ID3D12Resource* output{};
+    D3D12_RESOURCE_STATES depth_state{
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE};
+    D3D12_RESOURCE_STATES motion_state{
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE};
+    float motion_scale_x{};
+    float motion_scale_y{};
+    NativeAsymmetricDlssJitterOverride jitter{};
+    bool route_valid{};
+    bool depth_valid{};
+    bool motion_vectors_valid{};
+    bool output_valid{};
+    bool motion_scale_valid{};
+    bool jitter_applied_to_streamline{};
+};
+thread_local StreamlineDlssEvaluateSnapshot
+    g_streamline_dlss_evaluate_snapshot{};
+constexpr size_t kStreamlineDlssCallbackConstantsSlotCount = 128;
+constexpr size_t kStreamlineDlssCallbackConstantsBytes = 0x1A0;
+struct StreamlineDlssCallbackConstantsSlot {
+    std::array<float, kStreamlineDlssCallbackConstantsBytes / sizeof(float)>
+        constants{};
+    uint32_t frame_token{};
+    uint32_t eye{UINT32_MAX};
+    bool valid{};
+};
+std::mutex g_streamline_dlss_callback_constants_mutex{};
+std::array<StreamlineDlssCallbackConstantsSlot,
+    kStreamlineDlssCallbackConstantsSlotCount>
+    g_streamline_dlss_callback_constants{};
+std::atomic<uint32_t> g_streamline_dlss_callback_constants_logs{};
+std::atomic<uint32_t> g_native_dlss_public_completion_logs{};
+
+size_t streamline_dlss_callback_constants_slot(
+    uint32_t frame_token,
+    uint32_t eye) {
+    return (static_cast<size_t>(frame_token) * 2u + (eye & 1u)) %
+        kStreamlineDlssCallbackConstantsSlotCount;
+}
 
 struct CleanMonoDlssTemporalState {
     std::array<float, 12> matched_camera{};
@@ -5253,6 +5312,8 @@ bool prepare_native_asymmetric_dlss_jitter_override_values(
     NativeAsymmetricDlssJitterOverride& override_state);
 bool commit_native_asymmetric_dlss_input(
     const NativeAsymmetricDlssJitterOverride& override_state);
+bool commit_streamline_native_asymmetric_dlss_input(
+    const EngineFrameTag& route_tag);
 
 void STDMETHODCALLTYPE hook_draw_indexed_instanced(
     ID3D12GraphicsCommandList* command_list,
@@ -9208,6 +9269,100 @@ bool current_puredark_afw_direct_route_tag(
         route_tag.generation == capture_generation;
 }
 
+bool same_streamline_dlss_callback_identity(
+    const EngineFrameTag& lhs,
+    const EngineFrameTag& rhs) {
+    return lhs.task_provenance_valid && rhs.task_provenance_valid &&
+        lhs.eye == rhs.eye && lhs.generation == rhs.generation &&
+        lhs.pair_id == rhs.pair_id;
+}
+
+StreamlineDlssEvaluateSnapshot* acquire_streamline_dlss_evaluate_snapshot(
+    uint32_t routed_eye) {
+    if (!native_dlss_public_streamline_owner_active() || routed_eye > 1) {
+        return nullptr;
+    }
+    EngineFrameTag route_tag{};
+    if (!current_puredark_afw_direct_route_tag(routed_eye, route_tag)) {
+        return nullptr;
+    }
+    auto& snapshot = g_streamline_dlss_evaluate_snapshot;
+    if (!snapshot.route_valid ||
+        !same_streamline_dlss_callback_identity(
+            snapshot.route_tag, route_tag)) {
+        snapshot = {};
+        snapshot.route_tag = route_tag;
+        snapshot.route_valid = true;
+    }
+    return &snapshot;
+}
+
+bool streamline_dlss_evaluate_snapshot_matches_current(
+    uint32_t routed_eye) {
+    const auto& snapshot = g_streamline_dlss_evaluate_snapshot;
+    return snapshot.route_valid && g_streamline_dlss_route_tag_valid &&
+        routed_eye <= 1 &&
+        same_streamline_dlss_callback_identity(
+            snapshot.route_tag, g_streamline_dlss_route_tag) &&
+        snapshot.route_tag.eye == routed_eye &&
+        snapshot.route_tag.generation ==
+            g_streamline_capture_generation.load(std::memory_order_acquire);
+}
+
+void capture_streamline_dlss_callback_resource(
+    const void* resource,
+    uint32_t tag,
+    uint32_t routed_eye) {
+    if (tag != 0 && tag != 1 && tag != 4) {
+        return;
+    }
+    auto* snapshot = acquire_streamline_dlss_evaluate_snapshot(routed_eye);
+    if (snapshot == nullptr) {
+        return;
+    }
+    ID3D12Resource* native{};
+    uint32_t state = static_cast<uint32_t>(
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    if (resource != nullptr) {
+        memcpy(&native, static_cast<const uint8_t*>(resource) + 8,
+            sizeof(native));
+        memcpy(&state, static_cast<const uint8_t*>(resource) + 32,
+            sizeof(state));
+    }
+    if (tag == 0) {
+        snapshot->depth = native;
+        snapshot->depth_state = static_cast<D3D12_RESOURCE_STATES>(state);
+        snapshot->depth_valid = native != nullptr;
+    } else if (tag == 1) {
+        snapshot->motion_vectors = native;
+        snapshot->motion_state = static_cast<D3D12_RESOURCE_STATES>(state);
+        snapshot->motion_vectors_valid = native != nullptr;
+    } else {
+        snapshot->output = native;
+        snapshot->output_valid = native != nullptr;
+    }
+}
+
+void prepare_streamline_dlss_callback_constants(
+    void* constants,
+    uint32_t routed_eye) {
+    if (constants == nullptr) {
+        return;
+    }
+    auto* snapshot = acquire_streamline_dlss_evaluate_snapshot(routed_eye);
+    if (snapshot == nullptr) {
+        return;
+    }
+    auto* values = static_cast<float*>(constants);
+    snapshot->motion_scale_x = values[82];
+    snapshot->motion_scale_y = values[83];
+    snapshot->motion_scale_valid =
+        std::isfinite(snapshot->motion_scale_x) &&
+        std::isfinite(snapshot->motion_scale_y);
+    snapshot->jitter = {};
+    snapshot->jitter_applied_to_streamline = false;
+}
+
 // [FIX:AER-AFW-EXACT-NATIVE-PROJECTION V1350 1/4] Full-frame native pixels and
 // AFW must use the same two frozen tangent spaces. Streamline exposes the
 // larger shared-envelope projection here. Rebuild the real eye's complete
@@ -9414,6 +9569,108 @@ void capture_puredark_afw_camera(
             captured.render_views_valid ? 1u : 0u,
             captured.exact_render_view_valid ? 1u : 0u);
     }
+}
+
+bool hydrate_streamline_dlss_callback_constants(
+    uint32_t frame_token,
+    uint32_t routed_eye,
+    StreamlineDlssCallbackConstantsSlot* hydrated) {
+    if (!native_dlss_public_streamline_owner_active() || routed_eye > 1) {
+        return false;
+    }
+    StreamlineDlssCallbackConstantsSlot cached{};
+    {
+        std::scoped_lock lock{g_streamline_dlss_callback_constants_mutex};
+        cached = g_streamline_dlss_callback_constants[
+            streamline_dlss_callback_constants_slot(frame_token, routed_eye)];
+    }
+    if (!cached.valid || cached.frame_token != frame_token ||
+        cached.eye != routed_eye) {
+        if (take_bounded_log_slot(
+                g_streamline_dlss_callback_constants_logs, 32)) {
+            log_line(
+                "V1416 native DLSS Streamline constants miss token=%u "
+                "eye=%u cached_token=%u cached_valid=%u",
+                frame_token, routed_eye, cached.frame_token,
+                cached.valid ? 1u : 0u);
+        }
+        return false;
+    }
+    if (hydrated != nullptr) {
+        *hydrated = cached;
+    }
+    auto* snapshot = acquire_streamline_dlss_evaluate_snapshot(routed_eye);
+    if (snapshot == nullptr) {
+        return false;
+    }
+    const auto* values = cached.constants.data();
+    snapshot->motion_scale_x = values[82];
+    snapshot->motion_scale_y = values[83];
+    snapshot->motion_scale_valid =
+        std::isfinite(snapshot->motion_scale_x) &&
+        std::isfinite(snapshot->motion_scale_y);
+    capture_puredark_afw_camera(cached.constants.data(), routed_eye);
+    return snapshot->motion_scale_valid;
+}
+
+bool resubmit_streamline_native_asymmetric_dlss_jitter(
+    const StreamlineDlssCallbackConstantsSlot& cached,
+    uint32_t frame_token,
+    uint32_t routed_viewport,
+    uint32_t routed_eye) {
+    auto& snapshot = g_streamline_dlss_evaluate_snapshot;
+    if (!cached.valid || cached.frame_token != frame_token ||
+        cached.eye != routed_eye || !snapshot.route_valid ||
+        !snapshot.motion_vectors_valid || g_sl_set_constants == nullptr) {
+        return false;
+    }
+
+    auto corrected = cached.constants;
+    auto* values = corrected.data();
+    const auto motion_desc = snapshot.motion_vectors->GetDesc();
+    float pixel_scale_x = values[82];
+    float pixel_scale_y = values[83];
+    if (std::fabs(pixel_scale_x) <= 4.0f && motion_desc.Width > 0) {
+        pixel_scale_x *= static_cast<float>(motion_desc.Width);
+    }
+    if (std::fabs(pixel_scale_y) <= 4.0f && motion_desc.Height > 0) {
+        pixel_scale_y *= static_cast<float>(motion_desc.Height);
+    }
+
+    NativeAsymmetricDlssJitterOverride jitter{};
+    if (!prepare_native_asymmetric_dlss_jitter_override_values(
+            values[80], values[81], pixel_scale_x, pixel_scale_y,
+            static_cast<unsigned>(motion_desc.Width), motion_desc.Height,
+            snapshot.route_tag.pair_id, routed_eye, jitter)) {
+        snapshot.jitter = jitter;
+        return false;
+    }
+
+    values[80] = jitter.pure_x;
+    values[81] = jitter.pure_y;
+    const int constants_result = g_sl_set_constants(
+        corrected.data(), frame_token, routed_viewport);
+    jitter.applied = true;
+    snapshot.jitter = jitter;
+    snapshot.jitter_applied_to_streamline = true;
+    if (g_config.runtime_diagnostics) {
+        static std::atomic<uint32_t> jitter_logs{};
+        const uint32_t log_index = jitter_logs.fetch_add(
+            1, std::memory_order_relaxed);
+        if (log_index < 64) {
+            log_line(
+                "V1416 native DLSS public jitter sample=%u token=%u "
+                "viewport=%u eye=%u pair=%llu raw=%.6f,%.6f "
+                "pure=%.6f,%.6f extent=%llux%u sl_constants=%d",
+                log_index, frame_token, routed_viewport, routed_eye,
+                static_cast<unsigned long long>(snapshot.route_tag.pair_id),
+                jitter.original_x, jitter.original_y,
+                jitter.pure_x, jitter.pure_y,
+                static_cast<unsigned long long>(motion_desc.Width),
+                motion_desc.Height, constants_result);
+        }
+    }
+    return true;
 }
 
 int32_t capture_puredark_afw_dlss_inputs_from_resources(
@@ -26192,6 +26449,27 @@ void STDMETHODCALLTYPE hook_resource_barrier(
     const bool clean_mode3_fast_path =
         g_clean_mode3_resource_barrier_fast_path &&
         !g_compute_probe_active.load(std::memory_order_relaxed);
+    if (native_dlss_public_streamline_owner_active() &&
+        barriers != nullptr &&
+        g_streamline_dlss_evaluate_snapshot.route_valid) {
+        auto& snapshot = g_streamline_dlss_evaluate_snapshot;
+        for (UINT barrier_index = 0; barrier_index < num_barriers;
+            ++barrier_index) {
+            const auto& barrier = barriers[barrier_index];
+            if (barrier.Type != D3D12_RESOURCE_BARRIER_TYPE_TRANSITION ||
+                barrier.Transition.pResource == nullptr) {
+                continue;
+            }
+            if (snapshot.depth_valid &&
+                barrier.Transition.pResource == snapshot.depth) {
+                snapshot.depth_state = barrier.Transition.StateAfter;
+            }
+            if (snapshot.motion_vectors_valid &&
+                barrier.Transition.pResource == snapshot.motion_vectors) {
+                snapshot.motion_state = barrier.Transition.StateAfter;
+            }
+        }
+    }
     if (!clean_mode3_fast_path &&
         g_config.ngx_trace && barriers != nullptr) {
         for (UINT barrier_index = 0; barrier_index < num_barriers; ++barrier_index) {
@@ -37241,6 +37519,12 @@ void apply_engine_dual_render_transition(
         g_sequential_dlss_command_tags.clear();
     }
     {
+        std::scoped_lock lock{g_streamline_dlss_callback_constants_mutex};
+        for (auto& cached : g_streamline_dlss_callback_constants) {
+            cached = {};
+        }
+    }
+    {
         std::scoped_lock lock{g_streamline_command_list_eye_mutex};
         g_streamline_command_list_routes.clear();
     }
@@ -38428,6 +38712,15 @@ void __fastcall hook_sl_set_constants(void* constants, uint32_t frame_token, uin
             static_cast<const uint8_t*>(constants)[0x19F] != 0);
     }
 
+    // [FIX:NATIVE-DLSS-OWNER-ISOLATION V1416 2/8] Public Streamline owns a
+    // distinct viewport/history per Mode-3 eye. OptiScaler keeps its native
+    // single viewport because its private NGX owner supplies two histories.
+    if (native_dlss_public_streamline_owner_active() &&
+        geometry_stereo_transport_active() &&
+        g_config.engine_factory_stereo_offset != 0.0f) {
+        viewport |= eye;
+    }
+
     if (constants != nullptr && g_config.streamline_trace &&
         g_present_count.load() >= static_cast<uint64_t>(g_config.streamline_trace_start_frame) &&
         take_bounded_log_slot(g_streamline_trace_counts[eye], 4)) {
@@ -38512,6 +38805,19 @@ void __fastcall hook_sl_set_constants(void* constants, uint32_t frame_token, uin
         asymmetric_sl.thread_id = GetCurrentThreadId();
     }
 
+    prepare_streamline_dlss_callback_constants(constants, eye);
+    if (native_dlss_public_streamline_owner_active() &&
+        constants != nullptr) {
+        std::scoped_lock lock{g_streamline_dlss_callback_constants_mutex};
+        auto& cached = g_streamline_dlss_callback_constants[
+            streamline_dlss_callback_constants_slot(frame_token, eye)];
+        memcpy(cached.constants.data(), constants,
+            kStreamlineDlssCallbackConstantsBytes);
+        cached.frame_token = frame_token;
+        cached.eye = eye;
+        cached.valid = true;
+    }
+
     if (temporal_backend_is_dlss()) {
         uint32_t jitter_x_bits{};
         uint32_t jitter_y_bits{};
@@ -38585,6 +38891,15 @@ void __fastcall hook_sl_set_constants(void* constants, uint32_t frame_token, uin
     }
 }
 
+uint32_t streamline_viewport_for_eye(uint32_t viewport) {
+    if (!native_dlss_public_streamline_owner_active() ||
+        !geometry_stereo_transport_active() ||
+        g_config.engine_factory_stereo_offset == 0.0f) {
+        return viewport;
+    }
+    return viewport | streamline_eye();
+}
+
 // [FIX:DLSS-PACKED 4/10] Copy an eye-specific private result back to the
 // canonical Streamline resource expected by the game's post-processing chain.
 int __fastcall hook_sl_set_tag(const void* resource, uint32_t tag, uint32_t viewport, const void* extent) {
@@ -38602,6 +38917,7 @@ int __fastcall hook_sl_set_tag(const void* resource, uint32_t tag, uint32_t view
         (g_config.logging_enabled || w3vr::route_flight::enabled())) {
         memcpy(&tagged_extent, extent, sizeof(tagged_extent));
     }
+    capture_streamline_dlss_callback_resource(resource, tag, eye);
     capture_clean_mono_dlss_resource(resource, tag);
     if (resource != nullptr && (tag == 0 || tag == 1 || tag == 3) &&
         g_config.ngx_trace &&
@@ -38657,13 +38973,56 @@ int __fastcall hook_sl_set_tag(const void* resource, uint32_t tag, uint32_t view
         g_streamline_output_frame.render_view_valid = g_engine_render_view_valid;
     }
 
-    return g_sl_set_tag(resource, tag, viewport, extent);
+    const uint32_t routed_viewport = streamline_viewport_for_eye(viewport);
+    if (temporal_backend_is_dlss()) {
+        uint32_t state{};
+        if (resource != nullptr) {
+            memcpy(&state,
+                static_cast<const uint8_t*>(resource) + 32,
+                sizeof(state));
+        }
+        const auto& snapshot = g_streamline_dlss_evaluate_snapshot;
+        record_route_flight(
+            w3vr::route_flight::EventCode::DlssTag,
+            static_cast<int32_t>(eye),
+            snapshot.route_valid ? snapshot.route_tag.pair_id : 0,
+            0,
+            snapshot.route_valid ? snapshot.route_tag.generation
+                                 : UINT32_MAX,
+            0,
+            (resource != nullptr ? 0x01u : 0u) |
+                (extent != nullptr ? 0x02u : 0u) |
+                (snapshot.route_valid ? 0x04u : 0u),
+            tag,
+            (viewport & 0xFFFFu) |
+                ((routed_viewport & 0xFFFFu) << 16),
+            state,
+            (tagged_extent.width & 0xFFFFu) |
+                ((tagged_extent.height & 0xFFFFu) << 16));
+    }
+    return g_sl_set_tag(resource, tag, routed_viewport, extent);
 }
 
 int __fastcall hook_sl_set_feature_constants(
     uint32_t feature, const void* constants, uint32_t frame_token, uint32_t viewport) {
+    const uint32_t routed_viewport = feature == 0
+        ? streamline_viewport_for_eye(viewport)
+        : viewport;
+    if (feature == 0 && temporal_backend_is_dlss()) {
+        const auto& snapshot = g_streamline_dlss_evaluate_snapshot;
+        record_route_flight(
+            w3vr::route_flight::EventCode::DlssTag,
+            static_cast<int32_t>(streamline_eye()),
+            snapshot.route_valid ? snapshot.route_tag.pair_id : 0,
+            0,
+            snapshot.route_valid ? snapshot.route_tag.generation
+                                 : UINT32_MAX,
+            1,
+            constants != nullptr ? 0x01u : 0u,
+            feature, frame_token, viewport, routed_viewport);
+    }
     return g_sl_set_feature_constants(
-        feature, constants, frame_token, viewport);
+        feature, constants, frame_token, routed_viewport);
 }
 
 int __fastcall hook_sl_evaluate_feature(
@@ -38676,7 +39035,9 @@ int __fastcall hook_sl_evaluate_feature(
     if (g_engine_dual_render_active.load() && feature == 0 &&
         take_bounded_log_slot(g_streamline_dual_evaluate_log_count, 32)) {
         log_line(
-            "V1410 Streamline pass-through command_list=%p thread_eye=%d present=%llu token=%u viewport=%u",
+            "V1416 Streamline evaluate owner=%s command_list=%p thread_eye=%d present=%llu token=%u viewport=%u",
+            native_dlss_public_streamline_owner_active()
+                ? "native_public" : "optiscaler_pass_through",
             command_buffer, g_engine_render_eye,
             static_cast<unsigned long long>(g_present_count.load()),
             frame_token, viewport);
@@ -38684,8 +39045,69 @@ int __fastcall hook_sl_evaluate_feature(
     dlss_gpu_profile_mark(
         static_cast<ID3D12GraphicsCommandList*>(command_buffer), 3);
 
+    const bool public_streamline_completion = feature == 0 &&
+        native_dlss_public_streamline_owner_active();
+    const uint32_t routed_viewport = public_streamline_completion
+        ? streamline_viewport_for_eye(viewport)
+        : viewport;
     auto* command_list = static_cast<ID3D12GraphicsCommandList*>(
         command_buffer);
+    const uint32_t eye = streamline_eye();
+    StreamlineDlssCallbackConstantsSlot callback_constants{};
+    const bool callback_constants_valid = public_streamline_completion &&
+        hydrate_streamline_dlss_callback_constants(
+            frame_token, eye, &callback_constants);
+    const bool streamline_snapshot_active = public_streamline_completion &&
+        command_list != nullptr &&
+        streamline_dlss_evaluate_snapshot_matches_current(eye);
+    int32_t puredark_afw_bundle_slot = -1;
+    bool public_jitter_applied{};
+    if (streamline_snapshot_active) {
+        const auto& snapshot = g_streamline_dlss_evaluate_snapshot;
+        record_streamline_command_list_eye(command_list, eye);
+        ID3D12GraphicsCommandList* const afw_recording_command_list =
+            resolve_native_command_list(command_list);
+        if (callback_constants_valid) {
+            public_jitter_applied =
+                resubmit_streamline_native_asymmetric_dlss_jitter(
+                    callback_constants, frame_token, routed_viewport, eye);
+        }
+        if (snapshot.depth_valid && snapshot.motion_vectors_valid &&
+            snapshot.output_valid && snapshot.motion_scale_valid) {
+            const auto motion_desc = snapshot.motion_vectors->GetDesc();
+            float motion_scale_x = snapshot.motion_scale_x;
+            float motion_scale_y = snapshot.motion_scale_y;
+            if (std::fabs(motion_scale_x) <= 4.0f && motion_desc.Width > 0) {
+                motion_scale_x *= static_cast<float>(motion_desc.Width);
+            }
+            if (std::fabs(motion_scale_y) <= 4.0f && motion_desc.Height > 0) {
+                motion_scale_y *= static_cast<float>(motion_desc.Height);
+            }
+            puredark_afw_bundle_slot =
+                capture_puredark_afw_dlss_inputs_from_resources(
+                    afw_recording_command_list,
+                    snapshot.depth, snapshot.depth_state,
+                    snapshot.motion_vectors, snapshot.motion_state,
+                    snapshot.output, motion_scale_x, motion_scale_y, eye);
+        }
+    }
+    if (feature == 0) {
+        const auto& snapshot = g_streamline_dlss_evaluate_snapshot;
+        record_route_flight(
+            w3vr::route_flight::EventCode::DlssEvaluate,
+            static_cast<int32_t>(eye),
+            snapshot.route_valid ? snapshot.route_tag.pair_id : 0,
+            0,
+            snapshot.route_valid ? snapshot.route_tag.generation
+                                 : UINT32_MAX,
+            0,
+            (public_streamline_completion ? 0x04u : 0u) |
+                (streamline_snapshot_active ? 0x02u : 0u) |
+                (callback_constants_valid ? 0x08u : 0u),
+            frame_token, viewport, routed_viewport,
+            static_cast<uint32_t>(puredark_afw_bundle_slot));
+    }
+
     CleanMonoDlssTemporalState clean_mono_consumed{};
     const bool clean_mono_dlss_evaluation = feature == 0 &&
         clean_mono_transport_active() && temporal_backend_is_dlss();
@@ -38707,11 +39129,11 @@ int __fastcall hook_sl_evaluate_feature(
         }
     }
 
-    // Mode 3 is a strict public Streamline pass-through; its completion owner
-    // is the private direct-NGX path. Clean Mono retains only its required
-    // pre-evaluate motion dispatch on the unwrapped native command list.
+    // [FIX:NATIVE-DLSS-OWNER-ISOLATION V1416 3/8] Native Mode 3 completes at
+    // this public Streamline boundary. OptiScaler remains pass-through here
+    // and completes only inside its private direct-NGX owner.
     const int result = g_sl_evaluate_feature(
-        command_buffer, feature, frame_token, viewport);
+        command_buffer, feature, frame_token, routed_viewport);
     if (clean_mono_dlss_dispatched && result != 0) {
         {
             std::scoped_lock lock{g_clean_mono_dlss_mutex};
@@ -38744,6 +39166,61 @@ int __fastcall hook_sl_evaluate_feature(
                 static_cast<unsigned long long>(
                     g_present_count.load(std::memory_order_relaxed)));
         }
+    }
+    if (public_streamline_completion) {
+        const bool completion_success = result != 0;
+        const NVSDK_NGX_Result completion_result = completion_success
+            ? NVSDK_NGX_Result_Success
+            : NVSDK_NGX_Result_Fail;
+        finalize_puredark_afw_dlss_submission(
+            command_list, puredark_afw_bundle_slot, completion_result);
+        finalize_dlss_cache_submission(command_list, completion_result);
+        if (completion_success && public_jitter_applied) {
+            commit_native_asymmetric_dlss_input(
+                g_streamline_dlss_evaluate_snapshot.jitter);
+            commit_streamline_native_asymmetric_dlss_input(
+                g_streamline_dlss_evaluate_snapshot.route_tag);
+        } else if (completion_success && streamline_snapshot_active &&
+            !mode3_aer_presentation_active()) {
+            commit_streamline_native_asymmetric_dlss_input(
+                g_streamline_dlss_evaluate_snapshot.route_tag);
+        }
+        const uint32_t log_index =
+            g_native_dlss_public_completion_logs.fetch_add(
+                1, std::memory_order_relaxed);
+        if (g_config.runtime_diagnostics && log_index < 64) {
+            const auto& snapshot = g_streamline_dlss_evaluate_snapshot;
+            log_line(
+                "V1416 native DLSS owner=public_streamline sample=%u "
+                "raw_sl=%d success=%u snapshot=%u constants=%u jitter=%u "
+                "bundle=%u eye=%u pair=%llu viewport=%u->%u",
+                log_index, result, completion_success ? 1u : 0u,
+                streamline_snapshot_active ? 1u : 0u,
+                callback_constants_valid ? 1u : 0u,
+                public_jitter_applied ? 1u : 0u,
+                puredark_afw_bundle_slot >= 0 ? 1u : 0u,
+                eye,
+                static_cast<unsigned long long>(
+                    snapshot.route_valid ? snapshot.route_tag.pair_id : 0),
+                viewport, routed_viewport);
+        }
+        const auto& snapshot = g_streamline_dlss_evaluate_snapshot;
+        record_route_flight(
+            w3vr::route_flight::EventCode::DlssEvaluate,
+            static_cast<int32_t>(eye),
+            snapshot.route_valid ? snapshot.route_tag.pair_id : 0,
+            0,
+            snapshot.route_valid ? snapshot.route_tag.generation
+                                 : UINT32_MAX,
+            1,
+            (completion_success ? 0x01u : 0u) |
+                (streamline_snapshot_active ? 0x02u : 0u) |
+                (callback_constants_valid ? 0x08u : 0u) |
+                (public_jitter_applied ? 0x10u : 0u) |
+                (puredark_afw_bundle_slot >= 0 ? 0x20u : 0u),
+            frame_token, viewport, routed_viewport,
+            static_cast<uint32_t>(result));
+        g_streamline_dlss_evaluate_snapshot = {};
     }
     dlss_gpu_profile_mark(
         static_cast<ID3D12GraphicsCommandList*>(command_buffer), 4);
@@ -39100,6 +39577,29 @@ bool commit_native_asymmetric_dlss_input(
             override_state.pair_id ||
         pair_slot.generation.load(std::memory_order_acquire) !=
             override_state.generation ||
+        (pair_slot.factory_mask.load(std::memory_order_acquire) & eye_bit) == 0 ||
+        (pair_slot.temporal_mask.load(std::memory_order_acquire) & eye_bit) == 0) {
+        return false;
+    }
+    pair_slot.dlss_input_mask.fetch_or(eye_bit, std::memory_order_release);
+    return true;
+}
+
+bool commit_streamline_native_asymmetric_dlss_input(
+    const EngineFrameTag& route_tag) {
+    if (!native_dlss_public_streamline_owner_active() ||
+        !native_asymmetric_noaa_route_active() || route_tag.eye > 1 ||
+        route_tag.pair_id == 0 || route_tag.pair_id == UINT64_MAX) {
+        return false;
+    }
+    std::scoped_lock slot_lock{g_native_asymmetric_pair_slot_mutex};
+    auto& pair_slot = g_native_asymmetric_pair_slots[
+        route_tag.pair_id % kNativeAsymmetricPairSlotCount];
+    const uint8_t eye_bit = static_cast<uint8_t>(1u << route_tag.eye);
+    if (pair_slot.pair_id.load(std::memory_order_acquire) !=
+            route_tag.pair_id ||
+        pair_slot.generation.load(std::memory_order_acquire) !=
+            route_tag.generation ||
         (pair_slot.factory_mask.load(std::memory_order_acquire) & eye_bit) == 0 ||
         (pair_slot.temporal_mask.load(std::memory_order_acquire) & eye_bit) == 0) {
         return false;
@@ -39761,7 +40261,11 @@ bool initialize_optiscaler_backend() {
 }
 
 void install_ngx_dlss_hook() {
-    if (!temporal_backend_is_dlss() ||
+    // [FIX:NATIVE-DLSS-OWNER-ISOLATION V1416 4/8] Never resolve or hook the
+    // game's native nvngx_dlss.dll. This owner exists only for the explicitly
+    // loaded OptiScaler payload.
+    if (!optiscaler_private_ngx_owner_active() ||
+        g_optiscaler_module == nullptr ||
         (!g_config.ngx_trace && !asymmetric_authority_audit_active() &&
             !puredark_afw_mode3_aer_dlss_route_configured() &&
             !dlss_submitted_cache_route_active()) ||
@@ -39774,9 +40278,7 @@ void install_ngx_dlss_hook() {
         return;
     }
 
-    HMODULE module = g_config.optiscaler_enabled
-        ? g_optiscaler_module
-        : GetModuleHandleW(L"nvngx_dlss.dll");
+    HMODULE module = g_optiscaler_module;
     auto* evaluate_target = module != nullptr
         ? GetProcAddress(module, "NVSDK_NGX_D3D12_EvaluateFeature")
         : nullptr;
@@ -39826,9 +40328,8 @@ void install_ngx_dlss_hook() {
         g_ngx_evaluate_feature = nullptr;
         g_ngx_release_feature = nullptr;
         log_line(
-            "V21008 private NGX owner hook failed backend=%s create=%s "
+            "V1416 OptiScaler private NGX owner hook failed create=%s "
             "evaluate=%s release=%s apply=%s fallback=none",
-            g_config.optiscaler_enabled ? "optiscaler" : "native",
             MH_StatusToString(create_status),
             MH_StatusToString(evaluate_status),
             MH_StatusToString(release_status),
@@ -39837,10 +40338,9 @@ void install_ngx_dlss_hook() {
     }
 
     log_line(
-        "V21008 DLSS owner=private_direct_ngx backend=%s "
+        "V1416 DLSS owner=private_direct_ngx backend=optiscaler "
         "streamline=pass_through viewport=native_single histories=two "
         "create=%p evaluate=%p release=%p",
-        g_config.optiscaler_enabled ? "optiscaler" : "native",
         create_target, evaluate_target, release_target);
 }
 
@@ -40082,7 +40582,7 @@ void install_streamline_hook() {
     }
 
     if (g_sl_set_constants != nullptr) {
-        if (temporal_backend_is_dlss()) {
+        if (optiscaler_private_ngx_owner_active()) {
             install_ngx_dlss_hook();
         }
         return;
@@ -40115,7 +40615,7 @@ void install_streamline_hook() {
         log_line("Streamline viewport hooks failed constants=%p tag=%p feature_constants=%p evaluate=%p",
             constants_target, tag_target, feature_constants_target, evaluate_target);
     }
-    if (temporal_backend_is_dlss()) {
+    if (optiscaler_private_ngx_owner_active()) {
         install_ngx_dlss_hook();
     }
 }
@@ -40524,7 +41024,7 @@ void ensure_initialized() {
         initialize_renderdoc_capture_api();
         MH_Initialize();
         initialize_optiscaler_backend();
-        if (temporal_backend_is_dlss()) {
+        if (optiscaler_private_ngx_owner_active()) {
             install_ngx_dlss_hook();
         }
         install_renderdoc_d3d12_create_device_bridge();
@@ -40586,7 +41086,7 @@ void ensure_initialized() {
                 "focus_fire_b1=stereo_and_aer_centered_draw_proven "
                 "aer_taau_hud=scene_and_retained_pair_fail_open");
             log_line(
-                "witcher3vr dxgi proxy initialized build=V1414 base=V1413_launcher_optiscaler_afw_controls "
+                "witcher3vr dxgi proxy initialized build=V1416 base=V1414_native_streamline_optiscaler_ngx_only "
                 "anchor_smoothing_ini=%d anchor_smoothing_seconds=%.4f "
                 "first_person_strafe_ini=%d mode3_aer_presentation=%d raytracing_enabled=%d raytracing_history_buffers=%d "
                 "aer_afw_enabled=%d persistent_registry=%d optiscaler_enabled=%d "
@@ -40663,7 +41163,7 @@ void ensure_initialized() {
             log_line(
                 "V1409 foliage=V18021_net_port_from_V1361 owners=5E2E73E55B072A74_7FC495F2BB36CAC0,F9282625E62BCC6A_5B6F5C6CA86B8C9D delivery=immutable_replacement_pso fixed=always_on runtime_ab=absent");
             log_line(
-                "V1410 optiscaler=V21008_net_port_from_V1369 clean_integration=1 streamline=pass_through viewport=native_single histories=two private_ngx_lifetime=create_evaluate_release optiscaler_gate=sidecar_default_off fsr_jitter=exact_peer_center audit=absent f4_capture=absent fallback=none clean_mono_pre_evaluate_motion=preserved");
+                "V1416 native_dlss_owner=public_streamline_v1409 mono=v19005_public_streamline aer_stereo=v1289_public_completion split_viewports=mode3_only private_ngx=optiscaler_only native_nvngx_direct_hooks=absent fallback=none");
             log_line(
                 "V1144 native temporal terrain family source=V15018 validated_via=V15017 terrain_match=exact_vs_ds_two_hs_pso_contract material_ps=wildcard terrain_hs=5B33D68BABD52A7E,9ABE7F60D2CFC2EB mode3_taau_native_full_motion=1 taau_terrain_replay=aer_and_stereo native_temporal_terrain_motion=1 diagnostic_independent=1 diagnostic_off_log_io=none locator_code=absent camera_binding=ds_b1_to_ps_b6_alias motion_formula=current_ndc_minus_history_ndc velocity_target=rt3_only overlay_psos=inherit_base_motion afw_compatible=1");
         }
@@ -48962,7 +49462,7 @@ void handle_f3_capture_hotkey(IDXGISwapChain* swapchain) {
     if (w3vr::pipeline_flight::enabled()) {
         w3vr::pipeline_flight::dump_last_ten_seconds();
     }
-    w3vr::route_flight::dump_last_seconds("V1414", 15);
+    w3vr::route_flight::dump_last_seconds("V1416", 15);
     trigger_renderdoc_capture(
         g_game_swapchain != nullptr ? g_game_swapchain : swapchain);
 }

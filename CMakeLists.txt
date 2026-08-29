@@ -385,7 +385,7 @@ if(BUILD_TESTING)
     )
 
     add_test(
-        NAME renderer_optiscaler_direct_ngx_contract
+        NAME renderer_dlss_owner_isolation_contract
         COMMAND "${CMAKE_COMMAND}"
             "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
             "-DOPTISCALER_BRIDGE_INI=${CMAKE_CURRENT_SOURCE_DIR}/optiscaler_bridge.ini"
