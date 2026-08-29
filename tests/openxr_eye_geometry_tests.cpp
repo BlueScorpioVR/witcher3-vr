@@ -677,7 +677,7 @@ void test_asymmetric_presentation_scale() {
         "asymmetric presentation rejects non-finite scale");
 }
 
-void test_strict_stereo_symmetric_subimage_equivalence() {
+void test_strict_stereo_final_presentation_scale() {
     constexpr uint32_t width = 3072;
     constexpr uint32_t height = 3216;
     const XrRect2Di full_rect{
@@ -687,10 +687,8 @@ void test_strict_stereo_symmetric_subimage_equivalence() {
         {-0.942478f, 0.698132f, 0.767945f, -0.959931f},
         {-0.698132f, 0.942478f, 0.767945f, -0.959931f}};
 
-    // Reproduce the current centered producer: one uniform cover fraction is
-    // selected from both optical centers, then the runtime-eye tangent spans
-    // are expanded by 1/q. Presentation Size scales this envelope and each
-    // per-eye target by the same p, so p must cancel out of imageRect.
+    // Reproduce the centered producer and derive the established per-eye
+    // subimages once. Presentation Size must not participate in either step.
     float cover = 1.0f;
     for (const auto& fov : runtime_fovs) {
         const float left = std::tan(fov.angleLeft);
@@ -719,62 +717,99 @@ void test_strict_stereo_symmetric_subimage_equivalence() {
         std::atan(-content_half_x), std::atan(content_half_x),
         std::atan(content_half_y), std::atan(-content_half_y)};
 
-    eye_geometry::SymmetricEyeSubimage crops[2][2]{};
-    const float scales[2]{1.0f, 0.8f};
-    for (uint32_t scale_index = 0; scale_index < 2; ++scale_index) {
-        XrFovf content{};
-        require(eye_geometry::scale_asymmetric_projection_fov(
-            base_content, scales[scale_index], content),
-            "strict-Stereo scaled symmetric content");
-        for (uint32_t eye = 0; eye < 2; ++eye) {
-            XrFovf target{};
-            require(eye_geometry::scale_asymmetric_projection_fov(
-                runtime_fovs[eye], scales[scale_index], target),
-                "strict-Stereo scaled asymmetric target");
-            require(eye_geometry::derive_symmetric_eye_subimage(
-                content, target, full_rect, crops[scale_index][eye]),
-                "strict-Stereo symmetric tangent crop");
-
-            const float content_step_x =
-                (std::tan(content.angleRight) -
-                    std::tan(content.angleLeft)) / width;
-            const float content_step_y =
-                (std::tan(content.angleUp) -
-                    std::tan(content.angleDown)) / height;
-            require(std::fabs(
-                std::tan(crops[scale_index][eye].represented_fov.angleLeft) -
-                    std::tan(target.angleLeft)) <= content_step_x * 1.01f &&
-                std::fabs(
-                std::tan(crops[scale_index][eye].represented_fov.angleRight) -
-                    std::tan(target.angleRight)) <= content_step_x * 1.01f &&
-                std::fabs(
-                std::tan(crops[scale_index][eye].represented_fov.angleUp) -
-                    std::tan(target.angleUp)) <= content_step_y * 1.01f &&
-                std::fabs(
-                std::tan(crops[scale_index][eye].represented_fov.angleDown) -
-                    std::tan(target.angleDown)) <= content_step_y * 1.01f,
-                "strict-Stereo crop target differs by under one source pixel");
-        }
-    }
-
+    eye_geometry::SymmetricEyeSubimage crops[2]{};
     for (uint32_t eye = 0; eye < 2; ++eye) {
-        const auto& at_one = crops[0][eye].image_rect;
-        const auto& at_point_eight = crops[1][eye].image_rect;
-        require(at_one.offset.x == at_point_eight.offset.x &&
-            at_one.offset.y == at_point_eight.offset.y &&
-            at_one.extent.width == at_point_eight.extent.width &&
-            at_one.extent.height == at_point_eight.extent.height,
-            "strict-Stereo normalized crop is slider invariant");
+        require(eye_geometry::derive_symmetric_eye_subimage(
+            base_content, runtime_fovs[eye], full_rect, crops[eye]),
+            "strict-Stereo symmetric tangent crop");
+        const float content_step_x =
+            (std::tan(base_content.angleRight) -
+                std::tan(base_content.angleLeft)) / width;
+        const float content_step_y =
+            (std::tan(base_content.angleUp) -
+                std::tan(base_content.angleDown)) / height;
         require(std::fabs(
-            static_cast<float>(at_one.extent.width) / width - cover) <=
+            std::tan(crops[eye].represented_fov.angleLeft) -
+                std::tan(runtime_fovs[eye].angleLeft)) <=
+                content_step_x * 1.01f &&
+            std::fabs(
+            std::tan(crops[eye].represented_fov.angleRight) -
+                std::tan(runtime_fovs[eye].angleRight)) <=
+                content_step_x * 1.01f &&
+            std::fabs(
+            std::tan(crops[eye].represented_fov.angleUp) -
+                std::tan(runtime_fovs[eye].angleUp)) <=
+                content_step_y * 1.01f &&
+            std::fabs(
+            std::tan(crops[eye].represented_fov.angleDown) -
+                std::tan(runtime_fovs[eye].angleDown)) <=
+                content_step_y * 1.01f,
+            "strict-Stereo crop target differs by under one source pixel");
+
+        const auto base_rect = crops[eye].image_rect;
+        XrFovf requested_fov{};
+        constexpr float presentation_scale = 0.8f;
+        require(eye_geometry::scale_asymmetric_projection_fov(
+            crops[eye].represented_fov, presentation_scale, requested_fov),
+            "strict-Stereo requested final Presentation Size FOV");
+        eye_geometry::SymmetricEyeSubimage presentation{};
+        require(eye_geometry::derive_symmetric_eye_subimage(
+            crops[eye].represented_fov, requested_fov,
+            base_rect, presentation),
+            "strict-Stereo final Presentation Size subimage/FOV pair");
+        eye_geometry::AsymmetricProjectionDescriptor base_descriptor{};
+        eye_geometry::AsymmetricProjectionDescriptor final_descriptor{};
+        require(eye_geometry::derive_asymmetric_projection_descriptor(
+            crops[eye].represented_fov, width, height, base_descriptor) &&
+            eye_geometry::derive_asymmetric_projection_descriptor(
+                presentation.represented_fov,
+                static_cast<uint32_t>(presentation.image_rect.extent.width),
+                static_cast<uint32_t>(presentation.image_rect.extent.height),
+                final_descriptor),
+            "strict-Stereo final Presentation Size descriptors");
+        const float base_step_x =
+            base_descriptor.horizontal_tangent_span /
+            static_cast<float>(base_rect.extent.width);
+        const float base_step_y =
+            base_descriptor.vertical_tangent_span /
+            static_cast<float>(base_rect.extent.height);
+        require(std::fabs(final_descriptor.horizontal_tangent_span -
+            base_descriptor.horizontal_tangent_span * presentation_scale) <=
+                base_step_x * 2.01f &&
+            std::fabs(final_descriptor.vertical_tangent_span -
+            base_descriptor.vertical_tangent_span * presentation_scale) <=
+                base_step_y * 2.01f,
+            "strict-Stereo final subimage represents requested tangent span");
+        require(presentation.image_rect.offset.x >= base_rect.offset.x &&
+            presentation.image_rect.offset.y >= base_rect.offset.y &&
+            presentation.image_rect.offset.x +
+                presentation.image_rect.extent.width <=
+                base_rect.offset.x + base_rect.extent.width &&
+            presentation.image_rect.offset.y +
+                presentation.image_rect.extent.height <=
+                base_rect.offset.y + base_rect.extent.height &&
+            presentation.image_rect.extent.width < base_rect.extent.width &&
+            presentation.image_rect.extent.height < base_rect.extent.height,
+            "strict-Stereo final Presentation Size selects a contained crop");
+        require(std::fabs(
+            static_cast<float>(presentation.image_rect.extent.width) /
+                base_rect.extent.width - presentation_scale) <=
+                2.01f / base_rect.extent.width &&
+            std::fabs(
+            static_cast<float>(presentation.image_rect.extent.height) /
+                base_rect.extent.height - presentation_scale) <=
+                2.01f / base_rect.extent.height,
+            "strict-Stereo final crop follows Presentation Size per axis");
+        require(std::fabs(
+            static_cast<float>(base_rect.extent.width) / width - cover) <=
                 2.0f / width &&
             std::fabs(
-            static_cast<float>(at_one.extent.height) / height - cover) <=
+            static_cast<float>(base_rect.extent.height) / height - cover) <=
                 2.0f / height,
             "strict-Stereo crop uses Quest cover fraction per axis");
     }
-    const auto& left = crops[0][0].image_rect;
-    const auto& right = crops[0][1].image_rect;
+    const auto& left = crops[0].image_rect;
+    const auto& right = crops[1].image_rect;
     require(left.offset.x == static_cast<int32_t>(width) -
             (right.offset.x + right.extent.width) &&
         left.offset.y == right.offset.y &&
@@ -846,7 +881,7 @@ int main() {
     test_parallel_headset_adaptation();
     test_asymmetric_projection_descriptor();
     test_asymmetric_presentation_scale();
-    test_strict_stereo_symmetric_subimage_equivalence();
+    test_strict_stereo_final_presentation_scale();
     test_asymmetric_hud_source_shift();
     if (failures != 0) {
         std::fprintf(stderr, "%d eye-geometry test(s) failed\n", failures);

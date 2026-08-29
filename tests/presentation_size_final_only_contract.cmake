@@ -4,7 +4,7 @@ endif()
 
 file(READ "${DXGI_PROXY_SOURCE}" source)
 
-set(final_hook "const float requested_scale = std::clamp(")
+set(final_hook "const float final_presentation_scale = std::clamp(")
 string(FIND "${source}" "${final_hook}" final_hook_position)
 if(final_hook_position EQUAL -1)
     message(FATAL_ERROR "Final OpenXR Presentation Size hook is missing")
@@ -31,7 +31,18 @@ foreach(required_fragment IN ITEMS
         "ProducerProjectionScales producer_projection_scales("
         "producer_fovs[eye] = g_xr_views[eye].fov;"
         "presentation=final_submit_only"
-        "V1391 presentation_size=final_openxr_only")
+        "[FIX:FINAL-OPENXR-PRESENTATION-SIZE V1417 1/2]"
+        "[FIX:FINAL-OPENXR-PRESENTATION-SIZE V1417 2/2]"
+        "if (final_presentation_scale < 1.0f)"
+        "const XrRect2Di base_presentation_rect ="
+        "const XrFovf base_presentation_fov ="
+        "final_presentation_scale,"
+        "derive_symmetric_eye_subimage("
+        "projection_views[eye].subImage.imageRect ="
+        "final_presentation.image_rect;"
+        "projection_views[eye].fov ="
+        "final_presentation.represented_fov;"
+        "V1417 presentation_size=universal_final_openxr_subimage_fov_pair")
     string(FIND "${source}" "${required_fragment}" fragment_position)
     if(fragment_position EQUAL -1)
         message(FATAL_ERROR
@@ -45,7 +56,18 @@ foreach(forbidden_fragment IN ITEMS
         "g_config.presentation_scale / cover_fraction"
         "presentation_fovs[eye]"
         "const uint32_t presentation_width"
-        "const uint32_t presentation_height")
+        "const uint32_t presentation_height"
+        "requested_scale"
+        "fullscreen_cover_fraction"
+        "legacy_presentation_scale"
+        "submitted_crop_fraction"
+        "scaled_fov_projection"
+        "scaled_fov_direct_copy"
+        "final_presentation_fov"
+        "image_rect=slider_independent"
+        "universal_final_openxr_fov_only"
+        "PRESENTATION-SCALE-FOV"
+        "PRESENTATION-COVER-SCALE")
     string(FIND "${source}" "${forbidden_fragment}" fragment_position)
     if(NOT fragment_position EQUAL -1)
         message(FATAL_ERROR
@@ -53,4 +75,15 @@ foreach(forbidden_fragment IN ITEMS
     endif()
 endforeach()
 
-message(STATUS "V1391 final-only Presentation Size contract verified")
+string(FIND "${source}"
+    "[FIX:FINAL-OPENXR-PRESENTATION-SIZE V1417 2/2]"
+    final_application_position)
+string(FIND "${source}"
+    "projection_views[eye].subImage.imageRect = projection_image_rect;"
+    final_image_rect_position)
+if(final_application_position LESS final_image_rect_position)
+    message(FATAL_ERROR
+        "Presentation Size must be applied after the final route imageRect")
+endif()
+
+message(STATUS "V1417 universal final subimage/FOV Presentation Size contract verified")

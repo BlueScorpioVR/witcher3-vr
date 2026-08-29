@@ -19,8 +19,8 @@ set(required_fragments
     "order_rt_private_history_submission("
     "publish_rt_private_history_submissions("
     "consumer_queue->Wait("
-    "build=V1416"
-    "dump_last_seconds(\"V1416\", 15)")
+    "build=V1417"
+    "dump_last_seconds(\"V1417\", 15)")
 
 foreach(required_fragment IN LISTS required_fragments)
     string(FIND "${source}" "${required_fragment}" fragment_index)

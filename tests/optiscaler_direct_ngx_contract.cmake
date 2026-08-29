@@ -10,7 +10,7 @@ file(READ "${DXGI_PROXY_SOURCE}" dxgi_proxy)
 file(READ "${OPTISCALER_BRIDGE_INI}" bridge_ini)
 
 foreach(required_fragment IN ITEMS
-        "build=V1416 base=V1414_native_streamline_optiscaler_ngx_only"
+        "build=V1417 base=V1416_final_openxr_subimage_fov_pair"
         "bool optiscaler_enabled{false};"
         "\"optiscaler_bridge.ini\", \"optiscaler\", \"enabled\", false"
         "bool native_dlss_public_streamline_owner_active()"
@@ -37,7 +37,7 @@ foreach(required_fragment IN ITEMS
     string(FIND "${dxgi_proxy}" "${required_fragment}" position)
     if(position EQUAL -1)
         message(FATAL_ERROR
-            "Missing V1416 DLSS owner-isolation contract: ${required_fragment}")
+            "Missing V1417 DLSS owner-isolation contract: ${required_fragment}")
     endif()
 endforeach()
 
@@ -68,4 +68,4 @@ if(NOT bridge_disabled)
     message(FATAL_ERROR "OptiScaler sidecar must default to disabled")
 endif()
 
-message(STATUS "V1416 native Streamline / OptiScaler-only NGX contract verified")
+message(STATUS "V1417 native Streamline / OptiScaler-only NGX contract verified")
