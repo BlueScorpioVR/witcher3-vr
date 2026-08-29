@@ -5,7 +5,7 @@ endif()
 file(READ "${DXGI_PROXY_SOURCE}" source)
 
 foreach(required IN ITEMS
-        "build=V1410"
+        "build=V1414"
         "fixed=always_on runtime_ab=absent"
         "if (foliage_shader_orientation_route_active() &&"
         "lookup_foliage_orientation_pipeline(pipeline_state)"
@@ -28,4 +28,4 @@ foreach(forbidden IN ITEMS
     endif()
 endforeach()
 
-message(STATUS "V1410 fixed-only foliage contract verified")
+message(STATUS "V1414 fixed-only foliage contract verified")

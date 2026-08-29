@@ -10,6 +10,14 @@ target_compile_definitions(w3vr_launcher_config PRIVATE WIN32_LEAN_AND_MEAN NOMI
 target_compile_options(w3vr_launcher_config PRIVATE /W4 /permissive-)
 target_link_libraries(w3vr_launcher_config PUBLIC shell32 ole32)
 
+add_library(w3vr_launcher_startup_checks STATIC
+    startup_checks.cpp
+    startup_checks.h
+)
+target_compile_definitions(w3vr_launcher_startup_checks PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
+target_compile_options(w3vr_launcher_startup_checks PRIVATE /W4 /permissive-)
+target_link_libraries(w3vr_launcher_startup_checks PUBLIC w3vr_launcher_config)
+
 add_executable(Witcher3VRLauncher WIN32
     main.cpp
     openxr_resolution.cpp
@@ -24,7 +32,11 @@ target_include_directories(Witcher3VRLauncher PRIVATE
 )
 target_compile_definitions(Witcher3VRLauncher PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
 target_compile_options(Witcher3VRLauncher PRIVATE /W4 /permissive-)
-target_link_libraries(Witcher3VRLauncher PRIVATE w3vr_launcher_config comctl32)
+target_link_libraries(Witcher3VRLauncher PRIVATE
+    w3vr_launcher_config
+    w3vr_launcher_startup_checks
+    comctl32
+)
 
 include(CTest)
 if(BUILD_TESTING)
@@ -33,4 +45,14 @@ if(BUILD_TESTING)
     target_compile_options(w3vr_launcher_tests PRIVATE /W4 /permissive-)
     target_link_libraries(w3vr_launcher_tests PRIVATE w3vr_launcher_config)
     add_test(NAME launcher_config COMMAND w3vr_launcher_tests)
+
+    add_executable(w3vr_launcher_startup_checks_tests
+        startup_checks_tests.cpp
+    )
+    target_compile_definitions(w3vr_launcher_startup_checks_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
+    target_compile_options(w3vr_launcher_startup_checks_tests PRIVATE /W4 /permissive-)
+    target_link_libraries(w3vr_launcher_startup_checks_tests PRIVATE
+        w3vr_launcher_startup_checks
+    )
+    add_test(NAME launcher_startup_checks COMMAND w3vr_launcher_startup_checks_tests)
 endif()

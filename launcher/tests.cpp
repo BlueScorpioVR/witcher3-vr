@@ -68,8 +68,8 @@ struct TempDirectory {
 };
 
 w3vr::ConfigPaths MakePaths(const fs::path& root) {
-    return {root, root / "witcher3vr.ini", root / "dx12user.settings",
-        root / "witcher3.exe"};
+    return {root, root / "witcher3vr.ini", root / "optiscaler_bridge.ini",
+        root / "dx12user.settings", root / "witcher3.exe"};
 }
 
 void WriteBaseFixtures(const w3vr::ConfigPaths& paths) {
@@ -111,6 +111,7 @@ void WriteBaseFixtures(const w3vr::ConfigPaths& paths) {
         "[engine]\r\n"
         "temporal_backend=dlss_packed\r\n"
         "dlss_dlaa=0\r\n"
+        "raytracing_enabled=1\r\n"
         "raytracing_history_buffers=7\r\n"
         "dual_render_probe=1\r\n"
         "dual_render_start=1\r\n"
@@ -156,6 +157,8 @@ void WriteBaseFixtures(const w3vr::ConfigPaths& paths) {
         "[Rendering]\r\n"
         "AllowDLSS=true\r\n"
         "TextureQuality=Ultra\r\n"
+        "[Rendering/RT]\r\n"
+        "EnableRT=true\r\n"
         "[DLC]\r\n"
         "DlcEnabled_movementinputfix=0\r\n"
         "DlcEnabled_unrelated=0\r\n"
@@ -176,7 +179,7 @@ void TestAllModes(const w3vr::ConfigPaths& paths) {
         state.width = 2496 + index;
         state.height = 2592 + index;
         state.dlss_quality = index % 5;
-        state.ray_tracing = true;
+        state.optiscaler_enabled = true;
         state.hud_convergence_delta = 7;
         state.presentation_scale = 0.85f;
         state.menu_scale = 0.75f;
@@ -200,9 +203,11 @@ void TestAllModes(const w3vr::ConfigPaths& paths) {
             index % 3);
         state.hide_static_hud_outside_combat = index % 2 == 0;
         state.fast_movement_transitions = index % 2 == 0;
-        state.native_stereo = true;
         state.fullscreen_projection = true;
         state.diagnostic_logging = true;
+        state.route_logging = true;
+        state.performance_logging = true;
+        state.renderdoc_enabled = true;
 
         w3vr::IniDocument vr;
         w3vr::IniDocument game;
@@ -235,13 +240,9 @@ void TestAllModes(const w3vr::ConfigPaths& paths) {
         Require(game.Get("PostProcess", "DLSSQuality") ==
             std::to_string(state.dlss_quality == 0 ? 1 : state.dlss_quality),
             "wrong DLSS bootstrap quality");
-        const bool expected_ray_tracing =
-            w3vr::ModeSupportsRayTracing(state.mode);
-        Require(vr.Get("engine", "raytracing_enabled") ==
-                std::string(expected_ray_tracing ? "1" : "0") &&
-            game.Get("Rendering/RT", "EnableRT") ==
-                std::string(expected_ray_tracing ? "true" : "false"),
-            "Ray Tracing was not restricted to an AER + AFW temporal mode");
+        Require(vr.Get("engine", "raytracing_enabled") == "1" &&
+            game.Get("Rendering/RT", "EnableRT") == "true",
+            "launcher must not own or overwrite Ray Tracing settings");
         Require(vr.Get("engine", "raytracing_history_buffers") == "7",
             "launcher overwrote the INI-only RTX history buffer count");
         Require(game.Get("Viewport", "Resolution") == "\"" +
@@ -254,14 +255,11 @@ void TestAllModes(const w3vr::ConfigPaths& paths) {
             "unrelated DLC flag not preserved");
         Require(vr.Get("openxr", "hud_stereo_shift_px") == "-9",
             "wrong zero-relative convergence conversion");
-        const bool expected_native_stereo =
-            w3vr::ModeSupportsAsymmetricProjection(state.mode);
         Require(vr.Get("openxr", "presentation_scale") ==
             "0.850",
             "presentation scale must be preserved in every render mode");
-        Require(vr.Get("openxr", "native_stereo") ==
-            std::string(expected_native_stereo ? "1" : "0"),
-            "ASYM must remain enabled in every supported render mode");
+        Require(vr.Get("openxr", "native_stereo") == "1",
+            "ASYM must start enabled in every render mode");
         Require(vr.Get("openxr", "fullscreen_projection") == "1",
             "fullscreen projection must remain available in every render mode");
         Require(!vr.Get(
@@ -316,7 +314,7 @@ void TestAllModes(const w3vr::ConfigPaths& paths) {
             vr.Get("openxr", "cinema_5x4") ==
                 std::string(expected_five_four ? "1" : "0"),
             "Cinema aspect and compatibility mirror mismatch");
-        Require(vr.Get("meta", "config_version") == "15",
+        Require(vr.Get("meta", "config_version") == "16",
             "configuration version marker missing");
         Require(vr.Get("openxr", "resolution_auto") ==
             std::string(state.resolution_auto ? "1" : "0"),
@@ -364,6 +362,11 @@ void TestAllModes(const w3vr::ConfigPaths& paths) {
             vr.Get("debug", "first_person_aim_diagnostics") == "1" &&
             vr.Get("debug", "world_marker_diagnostics") == "1",
             "diagnostic checkbox does not own every runtime probe");
+        Require(vr.Get("debug", "route_flight_recorder") == "1" &&
+            vr.Get("debug", "pipeline_flight_recorder") == "1",
+            "independent lightweight log settings were not saved");
+        Require(vr.Get("renderdoc", "enabled") == "1",
+            "RenderDoc launcher setting was not saved");
         Require(!vr.Get("debug", "cinema_subtitle_diagnostics").has_value(),
             "dead cinema subtitle diagnostic key was retained");
         Require(vr.Get("reverse", "enabled") == "0",
@@ -385,7 +388,16 @@ void TestAllModes(const w3vr::ConfigPaths& paths) {
         Require(game.Get("Rendering", "TextureQuality") == "Ultra",
             "unrelated game setting not preserved");
 
+        w3vr::IniDocument optiscaler;
+        Require(w3vr::BuildUpdatedOptiscalerDocument(
+            paths, state, optiscaler, error),
+            "OptiScaler sidecar document build failed");
+        const bool expected_optiscaler = w3vr::ModeUsesDlss(state.mode);
+        Require(optiscaler.Get("optiscaler", "enabled") ==
+                std::string(expected_optiscaler ? "1" : "0"),
+            "OptiScaler was not constrained to a DLSS render profile");
         Write(paths.vr_ini, vr.Serialize());
+        Write(paths.optiscaler_bridge_ini, optiscaler.Serialize());
         Write(paths.game_settings, game.Serialize());
         const auto loaded = w3vr::LoadConfiguration(paths);
         Require(loaded.warning.empty(), "saved mode should infer exactly");
@@ -394,13 +406,10 @@ void TestAllModes(const w3vr::ConfigPaths& paths) {
             "round-trip resolution mismatch");
         Require(loaded.state.resolution_auto == state.resolution_auto,
             "round-trip OpenXR AUTO resolution mismatch");
-        Require(loaded.state.native_stereo ==
-            w3vr::ModeSupportsAsymmetricProjection(state.mode),
-            "round-trip ASYM mode gate mismatch");
         Require(loaded.state.fullscreen_projection,
             "round-trip fullscreen projection mismatch");
-        Require(loaded.state.ray_tracing == expected_ray_tracing,
-            "round-trip Ray Tracing mode gate mismatch");
+        Require(loaded.state.optiscaler_enabled == expected_optiscaler,
+            "round-trip OptiScaler sidecar mismatch");
         if (w3vr::ModeUsesDlss(state.mode)) {
             Require(loaded.state.dlss_quality == state.dlss_quality,
                 "round-trip DLSS/DLAA selection mismatch");
@@ -441,13 +450,16 @@ void TestAllModes(const w3vr::ConfigPaths& paths) {
             "round-trip faster-transitions DLC mismatch");
         Require(loaded.state.diagnostic_logging,
             "round-trip diagnostic logging mismatch");
+        Require(loaded.state.route_logging && loaded.state.performance_logging,
+            "round-trip lightweight logging mismatch");
+        Require(loaded.state.renderdoc_enabled,
+            "round-trip RenderDoc setting mismatch");
     }
 
-    // Native Stereo must no longer imply the fullscreen presenter.
+    // Always-on ASYM must remain independent from the fullscreen presenter.
     WriteBaseFixtures(paths);
     w3vr::LauncherState native_legacy;
     native_legacy.mode = w3vr::RenderMode::StereoNone;
-    native_legacy.native_stereo = true;
     native_legacy.fullscreen_projection = false;
     w3vr::IniDocument vr;
     w3vr::IniDocument game;
@@ -458,48 +470,51 @@ void TestAllModes(const w3vr::ConfigPaths& paths) {
     Require(vr.Get("openxr", "native_stereo") == "1" &&
         vr.Get("openxr", "fullscreen_projection") == "0" &&
         !vr.Get("openxr", "alternate_presentation_resize").has_value(),
-        "Native Stereo still implies a presentation experiment");
+        "always-on ASYM still implies a presentation experiment");
 }
 
-void TestControlledRayTracing(
+void TestOptiscalerAndAlwaysAsym(
     const w3vr::ConfigPaths& paths) {
-    Require(w3vr::ModeSupportsRayTracing(w3vr::RenderMode::AerAfwDlss) &&
-            w3vr::ModeSupportsRayTracing(w3vr::RenderMode::AerAfwTaau) &&
-            !w3vr::ModeSupportsRayTracing(
-                w3vr::RenderMode::StereoDlssSequential) &&
-            !w3vr::ModeSupportsRayTracing(w3vr::RenderMode::MonoTaau) &&
-            !w3vr::ModeSupportsRayTracing(w3vr::RenderMode::MonoDlss),
-        "Ray Tracing support predicate does not match the AER + AFW temporal modes");
     WriteBaseFixtures(paths);
     w3vr::LauncherState state;
     state.mode = w3vr::RenderMode::StereoTaau;
     state.presentation_scale = 0.85f;
-    state.native_stereo = false;
     state.fullscreen_projection = false;
-    state.ray_tracing = true;
+    state.optiscaler_enabled = false;
     w3vr::IniDocument vr;
     w3vr::IniDocument game;
     std::wstring error;
     Require(w3vr::BuildUpdatedDocuments(paths, state, vr, game, error),
-        "controlled renderer-option document build failed");
-    Require(vr.Get("openxr", "fullscreen_projection") == "0" &&
+        "launcher-owned renderer document build failed");
+    Require(vr.Get("openxr", "native_stereo") == "1" &&
+            vr.Get("openxr", "fullscreen_projection") == "0" &&
             !vr.Get("openxr", "alternate_presentation_resize").has_value(),
-        "removed alternate resize route was retained");
-    Require(vr.Get("engine", "raytracing_enabled") == "0" &&
-            game.Get("Rendering/RT", "EnableRT") == "false",
-        "incompatible render mode did not force both Ray Tracing flags off");
-
-    state.mode = w3vr::RenderMode::AerAfwTaau;
-    Require(w3vr::BuildUpdatedDocuments(paths, state, vr, game, error) &&
-            vr.Get("engine", "raytracing_enabled") == "1" &&
+        "always-on ASYM or independent fullscreen projection is wrong");
+    Require(vr.Get("engine", "raytracing_enabled") == "1" &&
             game.Get("Rendering/RT", "EnableRT") == "true",
-        "AER + AFW - TAAU did not enable both Ray Tracing flags");
+        "removed launcher RTX path still overwrites RT settings");
 
-    state.mode = w3vr::RenderMode::AerAfwDlss;
-    Require(w3vr::BuildUpdatedDocuments(paths, state, vr, game, error) &&
-            vr.Get("engine", "raytracing_enabled") == "1" &&
-            game.Get("Rendering/RT", "EnableRT") == "true",
-        "AER + AFW - DLSS did not enable both Ray Tracing flags");
+    w3vr::IniDocument optiscaler;
+    Require(w3vr::BuildUpdatedOptiscalerDocument(
+            paths, state, optiscaler, error) &&
+            optiscaler.Get("optiscaler", "enabled") == "0",
+        "OptiScaler must default to disabled");
+    state.optiscaler_enabled = true;
+    Require(w3vr::BuildUpdatedOptiscalerDocument(
+            paths, state, optiscaler, error) &&
+            optiscaler.Get("optiscaler", "enabled") == "0",
+        "OptiScaler must remain disabled outside a DLSS profile");
+    Write(paths.vr_ini, vr.Serialize());
+    Write(paths.game_settings, game.Serialize());
+    Write(paths.optiscaler_bridge_ini, optiscaler.Serialize());
+    Require(!w3vr::LoadConfiguration(paths).state.optiscaler_enabled,
+        "non-DLSS profile exposed an enabled OptiScaler state");
+
+    state.mode = w3vr::RenderMode::StereoDlssSequential;
+    Require(w3vr::BuildUpdatedOptiscalerDocument(
+            paths, state, optiscaler, error) &&
+            optiscaler.Get("optiscaler", "enabled") == "1",
+        "OptiScaler sidecar opt-in was not written for a DLSS profile");
 
     state.fullscreen_projection = true;
     Require(w3vr::BuildUpdatedDocuments(paths, state, vr, game, error) &&
@@ -542,8 +557,8 @@ void TestReleaseDefaults() {
         "Cinema aspect must default to 5:4");
     Require(!defaults.steady_icons,
         "steady icons must default to disabled");
-    Require(!defaults.ray_tracing,
-        "Ray Tracing must default to disabled");
+    Require(!defaults.optiscaler_enabled,
+        "OptiScaler must default to disabled");
     Require(!defaults.vertical_pitch_enabled,
         "vertical mouse/pad pitch must default to disabled");
     Require(!defaults.first_person_combat_exit,
@@ -559,12 +574,16 @@ void TestReleaseDefaults() {
         "static-HUD hiding must remain opt-in");
     Require(defaults.fast_movement_transitions,
         "faster movement transitions must default to enabled");
-    Require(defaults.native_stereo,
-        "asymmetric projection must default to enabled");
     Require(!defaults.fullscreen_projection,
         "experimental fullscreen projection must default to disabled");
     Require(!defaults.diagnostic_logging,
         "diagnostic logging must default to disabled");
+    Require(defaults.route_logging,
+        "lightweight route logging must default to enabled");
+    Require(!defaults.performance_logging,
+        "lightweight performance logging must default to disabled");
+    Require(!defaults.renderdoc_enabled,
+        "RenderDoc must default to disabled");
 }
 
 void TestVrProfileHighShadows() {
@@ -596,7 +615,7 @@ void TestEmbeddedLauncherDefaults() {
     const auto defaults = w3vr::IniDocument::Load(defaults_path, error);
     Require(defaults.has_value(),
         "embedded launcher INI defaults could not be loaded");
-    Require(defaults->Get("meta", "config_version") == "15" &&
+    Require(defaults->Get("meta", "config_version") == "16" &&
         defaults->Get("openxr", "mode3_aer_presentation") == "1" &&
         defaults->Get("openxr", "resolution_auto") == "1" &&
         defaults->Get("openxr", "presentation_scale") == "1.000" &&
@@ -606,9 +625,11 @@ void TestEmbeddedLauncherDefaults() {
         defaults->Get("engine", "temporal_backend") == "dlss" &&
         defaults->Get("engine", "first_person_combat_exit") == "0" &&
         defaults->Get("engine", "raytracing_history_buffers") == "8" &&
+        defaults->Get("renderdoc", "enabled") == "0" &&
+        defaults->Get("renderdoc", "streamline_device_bridge") == "0" &&
         defaults->Get("debug", "pipeline_flight_recorder") == "0" &&
-        defaults->Get("debug", "route_flight_recorder") == "0",
-        "embedded launcher defaults do not match schema 15 release policy");
+        defaults->Get("debug", "route_flight_recorder") == "1",
+        "embedded launcher defaults do not match schema 16 release policy");
 }
 
 void TestHudEditorSetup(const fs::path& root) {
@@ -619,6 +640,7 @@ void TestHudEditorSetup(const fs::path& root) {
     const w3vr::ConfigPaths paths{
         launcher_directory,
         launcher_directory / "witcher3vr.ini",
+        launcher_directory / "optiscaler_bridge.ini",
         documents / "dx12user.settings",
         launcher_directory / "witcher3.exe"};
     const fs::path script = game / "mods" / "modWitcher3VRHUDEditor" /
@@ -871,14 +893,8 @@ void TestDlssLabelsAndLegacyAuto(const w3vr::ConfigPaths& paths) {
         "Mono modes must use clean Mode 1 without dual-render or AER");
     Require(!w3vr::ModeUsesStereo(w3vr::RenderMode::MonoNone) &&
             !w3vr::ModeUsesStereo(w3vr::RenderMode::MonoTaau) &&
-            !w3vr::ModeUsesStereo(w3vr::RenderMode::MonoDlss) &&
-            w3vr::ModeSupportsAsymmetricProjection(
-                w3vr::RenderMode::MonoNone) &&
-            w3vr::ModeSupportsAsymmetricProjection(
-                w3vr::RenderMode::MonoTaau) &&
-            w3vr::ModeSupportsAsymmetricProjection(
-                w3vr::RenderMode::MonoDlss),
-        "Mono must remain single-producer while supporting ASYM presentation");
+            !w3vr::ModeUsesStereo(w3vr::RenderMode::MonoDlss),
+        "Mono must remain a single producer; ASYM is now a launcher invariant");
 
     WriteBaseFixtures(paths);
     std::wstring error;
@@ -1034,7 +1050,7 @@ void TestFirstRunConfiguration(const fs::path& root) {
     std::wstring error;
     const std::string defaults =
         "[meta]\r\n"
-        "config_version=15\r\n"
+        "config_version=16\r\n"
         "[openxr]\r\n"
         "mode=3\r\n"
         "mode3_aer_presentation=1\r\n"
@@ -1062,7 +1078,9 @@ void TestFirstRunConfiguration(const fs::path& root) {
         "first_person_anchor_smoothing_seconds=0.200000\r\n"
         "[debug]\r\n"
         "logging_enabled=0\r\n"
-        "runtime_diagnostics=0\r\n";
+        "runtime_diagnostics=0\r\n"
+        "pipeline_flight_recorder=0\r\n"
+        "route_flight_recorder=1\r\n";
     Require(w3vr::EnsureVrConfiguration(
         paths, defaults, created, error), "first-run INI creation failed");
     Require(created, "first-run INI was not reported as created");
@@ -1091,11 +1109,11 @@ void TestFirstRunConfiguration(const fs::path& root) {
     Require(!created, "migrated INI must not be reported as newly created");
     auto migrated = w3vr::IniDocument::Load(paths.vr_ini, error);
     Require(migrated.has_value(), "migrated INI could not be read");
-    Require(migrated->Get("meta", "config_version") == "15",
+    Require(migrated->Get("meta", "config_version") == "16",
         "old INI was not versioned");
     Require(migrated->Get("openxr", "resolution_auto") == "1",
         "old INI did not receive the OpenXR AUTO default");
-    Require(migrated->Get("openxr", "native_stereo") == "0" &&
+    Require(migrated->Get("openxr", "native_stereo") == "1" &&
         migrated->Get("openxr", "fullscreen_projection") == "0" &&
         !migrated->Get("openxr", "alternate_presentation_resize").has_value(),
         "old INI did not receive safe independent presentation defaults");
@@ -1180,7 +1198,7 @@ void TestFirstRunConfiguration(const fs::path& root) {
     const auto migrated_v14_mode1 =
         w3vr::IniDocument::Load(paths.vr_ini, error);
     Require(migrated_v14_mode1.has_value() &&
-            migrated_v14_mode1->Get("meta", "config_version") == "15" &&
+            migrated_v14_mode1->Get("meta", "config_version") == "16" &&
             migrated_v14_mode1->Get("openxr", "mode") == "3" &&
             migrated_v14_mode1->Get(
                 "openxr", "mode3_aer_presentation") == "1" &&
@@ -1210,7 +1228,7 @@ void TestFirstRunConfiguration(const fs::path& root) {
     const auto migrated_v14_mode2 =
         w3vr::IniDocument::Load(paths.vr_ini, error);
     Require(migrated_v14_mode2.has_value() &&
-            migrated_v14_mode2->Get("meta", "config_version") == "15" &&
+            migrated_v14_mode2->Get("meta", "config_version") == "16" &&
             migrated_v14_mode2->Get("openxr", "mode") == "1" &&
             migrated_v14_mode2->Get(
                 "openxr", "mode3_aer_presentation") == "0" &&
@@ -1218,13 +1236,12 @@ void TestFirstRunConfiguration(const fs::path& root) {
                 "engine", "temporal_backend") == "taau" &&
             migrated_v14_mode2->Get("engine", "dual_render_probe") == "0" &&
             migrated_v14_mode2->Get("engine", "dual_render_start") == "0" &&
-            migrated_v14_mode2->Get("engine", "raytracing_enabled") == "0" &&
+            migrated_v14_mode2->Get("engine", "raytracing_enabled") == "1" &&
             migrated_v14_mode2->Get("openxr", "native_stereo") == "1",
-        "V15 did not convert pre-V15 Mode 2 to clean Mono");
+        "V15 did not convert pre-V15 Mode 2 to clean Mono while preserving the now-unmanaged RT value");
     const auto loaded_v14_mode2 = w3vr::LoadConfiguration(paths);
     Require(loaded_v14_mode2.warning.empty() &&
-            loaded_v14_mode2.state.mode == w3vr::RenderMode::MonoTaau &&
-            loaded_v14_mode2.state.native_stereo,
+            loaded_v14_mode2.state.mode == w3vr::RenderMode::MonoTaau,
         "migrated pre-V15 Mode 2 did not load as Mono TAAU with ASYM");
 
     Write(paths.vr_ini,
@@ -1242,7 +1259,7 @@ void TestFirstRunConfiguration(const fs::path& root) {
     const auto migrated_v14_mode4 =
         w3vr::IniDocument::Load(paths.vr_ini, error);
     Require(migrated_v14_mode4.has_value() &&
-            migrated_v14_mode4->Get("meta", "config_version") == "15" &&
+            migrated_v14_mode4->Get("meta", "config_version") == "16" &&
             migrated_v14_mode4->Get("openxr", "mode") == "3" &&
             migrated_v14_mode4->Get(
                 "openxr", "mode3_aer_presentation") == "0" &&
@@ -1290,7 +1307,7 @@ void TestFirstRunConfiguration(const fs::path& root) {
         paths, defaults, created, error), "V11-to-V12 normalization failed");
     const auto normalized_v12 = w3vr::IniDocument::Load(paths.vr_ini, error);
     Require(normalized_v12.has_value() &&
-        normalized_v12->Get("meta", "config_version") == "15" &&
+        normalized_v12->Get("meta", "config_version") == "16" &&
         normalized_v12->Get("openxr", "enabled") == "1" &&
         normalized_v12->Get("openxr", "mode") == "3" &&
         normalized_v12->Get("openxr", "mode3_aer_presentation") == "0" &&
@@ -1300,7 +1317,7 @@ void TestFirstRunConfiguration(const fs::path& root) {
         !normalized_v12->Get(
             "openxr", "alternate_presentation_resize").has_value() &&
         normalized_v12->Get("engine", "temporal_backend") == "none" &&
-        normalized_v12->Get("engine", "raytracing_enabled") == "0" &&
+        normalized_v12->Get("engine", "raytracing_enabled") == "1" &&
         normalized_v12->Get("engine", "dual_render_probe") == "1" &&
         normalized_v12->Get("engine", "dual_render_start") == "1" &&
         normalized_v12->Get("engine", "menu_state_probe") == "1" &&
@@ -1332,7 +1349,7 @@ void TestFirstRunConfiguration(const fs::path& root) {
         paths, defaults, created, error), "V2-to-V11 migration failed");
     auto migrated_v4 = w3vr::IniDocument::Load(paths.vr_ini, error);
     Require(migrated_v4.has_value() &&
-        migrated_v4->Get("meta", "config_version") == "15" &&
+        migrated_v4->Get("meta", "config_version") == "16" &&
         migrated_v4->Get("openxr", "cinema_hud_stereo_shift_px") == "-91" &&
         migrated_v4->Get("openxr", "cinema_hud_scale") == "1.100" &&
         migrated_v4->Get("openxr", "full_vr_hud_stereo_shift_px") == "-26" &&
@@ -1359,7 +1376,7 @@ void TestFirstRunConfiguration(const fs::path& root) {
         paths, defaults, created, error), "V3-to-V11 migration failed");
     auto migrated_from_v3 = w3vr::IniDocument::Load(paths.vr_ini, error);
     Require(migrated_from_v3.has_value() &&
-        migrated_from_v3->Get("meta", "config_version") == "15" &&
+        migrated_from_v3->Get("meta", "config_version") == "16" &&
         migrated_from_v3->Get("openxr", "hud_horizontal_scale") == "1.000" &&
         migrated_from_v3->Get("openxr", "hud_vertical_scale") == "1.000" &&
         migrated_from_v3->Get("openxr", "custom_user_value") == "keep",
@@ -1376,51 +1393,13 @@ void TestFirstRunConfiguration(const fs::path& root) {
         paths, defaults, created, error), "V6-to-V11 migration failed");
     auto migrated_from_v6 = w3vr::IniDocument::Load(paths.vr_ini, error);
     Require(migrated_from_v6.has_value() &&
-        migrated_from_v6->Get("meta", "config_version") == "15" &&
+        migrated_from_v6->Get("meta", "config_version") == "16" &&
         migrated_from_v6->Get("openxr", "native_stereo") == "1" &&
         migrated_from_v6->Get("openxr", "fullscreen_projection") == "0" &&
         !migrated_from_v6->Get(
             "openxr", "alternate_presentation_resize").has_value() &&
         migrated_from_v6->Get("openxr", "mode3_aer_presentation") == "0",
         "V6 combined flag was not split safely");
-
-    // V11 makes the launcher the sole owner of Ray Tracing compatibility.
-    // An incompatible route must be disabled during migration, while the
-    // already supported AER + AFW temporal opt-in remains selected.
-    Write(paths.vr_ini,
-        "[meta]\r\n"
-        "config_version=10\r\n"
-        "[openxr]\r\n"
-        "mode3_aer_presentation=0\r\n"
-        "[engine]\r\n"
-        "temporal_backend=taau\r\n"
-        "raytracing_enabled=1\r\n");
-    Require(w3vr::EnsureVrConfiguration(
-        paths, defaults, created, error), "V10-to-V11 RT migration failed");
-    auto migrated_rt_incompatible = w3vr::IniDocument::Load(
-        paths.vr_ini, error);
-    Require(migrated_rt_incompatible.has_value() &&
-            migrated_rt_incompatible->Get("meta", "config_version") == "15" &&
-            migrated_rt_incompatible->Get(
-                "engine", "raytracing_enabled") == "0",
-        "V11 migration retained Ray Tracing on an incompatible mode");
-
-    Write(paths.vr_ini,
-        "[meta]\r\n"
-        "config_version=10\r\n"
-        "[openxr]\r\n"
-        "mode3_aer_presentation=1\r\n"
-        "[engine]\r\n"
-        "temporal_backend=taau\r\n"
-        "raytracing_enabled=1\r\n");
-    Require(w3vr::EnsureVrConfiguration(
-        paths, defaults, created, error), "supported V10-to-V11 RT migration failed");
-    auto migrated_rt_supported = w3vr::IniDocument::Load(paths.vr_ini, error);
-    Require(migrated_rt_supported.has_value() &&
-            migrated_rt_supported->Get("meta", "config_version") == "15" &&
-            migrated_rt_supported->Get(
-                "engine", "raytracing_enabled") == "1",
-        "V11 migration removed the supported AER + AFW / TAAU RT opt-in");
 
     // V9 is the last V1138 launcher schema. Remove its retired stationary
     // switch while retaining every explicit V9531 First Person preference.
@@ -1436,7 +1415,7 @@ void TestFirstRunConfiguration(const fs::path& root) {
         paths, defaults, created, error), "V9-to-V11 migration failed");
     auto migrated_from_v9 = w3vr::IniDocument::Load(paths.vr_ini, error);
     Require(migrated_from_v9.has_value() &&
-        migrated_from_v9->Get("meta", "config_version") == "15" &&
+        migrated_from_v9->Get("meta", "config_version") == "16" &&
         !migrated_from_v9->Get(
             "engine", "first_person_stationary_turn").has_value() &&
         migrated_from_v9->Get("engine", "first_person_strafe") == "0" &&
@@ -1457,7 +1436,7 @@ void TestFirstRunConfiguration(const fs::path& root) {
         paths, defaults, created, error), "V8-to-V11 migration failed");
     auto migrated_from_v8 = w3vr::IniDocument::Load(paths.vr_ini, error);
     Require(migrated_from_v8.has_value() &&
-        migrated_from_v8->Get("meta", "config_version") == "15" &&
+        migrated_from_v8->Get("meta", "config_version") == "16" &&
         migrated_from_v8->Get("openxr", "cinema_aspect") == "4x3" &&
         migrated_from_v8->Get("openxr", "cinema_5x4") == "0",
         "V8 Cinema framing choice was not migrated to 4:3");
@@ -1544,7 +1523,7 @@ int main() {
         TestVrProfileHighShadows();
         TestHudEditorSetup(temporary.path);
         TestAllModes(paths);
-        TestControlledRayTracing(paths);
+        TestOptiscalerAndAlwaysAsym(paths);
         TestDlssLabelsAndLegacyAuto(paths);
         TestFallbackAndAtomicSave(paths);
         TestInconsistentWarning(paths);

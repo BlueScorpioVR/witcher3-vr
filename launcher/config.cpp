@@ -27,8 +27,7 @@ constexpr std::array<ModeSettings, 8> kModes{{
     {3, true, false, "dlss", 6, true},
 }};
 
-constexpr int kCurrentConfigVersion = 15;
-constexpr char kDefaultRayTracingHistoryBuffers[] = "8";
+constexpr int kCurrentConfigVersion = 16;
 constexpr float kCinemaHudReferenceScale = 1.30f;
 constexpr int kCinemaHudReferenceShift = -72;
 constexpr float kFullVrHudReferenceScale = 1.00f;
@@ -309,17 +308,8 @@ void MigrateConfigurationToV10(IniDocument& ini) {
 }
 
 void MigrateConfigurationToV11(IniDocument& ini) {
-    // The launcher now owns both halves of Ray Tracing. Preserve an existing
-    // opt-in only on a supported AER + AFW temporal route; every other mode
-    // starts from the safe disabled state and Save also clears the game flag.
-    const auto backend = ReadString(
-        ini, "engine", "temporal_backend", "none");
-    const bool supported_route = ReadBool(
-        ini, "openxr", "mode3_aer_presentation", false) &&
-        (backend == "taau" || backend == "dlss");
-    const bool enabled = supported_route && ReadBool(
-        ini, "engine", "raytracing_enabled", false);
-    ini.Set("engine", "raytracing_enabled", enabled ? "1" : "0");
+    // The old schema step is retained only to keep the migration chain
+    // monotonic. V1411 no longer owns or rewrites any Ray Tracing setting.
     RemoveObsoleteSettings(ini);
     ini.Set("meta", "config_version", "11");
 }
@@ -349,22 +339,11 @@ void NormalizeLauncherOwnedConfiguration(IniDocument& ini) {
     ini.Set("engine", "dual_render_start", mono ? "0" : "1");
     ini.Set("engine", "menu_state_probe", "1");
 
-    const bool ray_tracing = !mono && aer &&
-        (backend == "taau" || backend == "dlss") && ReadBool(
-        ini, "engine", "raytracing_enabled", false);
-    ini.Set("engine", "raytracing_enabled", ray_tracing ? "1" : "0");
-    // This remains an INI-only renderer tuning value. Materialize the new
-    // default in partial/current INIs while preserving every explicit choice.
-    if (!ini.Get("engine", "raytracing_history_buffers").has_value()) {
-        ini.Set("engine", "raytracing_history_buffers",
-            kDefaultRayTracingHistoryBuffers);
-    }
-
-    const bool native_stereo = ReadBool(
-        ini, "openxr", "native_stereo", false);
+    // ASYM is a launcher invariant in V16. F2 remains the runtime comparison
+    // control, but every new process starts with asymmetric optics enabled.
     const bool fullscreen_projection = ReadBool(
         ini, "openxr", "fullscreen_projection", false);
-    ini.Set("openxr", "native_stereo", native_stereo ? "1" : "0");
+    ini.Set("openxr", "native_stereo", "1");
     ini.Set("openxr", "fullscreen_projection",
         fullscreen_projection ? "1" : "0");
 
@@ -386,6 +365,10 @@ void NormalizeLauncherOwnedConfiguration(IniDocument& ini) {
     for (const auto* key : kDiagnosticKeys) {
         ini.Set("debug", key, diagnostics ? "1" : "0");
     }
+    ini.Set("debug", "route_flight_recorder",
+        ReadBool(ini, "debug", "route_flight_recorder", true) ? "1" : "0");
+    ini.Set("debug", "pipeline_flight_recorder",
+        ReadBool(ini, "debug", "pipeline_flight_recorder", false) ? "1" : "0");
 
     constexpr std::array<const char*, 9> kReverseProbeKeys{{
         "enabled",
@@ -465,6 +448,18 @@ void MigrateConfigurationToV15(IniDocument& ini, int legacy_mode) {
         ini.Set("engine", "dual_render_probe", "1");
         ini.Set("engine", "dual_render_start", "1");
     }
+    RemoveObsoleteSettings(ini);
+    ini.Set("meta", "config_version", "15");
+}
+
+void MigrateConfigurationToV16(IniDocument& ini) {
+    // V16 removes the launcher ASYM switch. Every route starts with the
+    // per-view optical FOV enabled; F2 remains available for runtime A/B.
+    ini.Set("openxr", "native_stereo", "1");
+    // These two controls were not exposed before V16, so seed the new public
+    // policy once: route recording on, performance recording off.
+    ini.Set("debug", "route_flight_recorder", "1");
+    ini.Set("debug", "pipeline_flight_recorder", "0");
     RemoveObsoleteSettings(ini);
     ini.Set("meta", "config_version", std::to_string(kCurrentConfigVersion));
 }
@@ -1072,20 +1067,6 @@ bool ModeUsesStereo(RenderMode mode) {
         mode == RenderMode::StereoDlssSequential;
 }
 
-bool ModeSupportsAsymmetricProjection(RenderMode mode) {
-    // ASYM controls OpenXR presentation with each view's optical FOV. Mono
-    // still has one cyclopean producer; it does not become per-eye geometry.
-    return ModeUsesStereo(mode) ||
-        mode == RenderMode::MonoNone ||
-        mode == RenderMode::MonoTaau ||
-        mode == RenderMode::MonoDlss;
-}
-
-bool ModeSupportsRayTracing(RenderMode mode) {
-    return mode == RenderMode::AerAfwTaau ||
-        mode == RenderMode::AerAfwDlss;
-}
-
 int CinemaHudConvergenceShift(float hud_scale, int offset) {
     return ProportionalHudConvergenceShift(
         hud_scale, kCinemaHudReferenceScale,
@@ -1134,6 +1115,7 @@ ConfigPaths DiscoverPaths() {
     return {
         directory,
         directory / L"witcher3vr.ini",
+        directory / L"optiscaler_bridge.ini",
         documents / L"The Witcher 3" / L"dx12user.settings",
         directory / L"witcher3.exe",
     };
@@ -1234,6 +1216,9 @@ bool EnsureVrConfiguration(const ConfigPaths& paths,
             // explicit Mode 2 surviving in V8-V14 remains the old Mono route.
             MigrateConfigurationToV15(
                 migrated, ReadInt(migrated, "openxr", "mode", 3));
+        }
+        if (existing_version < 16) {
+            MigrateConfigurationToV16(migrated);
         }
         // This is deliberately independent from version migration: extending
         // the default template must heal a partial current-version INI on the
@@ -1426,9 +1411,12 @@ LoadResult LoadConfiguration(const ConfigPaths& paths) {
         dlss_dlaa && ModeUsesDlss(result.state.mode)
         ? 0
         : std::clamp(saved_dlss_quality, 1, 4);
-    result.state.ray_tracing = ModeSupportsRayTracing(result.state.mode) &&
-        ReadBool(*vr, "engine", "raytracing_enabled", false) &&
-        ReadBool(*game, "Rendering/RT", "EnableRT", false);
+    std::wstring optiscaler_error;
+    if (const auto optiscaler = IniDocument::Load(
+            paths.optiscaler_bridge_ini, optiscaler_error)) {
+        result.state.optiscaler_enabled = ModeUsesDlss(result.state.mode) &&
+            ReadBool(*optiscaler, "optiscaler", "enabled", false);
+    }
     result.state.hud_convergence_delta = std::clamp(
         ReadInt(*vr, "openxr", "hud_stereo_shift_px", -36) + 16, -64, 64);
     result.state.presentation_scale = std::clamp(
@@ -1495,13 +1483,17 @@ LoadResult LoadConfiguration(const ConfigPaths& paths) {
         *game, "W3VRSettings", "HideStaticHudOutsideCombat", false);
     result.state.fast_movement_transitions = ReadBool(
         *game, "DLC", "DlcEnabled_movementinputfix", true);
-    result.state.native_stereo = ReadBool(
-        *vr, "openxr", "native_stereo", false);
     result.state.fullscreen_projection = ReadBool(
         *vr, "openxr", "fullscreen_projection", false);
     result.state.diagnostic_logging =
         ReadBool(*vr, "debug", "logging_enabled", false) &&
         ReadBool(*vr, "debug", "runtime_diagnostics", false);
+    result.state.route_logging = ReadBool(
+        *vr, "debug", "route_flight_recorder", true);
+    result.state.performance_logging = ReadBool(
+        *vr, "debug", "pipeline_flight_recorder", false);
+    result.state.renderdoc_enabled = ReadBool(
+        *vr, "renderdoc", "enabled", false);
     return result;
 }
 
@@ -1510,8 +1502,6 @@ CompatibilityWarnings InspectCompatibilitySettings(const ConfigPaths& paths) {
     std::wstring error;
     const auto game = IniDocument::Load(paths.game_settings, error);
     if (!game) return warnings;
-    warnings.ray_tracing_enabled =
-        ReadBool(*game, "Rendering/RT", "EnableRT", false);
     // In the DX12 settings file SSREnabled is the High-quality switch. False
     // covers the supported Low/Off choices.
     warnings.ssr_high =
@@ -1536,12 +1526,9 @@ bool BuildUpdatedDocuments(const ConfigPaths& paths, const LauncherState& state,
         state.resolution_auto ? "1" : "0");
     vr_ini.Set("openxr", "render_width", std::to_string(state.width));
     vr_ini.Set("openxr", "render_height", std::to_string(state.height));
-    // ASYM OpenXR presentation is independent from producer eye count. Mono
-    // keeps one cyclopean producer and applies each view's optical FOV at submit.
-    const bool native_stereo_active =
-        state.native_stereo && ModeSupportsAsymmetricProjection(state.mode);
-    vr_ini.Set("openxr", "native_stereo",
-        native_stereo_active ? "1" : "0");
+    // ASYM OpenXR presentation is a V16 launcher invariant, independent from
+    // producer eye count. F2 can still switch SYM/ASYM during the process.
+    vr_ini.Set("openxr", "native_stereo", "1");
     vr_ini.Set("openxr", "fullscreen_projection",
         state.fullscreen_projection ? "1" : "0");
     vr_ini.Set("openxr", "hud_stereo_shift_px",
@@ -1577,11 +1564,7 @@ bool BuildUpdatedDocuments(const ConfigPaths& paths, const LauncherState& state,
     vr_ini.Set("engine", "dual_render_probe", mode.dual_render ? "1" : "0");
     vr_ini.Set("engine", "dual_render_start", mode.dual_render ? "1" : "0");
     vr_ini.Set("engine", "temporal_backend", mode.temporal_backend);
-    const bool ray_tracing_active =
-        state.ray_tracing && ModeSupportsRayTracing(state.mode);
-    vr_ini.Set("engine", "raytracing_enabled",
-        ray_tracing_active ? "1" : "0");
-    // One experimental launcher option owns both cooperating F11 controls.
+    // One launcher option owns both cooperating F11 controls.
     // Keeping them equal avoids a persistent snap preview without its
     // continuous native-camera follower, or the inverse partial state.
     vr_ini.Set("engine", "first_person_snap_turn",
@@ -1633,6 +1616,12 @@ bool BuildUpdatedDocuments(const ConfigPaths& paths, const LauncherState& state,
         state.diagnostic_logging ? "1" : "0");
     vr_ini.Set("debug", "world_marker_diagnostics",
         state.diagnostic_logging ? "1" : "0");
+    vr_ini.Set("debug", "route_flight_recorder",
+        state.route_logging ? "1" : "0");
+    vr_ini.Set("debug", "pipeline_flight_recorder",
+        state.performance_logging ? "1" : "0");
+    vr_ini.Set("renderdoc", "enabled",
+        state.renderdoc_enabled ? "1" : "0");
     // Repair stale route fragments and diagnostic probes while preserving all
     // unrelated advanced tuning.
     NormalizeLauncherOwnedConfiguration(vr_ini);
@@ -1647,12 +1636,38 @@ bool BuildUpdatedDocuments(const ConfigPaths& paths, const LauncherState& state,
             : std::clamp(state.dlss_quality, 1, 4)));
     game_settings.Set("Rendering", "AllowDLSS",
         mode.allow_dlss ? "true" : "false");
-    game_settings.Set("Rendering/RT", "EnableRT",
-        ray_tracing_active ? "true" : "false");
     // The DLC remains installed; REDengine's native DLC switch keeps its
     // animation-behavior mounter dormant when the launcher option is disabled.
     game_settings.Set("DLC", "DlcEnabled_movementinputfix",
         state.fast_movement_transitions ? "1" : "0");
+    return true;
+}
+
+bool BuildUpdatedOptiscalerDocument(const ConfigPaths& paths,
+    const LauncherState& state, IniDocument& optiscaler,
+    std::wstring& error) {
+    const DWORD attributes = GetFileAttributesW(
+        paths.optiscaler_bridge_ini.c_str());
+    if (attributes != INVALID_FILE_ATTRIBUTES) {
+        const auto loaded = IniDocument::Load(
+            paths.optiscaler_bridge_ini, error);
+        if (!loaded) return false;
+        optiscaler = *loaded;
+    } else {
+        const DWORD lookup_error = GetLastError();
+        if (lookup_error != ERROR_FILE_NOT_FOUND &&
+            lookup_error != ERROR_PATH_NOT_FOUND) {
+            SetLastError(lookup_error);
+            error = LastErrorMessage(
+                L"Checking OptiScaler configuration",
+                paths.optiscaler_bridge_ini);
+            return false;
+        }
+        optiscaler = IniDocument::FromText(
+            "[optiscaler]\r\nenabled=0\r\n");
+    }
+    optiscaler.Set("optiscaler", "enabled",
+        state.optiscaler_enabled && ModeUsesDlss(state.mode) ? "1" : "0");
     return true;
 }
 
@@ -1698,9 +1713,14 @@ bool SaveConfiguration(const ConfigPaths& paths, const LauncherState& state,
     std::wstring& error) {
     IniDocument vr;
     IniDocument game;
+    IniDocument optiscaler;
     if (!BuildUpdatedDocuments(paths, state, vr, game, error)) return false;
+    if (!BuildUpdatedOptiscalerDocument(
+            paths, state, optiscaler, error)) return false;
     if (!AtomicWriteWithBackup(paths.vr_ini, vr.Serialize(), error)) return false;
     if (!AtomicWriteWithBackup(paths.game_settings, game.Serialize(), error)) return false;
+    if (!AtomicWriteWithBackup(paths.optiscaler_bridge_ini,
+            optiscaler.Serialize(), error)) return false;
     return true;
 }
 

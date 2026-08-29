@@ -10,7 +10,7 @@ file(READ "${DXGI_PROXY_SOURCE}" dxgi_proxy)
 file(READ "${OPTISCALER_BRIDGE_INI}" bridge_ini)
 
 foreach(required_fragment IN ITEMS
-        "build=V1410 base=V1409_plus_V21008_optiscaler_clean"
+        "build=V1414 base=V1413_launcher_optiscaler_afw_controls"
         "bool optiscaler_enabled{false};"
         "\"optiscaler_bridge.ini\", \"optiscaler\", \"enabled\", false"
         "LoadLibraryW(module_path)"

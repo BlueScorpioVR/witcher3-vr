@@ -56,7 +56,7 @@ struct LauncherState {
     int width{2688};
     int height{2784};
     int dlss_quality{3};
-    bool ray_tracing{};
+    bool optiscaler_enabled{};
     int hud_convergence_delta{-20};
     float presentation_scale{1.0f};
     float menu_scale{0.85f};
@@ -78,19 +78,21 @@ struct LauncherState {
     CameraFollowPolicy camera_follow_policy{CameraFollowPolicy::HorseBoatOnly};
     bool hide_static_hud_outside_combat{};
     bool fast_movement_transitions{true};
-    bool native_stereo{true};
     bool fullscreen_projection{};
     bool diagnostic_logging{};
+    bool route_logging{true};
+    bool performance_logging{};
+    bool renderdoc_enabled{};
 };
 
 struct CompatibilityWarnings {
-    bool ray_tracing_enabled{};
     bool ssr_high{};
 };
 
 struct ConfigPaths {
     std::filesystem::path launcher_directory;
     std::filesystem::path vr_ini;
+    std::filesystem::path optiscaler_bridge_ini;
     std::filesystem::path game_settings;
     std::filesystem::path game_executable;
 };
@@ -129,8 +131,6 @@ const ModeSettings& SettingsForMode(RenderMode mode);
 const wchar_t* ModeDisplayName(RenderMode mode);
 bool ModeUsesDlss(RenderMode mode);
 bool ModeUsesStereo(RenderMode mode);
-bool ModeSupportsAsymmetricProjection(RenderMode mode);
-bool ModeSupportsRayTracing(RenderMode mode);
 std::optional<int> DlssNearSquareCompatibleWidth(const LauncherState& state);
 int CinemaHudConvergenceShift(float hud_scale, int offset);
 int FullVrHudConvergenceShift(float hud_scale, int offset);
@@ -144,6 +144,9 @@ LoadResult LoadConfiguration(const ConfigPaths& paths);
 CompatibilityWarnings InspectCompatibilitySettings(const ConfigPaths& paths);
 bool BuildUpdatedDocuments(const ConfigPaths& paths, const LauncherState& state,
     IniDocument& vr_ini, IniDocument& game_settings, std::wstring& error);
+bool BuildUpdatedOptiscalerDocument(const ConfigPaths& paths,
+    const LauncherState& state, IniDocument& optiscaler,
+    std::wstring& error);
 bool SaveConfiguration(const ConfigPaths& paths, const LauncherState& state,
     std::wstring& error);
 bool AtomicWriteWithBackup(const std::filesystem::path& path,

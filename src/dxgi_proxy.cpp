@@ -37,6 +37,10 @@
 #include "shadow_cascade_authority_policy.h"
 #include "taau_submission_policy.h"
 
+// V1414 makes the AFW F6 visual diagnostic available independently from all
+// logging controls. V1411 replaces the legacy launcher RTX/ASYM controls with an OptiScaler
+// sidecar switch, always-on ASYM startup, independent lightweight route and
+// performance logging, and reorganized runtime/HUD/debug bindings.
 // V1410 ports V21008's clean OptiScaler integration onto V1409. Public
 // Streamline remains a strict native-viewport pass-through, while the private
 // NGX Create/Evaluate/Release owner keeps two eye histories. Clean Mono retains
@@ -40582,7 +40586,7 @@ void ensure_initialized() {
                 "focus_fire_b1=stereo_and_aer_centered_draw_proven "
                 "aer_taau_hud=scene_and_retained_pair_fail_open");
             log_line(
-                "witcher3vr dxgi proxy initialized build=V1410 base=V1409_plus_V21008_optiscaler_clean "
+                "witcher3vr dxgi proxy initialized build=V1414 base=V1413_launcher_optiscaler_afw_controls "
                 "anchor_smoothing_ini=%d anchor_smoothing_seconds=%.4f "
                 "first_person_strafe_ini=%d mode3_aer_presentation=%d raytracing_enabled=%d raytracing_history_buffers=%d "
                 "aer_afw_enabled=%d persistent_registry=%d optiscaler_enabled=%d "
@@ -48842,11 +48846,9 @@ void try_log_dlss_output_luminance_readback() {
 }
 
 void handle_puredark_afw_visual_debug_hotkey() {
-    // [DEBUG:PUREDARK-AFW-VISUAL-F6 V1242] Flight-recorder captures need the
-    // ABI visual diagnostic without enabling broad timing-altering probes.
-    if (!(g_config.runtime_diagnostics ||
-            g_config.pipeline_flight_recorder) ||
-        (GetAsyncKeyState(VK_F6) & 1) == 0) {
+    // [DEBUG:PUREDARK-AFW-VISUAL-F6 V1414] F6 owns only the PureDark ABI debug
+    // bit and is independent from every logging/recorder configuration.
+    if ((GetAsyncKeyState(VK_F6) & 1) == 0) {
         return;
     }
     const bool enabled = !g_puredark_afw_visual_debug.load(
@@ -48960,7 +48962,7 @@ void handle_f3_capture_hotkey(IDXGISwapChain* swapchain) {
     if (w3vr::pipeline_flight::enabled()) {
         w3vr::pipeline_flight::dump_last_ten_seconds();
     }
-    w3vr::route_flight::dump_last_seconds("V1410", 15);
+    w3vr::route_flight::dump_last_seconds("V1414", 15);
     trigger_renderdoc_capture(
         g_game_swapchain != nullptr ? g_game_swapchain : swapchain);
 }

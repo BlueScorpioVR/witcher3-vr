@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(witcher3vr VERSION 0.1410.0 LANGUAGES C CXX RC)
+project(witcher3vr VERSION 0.1411.0 LANGUAGES C CXX RC)
 
 include(CTest)
 
@@ -432,6 +432,18 @@ if(BUILD_TESTING)
         COMMAND "${CMAKE_COMMAND}"
             "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/clean_mode1_renderer_contract.cmake"
+    )
+
+    add_test(
+        NAME launcher_v1414_ui_contract
+        COMMAND "${CMAKE_COMMAND}"
+            "-DLAUNCHER_MAIN=${CMAKE_CURRENT_SOURCE_DIR}/launcher/main.cpp"
+            "-DLAUNCHER_CONFIG=${CMAKE_CURRENT_SOURCE_DIR}/launcher/config.cpp"
+            "-DLAUNCHER_HEADER=${CMAKE_CURRENT_SOURCE_DIR}/launcher/config.h"
+            "-DLAUNCHER_DEFAULTS=${CMAKE_CURRENT_SOURCE_DIR}/launcher/witcher3vr.default.ini"
+            "-DSTARTUP_CHECKS=${CMAKE_CURRENT_SOURCE_DIR}/launcher/startup_checks.cpp"
+            "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/launcher_v1414_ui_contract.cmake"
     )
 
 endif()
