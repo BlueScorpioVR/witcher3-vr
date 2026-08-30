@@ -13,7 +13,11 @@ set(required_fragments
     "if (slot.state.recording_epoch != recording_epoch)"
     "slot.recording_epoch_source->load("
     "slot.state.recording_epoch = recording_epoch"
+    "PERF:NOAA-FOLIAGE-CHUNKS V1442"
+    "constexpr uint32_t kFoliageBoundBasisChunkSize = 16"
+    "uint32_t slot_count{1}"
     "advance_command_list_recording_epoch(command_list)"
+    "kFoliageBoundBasisChunkSize)"
     "PERF:NOAA-NONINDEXED-FAST-PATH V1442"
     "if (clean_strict_noaa && !functional_aim_candidate &&")
 

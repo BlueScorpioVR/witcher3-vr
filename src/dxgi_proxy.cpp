@@ -24,6 +24,7 @@
 #include "first_person_combat_lock.h"
 #include "first_person_anchor_smoothing.h"
 #include "first_person_horse_gallop_offset.h"
+#include "foliage_native_snapshot_policy.h"
 #include "focus_fire_projection_policy.h"
 #include "hmd_camera_orientation.h"
 #include "mode3_transport_policy.h"
@@ -39,11 +40,11 @@
 #include "witcher_sense_extent_policy.h"
 #include "world_detail_range_policy.h"
 
-// V1519 starts physically from V1518/V1517 and removes the complete foliage
-// orientation correction. REDengine's original foliage shaders, PSOs,
-// descriptors and draw path are the sole survivors; world-detail range, smoke,
-// terrain, AA/ASYM and launcher behavior are unchanged.
-// [PERF:REMOVE-FOLIAGE-CORRECTION V1519]
+// V1521 removes only V1419/V18025's foliage orientation transform. The two
+// exact owner draws retain byte-identical native b0/b12 snapshots and their
+// proven per-draw descriptor lifetime so V1519's ground-light regression is
+// not reintroduced. No base/corrected camera resolution remains.
+// [FIX:FOLIAGE-NATIVE-SNAPSHOT-NO-TRANSFORM V1521]
 
 // V1517 is the physical combination of V1516's bounded world-detail range and
 // V1514's packed-basis smoke world-up shader. No other V1512 renderer path is
@@ -176,7 +177,8 @@
 // with immutable variants derived from the active OpenXR runtime eye FOV.
 // V1442 starts physically from V1441 and removes additional CPU bookkeeping
 // from the clean No-AA path. Tiled-culling bindings remain recording-thread
-// local and irrelevant non-indexed draws bypass the general diagnostic route.
+// local, foliage upload slots are reserved and retired in exact-fence chunks,
+// and irrelevant non-indexed draws bypass the general diagnostic route.
 // V1441 starts physically from V1424 and removes equivalent work from the
 // release No-AA hot paths without changing the rendered command stream.
 // V1424 starts physically from V1422 and replaces the automatic Full-VR
@@ -191,10 +193,17 @@
 // smoke fallback's coherent-pair ranking: the pair spatially closest to the
 // draw-local b1 camera wins, with the newer pair breaking an exact tie. Pair
 // validity, age, 7 cm distance and eye-separation guards remain unchanged.
-// V1420 adds one CPU-only route-flight event
+// V1420 starts physically from V1419 and adds one CPU-only route-flight event
 // for each canonical smoke draw. It records only the final eye/zero/original
 // variant, authority source, pair and matcher distance/margin; it adds no GPU
-// query, hidden draw, readback, wait or rendering change.
+// query, hidden draw, readback, wait or rendering change. V1419 starts
+// physically from V1418 and replaces V1409/V18021's immutable
+// b12 shader variants with the complete validated V18025 foliage path. The
+// original shaders and PSOs now consume draw-local native-table b0/b12 CBVs
+// whose current and previous nine-value orientation blocks are transformed
+// from the HMD-corrected engine camera into the matching base-camera basis.
+// V1418's opening-cutscene fallback-FOV publication and every unrelated
+// renderer, launcher, OptiScaler and Presentation Size path remain unchanged.
 // V1361 is the clean V1359 smoke fix: it combines V1358's diagnostic-free
 // renderer with V1359's full-handle CBV cache hash. No smoke GPU queries,
 // hidden probe draws or smoke-specific F3 recorder remain in this source.
@@ -1109,6 +1118,11 @@ bool real_smoke_world_up_route_active() {
         g_config.hmd_freelook;
 }
 
+bool foliage_bound_basis_route_active() {
+    return w3vr::foliage_native_snapshot::route_active(
+        g_config.openxr_enabled, g_config.hmd_freelook);
+}
+
 bool real_smoke_world_up_binding_route_active() {
     // [FIX:WORLD-UP-BINDING-CENTER-SPLIT V1156 1/3] The V1080 world-up
     // replacement consumes heap/root-table/CBV state independently from the
@@ -1146,6 +1160,7 @@ bool descriptor_metadata_hooks_needed() {
     return taau_metadata_hooks_needed() ||
         mode3_hud_descriptor_hooks_needed() ||
         real_smoke_world_up_binding_route_active() ||
+        foliage_bound_basis_route_active() ||
         focus_projection_metadata_hooks_needed() ||
         asymmetric_tiled_culling_fix_needed() ||
         native_temporal_terrain_motion_route_active() ||
@@ -1157,6 +1172,7 @@ bool graphics_binding_hooks_needed() {
         witcher_sense_history_suppression_route_configured() ||
         mode3_hud_descriptor_hooks_needed() ||
         real_smoke_world_up_binding_route_active() ||
+        foliage_bound_basis_route_active() ||
         asymmetric_tiled_culling_fix_needed();
 }
 
@@ -3946,6 +3962,9 @@ struct DlssGraphicsStateSnapshot {
     uint64_t native_focus_eye_present{UINT64_MAX};
     uint64_t native_focus_eye_pair_id{};
     uint32_t native_focus_eye{UINT32_MAX};
+    uint64_t foliage_chunk_epoch{};
+    uint32_t foliage_chunk_start{UINT32_MAX};
+    uint32_t foliage_chunk_next{16};
     uint64_t recording_epoch{};
     bool valid{};
 };
@@ -3970,6 +3989,47 @@ struct PipelineInfo {
     BOOL front_counter_clockwise{};
     BOOL depth_clip_enable{};
 };
+
+// V1521 retains only the proven native transient-table lifetime mechanism.
+// RenderDoc proves all 119 owner draws in the reference frame have distinct
+// root-3 allocations and none shares one with its immediate neighbors. Native
+// descriptor zero (b0) and descriptor twelve (b12) are snapshotted byte for
+// byte without any orientation transform, private heap, table copy, heap
+// switch or root-table replay.
+constexpr size_t kFoliageBoundBasisPipelineTableSize = 64;
+constexpr uintptr_t kFoliageBoundBasisPipelineClaimed = ~uintptr_t{};
+struct FoliageBoundBasisPipelineSlot {
+    std::atomic<uintptr_t> original{};
+    ID3D12RootSignature* root_signature{};
+};
+std::array<FoliageBoundBasisPipelineSlot,
+    kFoliageBoundBasisPipelineTableSize> g_foliage_bound_basis_pipelines{};
+
+constexpr size_t kFoliageBoundBasisSlotCount = 2048;
+constexpr uint32_t kFoliageBoundBasisChunkSize = 16;
+constexpr UINT kFoliageBoundBasisB0Bytes = 1024;
+constexpr UINT kFoliageBoundBasisB12Bytes = 256;
+constexpr UINT kFoliageBoundBasisSlotBytes =
+    kFoliageBoundBasisB0Bytes + kFoliageBoundBasisB12Bytes;
+constexpr UINT kFoliageBoundBasisVertexCbvRoot = 3;
+constexpr UINT kFoliageBoundBasisPreviousCbvOffset = 12;
+
+struct FoliageBoundBasisOverrideSlot {
+    ID3D12Fence* retirement_fence{};
+    uint64_t retirement_fence_value{};
+    std::atomic<bool> reserved{};
+};
+std::array<FoliageBoundBasisOverrideSlot, kFoliageBoundBasisSlotCount>
+    g_foliage_bound_basis_override_slots{};
+ID3D12Resource* g_foliage_bound_basis_upload{};
+uint8_t* g_foliage_bound_basis_upload_mapped{};
+D3D12_GPU_VIRTUAL_ADDRESS g_foliage_bound_basis_upload_gpu_va{};
+std::atomic<bool> g_foliage_bound_basis_resources_ready{};
+std::once_flag g_foliage_bound_basis_resources_once{};
+std::atomic<uint32_t> g_foliage_bound_basis_slot_index{};
+std::atomic<uint64_t> g_foliage_native_snapshots{};
+std::atomic<uint64_t> g_foliage_bound_basis_fallbacks{};
+std::atomic<uint32_t> g_foliage_bound_basis_route_logs{};
 
 // [FIX:NATIVE-TEMPORAL-TERRAIN-FAMILY V15018] The validated floors share one
 // exact VS/DS and PSO contract, use two known HS variants, and can vary their
@@ -4761,6 +4821,7 @@ bool dlss_graphics_state_tracking_active() {
     return asymmetric_tiled_culling_fix_needed() ||
         witcher_sense_history_suppression_route_configured() ||
         real_smoke_world_up_binding_route_active() ||
+        foliage_bound_basis_route_active() ||
         retained_hud_projection_route_configured();
 }
 
@@ -5676,6 +5737,8 @@ struct TaauPendingSlotUse {
     bool compose{};
     uint32_t index{};
     bool tiled_culling{};
+    bool foliage_bound_basis{};
+    uint32_t slot_count{1};
 };
 // [FIX:PER-QUEUE-PRIVATE-SLOT-RETIREMENT V1367 1/5] Fence values are ordered
 // only within one command queue. A single fence signaled by independent queues
@@ -6432,6 +6495,10 @@ bool resolve_descriptor_table_cbv(
 bool acquire_tiled_culling_override_slot(
     ID3D12GraphicsCommandList* command_list,
     uint32_t& slot_index_out);
+bool prepare_foliage_hmd_base_draw(
+    ID3D12GraphicsCommandList* command_list,
+    ID3D12PipelineState* pipeline);
+
 // Encode the omitted asymmetric center as a translated virtual tile extent
 // while preserving projection_scale * half_extent. The dimmer shader also
 // reconstructs world positions from these dimensions, so apply the exact
@@ -15078,6 +15145,75 @@ struct NativeTemporalTerrainCameraRestore {
     D3D12_GPU_DESCRIPTOR_HANDLE table{};
 };
 
+size_t foliage_bound_basis_pipeline_slot_index(
+    ID3D12PipelineState* original) {
+    const auto bits = reinterpret_cast<uintptr_t>(original);
+    return ((bits >> 4) ^ (bits >> 13)) &
+        (kFoliageBoundBasisPipelineTableSize - 1);
+}
+
+bool register_foliage_bound_basis_pipeline(
+    ID3D12PipelineState* original,
+    ID3D12RootSignature* root_signature,
+    uint64_t vs_hash) {
+    if (original == nullptr || root_signature == nullptr) {
+        return false;
+    }
+    const auto key = reinterpret_cast<uintptr_t>(original);
+    const size_t base = foliage_bound_basis_pipeline_slot_index(original);
+    for (size_t probe = 0;
+         probe < kFoliageBoundBasisPipelineTableSize; ++probe) {
+        auto& slot = g_foliage_bound_basis_pipelines[
+            (base + probe) & (kFoliageBoundBasisPipelineTableSize - 1)];
+        auto current = slot.original.load(std::memory_order_acquire);
+        if (current == key) {
+            return true;
+        }
+        if (current == kFoliageBoundBasisPipelineClaimed) {
+            YieldProcessor();
+            --probe;
+            continue;
+        }
+        if (current != 0 || !slot.original.compare_exchange_strong(
+                current, kFoliageBoundBasisPipelineClaimed,
+                std::memory_order_acq_rel)) {
+            continue;
+        }
+        slot.root_signature = root_signature;
+        slot.original.store(key, std::memory_order_release);
+        if (g_config.runtime_diagnostics) {
+            log_line(
+                "V1521 foliage native snapshot PSO registered pso=%p rs=%p vs=0x%llX transformed=0",
+                original, root_signature,
+                static_cast<unsigned long long>(vs_hash));
+        }
+        return true;
+    }
+    return false;
+}
+
+const FoliageBoundBasisPipelineSlot* lookup_foliage_bound_basis_pipeline(
+    ID3D12PipelineState* original) {
+    if (original == nullptr) {
+        return nullptr;
+    }
+    const auto key = reinterpret_cast<uintptr_t>(original);
+    const size_t base = foliage_bound_basis_pipeline_slot_index(original);
+    for (size_t probe = 0;
+         probe < kFoliageBoundBasisPipelineTableSize; ++probe) {
+        const auto& slot = g_foliage_bound_basis_pipelines[
+            (base + probe) & (kFoliageBoundBasisPipelineTableSize - 1)];
+        const auto current = slot.original.load(std::memory_order_acquire);
+        if (current == key) {
+            return &slot;
+        }
+        if (current == 0 || current == kFoliageBoundBasisPipelineClaimed) {
+            return nullptr;
+        }
+    }
+    return nullptr;
+}
+
 bool resolve_native_temporal_terrain_table_descriptor(
     const DlssGraphicsStateSnapshot& state,
     D3D12_GPU_DESCRIPTOR_HANDLE table, UINT descriptor_offset,
@@ -18384,7 +18520,7 @@ bool copy_gpu_va_bytes(D3D12_GPU_VIRTUAL_ADDRESS gpu_va, void* destination, size
     }
     // [PERF:NOAA-GPU-VA-CACHE V1441 1/2] A cache hit already identifies one
     // immutable registry epoch. Do the guarded read without serializing every
-    // draw on the global reverse-state mutex, then validate that the
+    // foliage draw on the global reverse-state mutex, then validate that the
     // epoch did not change. A miss retains the exact locked registry scan.
     struct GpuVaReadCache {
         D3D12_GPU_VIRTUAL_ADDRESS base{};
@@ -18980,7 +19116,7 @@ void copy_cbv_descriptor_metadata(
         store_resource_descriptor_fast(dest_cpu, fast_resource, fast_format);
         copied = true;
     }
-    // [PERF:NOAA-DESCRIPTOR-COPY V1441 1/3] Smoke and focus consume
+    // [PERF:NOAA-DESCRIPTOR-COPY V1441 1/3] Smoke, foliage and focus consume
     // the lock-free CBV cache; retained HUD consumes the lock-free resource
     // mirror. The legacy map is populated only by TAAU, RT or diagnostics, so
     // do not probe it (under g_reverse_mutex) in a clean No-AA run.
@@ -19060,6 +19196,7 @@ void install_reverse_hooks() {
     const bool metadata_hooks = taau_metadata_hooks_needed() ||
         focus_projection_metadata_hooks_needed() ||
         asymmetric_tiled_culling_fix_needed() ||
+        foliage_bound_basis_route_active() ||
         // Descriptor metadata and queue retirement are functional state for
         // the private per-eye history tables, not diagnostic instrumentation.
         rt_symmetric_dlss_per_eye_ao_history_active();
@@ -19249,6 +19386,7 @@ void install_resource_hooks(ID3D12Resource* resource) {
     if (resource == nullptr ||
         (!taau_metadata_hooks_needed() &&
             !real_smoke_world_up_binding_route_active() &&
+            !foliage_bound_basis_route_active() &&
             !focus_projection_metadata_hooks_needed() &&
             !rt_symmetric_dlss_per_eye_ao_history_active())) {
         return;
@@ -19387,7 +19525,7 @@ void install_command_list_hooks() {
         }
     }
 
-    // [PERF:NOAA-DEAD-CBV-HOOK V1441] Smoke and retained HUD consume
+    // [PERF:NOAA-DEAD-CBV-HOOK V1441] Smoke, foliage and retained HUD consume
     // descriptor tables, not direct root CBVs. Install this detour only for
     // the temporal-terrain replay or the explicit reverse probe that reads it.
     if (graphics_cbv_hooks && g_set_graphics_root_cbv == nullptr) {
@@ -20341,8 +20479,9 @@ void STDMETHODCALLTYPE hook_execute_command_lists(
     const bool taau_cache_execute_publication =
         w3vr::mode3_transport::submission_queue_eligible(
             taau_submitted_resolve_route_active(), queue == g_command_queue);
-    // [PERF:NOAA-EXECUTE-ROUTES V1441 1/3] Keep unrelated No-AA submissions
-    // outside the shared temporal/private-resource retirement bookkeeping.
+    // [PERF:NOAA-EXECUTE-ROUTES V1441 1/3] Foliage needs exact queue-fence
+    // retirement, but it does not activate the unrelated RT, TAAU or DLSS
+    // bookkeeping that shares this queue hook.
     const bool rt_history_active =
         rt_symmetric_dlss_per_eye_ao_history_active();
     const bool taau_execute_tracking =
@@ -20407,6 +20546,8 @@ void STDMETHODCALLTYPE hook_execute_command_lists(
     // in a release run; diagnostic mode previously disabled this early return
     // by accident and was the only reason those slots remained reusable.
     const bool rt_slot_retirement_needed = rt_history_active;
+    const bool foliage_slot_retirement_needed =
+        foliage_bound_basis_route_active();
     // [FIX:TAAU-FUNCTIONAL-EXECUTE-LIFECYCLE V12127 1/1] TAAU resolve
     // retirement, slot-fence publication and reservation release are also
     // functional synchronization and must survive diagnostics-off runs.
@@ -20415,7 +20556,8 @@ void STDMETHODCALLTYPE hook_execute_command_lists(
             taau_cache_execute_publication) &&
         !taau_functional_hooks_needed() &&
         !reverse_diagnostic_hooks_requested() &&
-        !rt_slot_retirement_needed) {
+        !rt_slot_retirement_needed &&
+        !foliage_slot_retirement_needed) {
         // Keep the gaming path narrower than the temporal detour: no TAAU
         // tracking, readback scan, slot fence or diagnostic atomics.
         {
@@ -20664,7 +20806,23 @@ void STDMETHODCALLTYPE hook_execute_command_lists(
         // placed after the exact Execute which owns the collected command-list
         // uses. Store its fence object as well as its value in every slot.
         for (const auto& use : taau_slot_uses) {
-            if (use.tiled_culling &&
+            if (use.foliage_bound_basis &&
+                use.index < g_foliage_bound_basis_override_slots.size()) {
+                const uint32_t count = std::min<uint32_t>(
+                    std::max(use.slot_count, 1u),
+                    static_cast<uint32_t>(
+                        g_foliage_bound_basis_override_slots.size() -
+                        use.index));
+                for (uint32_t offset = 0; offset < count; ++offset) {
+                    auto& slot = g_foliage_bound_basis_override_slots[
+                        use.index + offset];
+                    slot.retirement_fence = private_resource_ordered
+                        ? private_resource_fence : nullptr;
+                    slot.retirement_fence_value = private_resource_ordered
+                        ? private_resource_fence_value : UINT64_MAX;
+                    slot.reserved.store(false, std::memory_order_release);
+                }
+            } else if (use.tiled_culling &&
                 use.index < g_tiled_culling_override_slots.size()) {
                 auto& slot = g_tiled_culling_override_slots[use.index];
                 slot.retirement_fence = private_resource_ordered
@@ -20885,6 +21043,7 @@ void STDMETHODCALLTYPE hook_create_cbv(
 
     if ((!taau_metadata_hooks_needed() &&
             !real_smoke_world_up_binding_route_active() &&
+            !foliage_bound_basis_route_active() &&
             !focus_projection_metadata_hooks_needed() &&
             !rt_symmetric_dlss_per_eye_ao_history_active()) ||
         desc == nullptr ||
@@ -20909,7 +21068,8 @@ HRESULT STDMETHODCALLTYPE hook_create_graphics_pipeline_state(
     REFIID riid,
     void** pipeline_state) {
     const auto hr = g_create_graphics_pipeline_state(device, desc, riid, pipeline_state);
-    if ((!common_renderer_pipeline_hooks_needed() && !reverse_enabled()) ||
+    if ((!common_renderer_pipeline_hooks_needed() &&
+            !foliage_bound_basis_route_active() && !reverse_enabled()) ||
         FAILED(hr) || desc == nullptr || pipeline_state == nullptr ||
         *pipeline_state == nullptr) {
         return hr;
@@ -20941,6 +21101,25 @@ HRESULT STDMETHODCALLTYPE hook_create_graphics_pipeline_state(
         info.src_blend = blend.SrcBlend;
         info.dest_blend = blend.DestBlend;
         info.blend_op = blend.BlendOp;
+    }
+
+    const bool foliage_bound_basis_owner =
+        foliage_bound_basis_route_active() &&
+        w3vr::foliage_native_snapshot::is_owner(
+            info.vs_hash, info.ps_hash,
+            desc->HS.pShaderBytecode != nullptr &&
+                desc->HS.BytecodeLength != 0,
+            desc->DS.pShaderBytecode != nullptr &&
+                desc->DS.BytecodeLength != 0,
+            desc->GS.pShaderBytecode != nullptr &&
+                desc->GS.BytecodeLength != 0,
+            desc->PrimitiveTopologyType ==
+                D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE,
+            desc->DepthStencilState.DepthEnable != FALSE);
+    if (foliage_bound_basis_owner) {
+        register_foliage_bound_basis_pipeline(
+            pso, desc->pRootSignature, info.vs_hash);
+        store_effect_pipeline_info(pso, info);
     }
 
     // Create the motion-only correction beside the exact original terrain PSO.
@@ -21685,6 +21864,7 @@ void STDMETHODCALLTYPE hook_copy_descriptors(
     // CBV mirror, legacy resource propagation, or global reverse mutex.
     const bool cbv_metadata = taau_metadata_hooks_needed() ||
         real_smoke_world_up_binding_route_active() ||
+        foliage_bound_basis_route_active() ||
         focus_projection_metadata_hooks_needed() ||
         rt_symmetric_dlss_per_eye_ao_history_active();
     const bool legacy_resource_metadata = taau_metadata_hooks_needed() ||
@@ -21762,6 +21942,7 @@ void STDMETHODCALLTYPE hook_copy_descriptors_simple(
         cached_descriptor_increment(device, descriptor_heaps_type);
     const bool cbv_metadata = taau_metadata_hooks_needed() ||
         real_smoke_world_up_binding_route_active() ||
+        foliage_bound_basis_route_active() ||
         focus_projection_metadata_hooks_needed() ||
         rt_symmetric_dlss_per_eye_ao_history_active();
     const bool legacy_resource_metadata = taau_metadata_hooks_needed() ||
@@ -22035,6 +22216,40 @@ HRESULT STDMETHODCALLTYPE hook_reset_command_list(
         g_reset_command_list(command_list, allocator, initial_state);
     if (FAILED(result)) {
         return result;
+    }
+
+    // Reset discards recorded draws. Release any private foliage upload slot
+    // owned by this abandoned recording instead of waiting for a queue fence
+    // that can never be signalled.
+    {
+        std::scoped_lock lock{g_taau_slot_mutex};
+        const auto found = g_taau_pending_slot_uses.find(command_list);
+        if (found != g_taau_pending_slot_uses.end()) {
+            auto& uses = found->second;
+            for (auto it = uses.begin(); it != uses.end();) {
+                if (!it->foliage_bound_basis) {
+                    ++it;
+                    continue;
+                }
+                if (it->index <
+                    g_foliage_bound_basis_override_slots.size()) {
+                    const uint32_t count = std::min<uint32_t>(
+                        std::max(it->slot_count, 1u),
+                        static_cast<uint32_t>(
+                            g_foliage_bound_basis_override_slots.size() -
+                            it->index));
+                    for (uint32_t offset = 0; offset < count; ++offset) {
+                        g_foliage_bound_basis_override_slots[
+                            it->index + offset].reserved.store(
+                                false, std::memory_order_release);
+                    }
+                }
+                it = uses.erase(it);
+            }
+            if (uses.empty()) {
+                g_taau_pending_slot_uses.erase(found);
+            }
+        }
     }
 
     store_command_list_pipeline(command_list, initial_state);
@@ -22715,7 +22930,8 @@ void STDMETHODCALLTYPE hook_set_pipeline_state(
         }
     }
 
-    if (common_renderer_pipeline_hooks_needed() || reverse_enabled()) {
+    if (common_renderer_pipeline_hooks_needed() ||
+        foliage_bound_basis_route_active() || reverse_enabled()) {
         const bool stored = store_command_list_pipeline(command_list, bound_pipeline_state);
         const bool legacy_pipeline_tracking =
             g_config.reverse_cbv_probe || g_config.reverse_stereo_probe ||
@@ -23338,10 +23554,19 @@ void STDMETHODCALLTYPE hook_draw_indexed_instanced(
     UINT start_index_location,
     INT base_vertex_location,
     UINT start_instance_location) {
-    // [PERF:NOAA-PIPELINE-LOOKUP V1441 1/3] Smoke and focus inspect the same
-    // currently bound PSO. Publish one nonblocking snapshot for the draw.
+    // [PERF:NOAA-PIPELINE-LOOKUP V1441 1/3] Foliage, smoke and focus inspect
+    // the same currently bound PSO. Publish one nonblocking snapshot for the
+    // draw instead of probing the command-list table up to three times.
     auto* draw_pipeline =
         load_command_list_pipeline_effect_nonblocking(command_list);
+    if (prepare_foliage_hmd_base_draw(command_list, draw_pipeline)) {
+        g_draw_indexed_instanced(
+            command_list, index_count_per_instance, instance_count,
+            start_index_location, base_vertex_location,
+            start_instance_location);
+        return;
+    }
+
     auto* real_smoke_pipeline = draw_pipeline;
     const bool real_smoke_candidate =
         real_smoke_pipeline != nullptr &&
@@ -24537,6 +24762,13 @@ void STDMETHODCALLTYPE hook_draw_instanced(
         witcher_sense_history_suppression{
             command_list, draw_pipeline,
             vertex_count_per_instance, instance_count};
+    if (prepare_foliage_hmd_base_draw(command_list, draw_pipeline)) {
+        g_draw_instanced(
+            command_list, vertex_count_per_instance, instance_count,
+            start_vertex_location, start_instance_location);
+        return;
+    }
+
     // [PERF:NOAA-NONINDEXED-FAST-PATH V1442] A clean Strict-Stereo No-AA
     // draw outside the known HUD family has no remaining functional consumer
     // below. Preserve the 6x1 aim candidate and every diagnostic/temporal/AER
@@ -24933,6 +25165,59 @@ bool ensure_tiled_culling_override_resources() {
         g_tiled_culling_upload != nullptr &&
         g_tiled_culling_upload_mapped != nullptr &&
         g_tiled_culling_descriptor_increment != 0;
+}
+
+bool ensure_foliage_bound_basis_resources() {
+    if (g_foliage_bound_basis_resources_ready.load(
+            std::memory_order_acquire)) {
+        return true;
+    }
+    std::call_once(g_foliage_bound_basis_resources_once, []() {
+        if (g_d3d12_device == nullptr) {
+            return;
+        }
+        D3D12_HEAP_PROPERTIES upload_heap{};
+        upload_heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+        upload_heap.CreationNodeMask = 1;
+        upload_heap.VisibleNodeMask = 1;
+        D3D12_RESOURCE_DESC upload_desc{};
+        upload_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        upload_desc.Width = static_cast<UINT64>(
+            kFoliageBoundBasisSlotCount * kFoliageBoundBasisSlotBytes);
+        upload_desc.Height = 1;
+        upload_desc.DepthOrArraySize = 1;
+        upload_desc.MipLevels = 1;
+        upload_desc.Format = DXGI_FORMAT_UNKNOWN;
+        upload_desc.SampleDesc.Count = 1;
+        upload_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        if (FAILED(g_d3d12_device->CreateCommittedResource(
+                &upload_heap, D3D12_HEAP_FLAG_NONE, &upload_desc,
+                D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                IID_PPV_ARGS(&g_foliage_bound_basis_upload))) ||
+            FAILED(g_foliage_bound_basis_upload->Map(
+                0, nullptr,
+                reinterpret_cast<void**>(
+                    &g_foliage_bound_basis_upload_mapped)))) {
+            log_line(
+                "V1521 foliage native snapshot upload ring creation failed");
+            return;
+        }
+        g_foliage_bound_basis_upload_gpu_va =
+            g_foliage_bound_basis_upload->GetGPUVirtualAddress();
+        if (g_foliage_bound_basis_upload_gpu_va == 0) {
+            return;
+        }
+        g_foliage_bound_basis_resources_ready.store(
+            true, std::memory_order_release);
+        if (g_config.runtime_diagnostics) {
+            log_line(
+                "V1521 foliage native snapshot resources ready slots=%zu bytes=%u transformed=0",
+                g_foliage_bound_basis_override_slots.size(),
+                kFoliageBoundBasisSlotBytes);
+        }
+    });
+    return g_foliage_bound_basis_resources_ready.load(
+        std::memory_order_acquire);
 }
 
 bool initialize_taau_mvec_pipeline() {
@@ -25571,7 +25856,7 @@ bool private_resource_slot_retired(
     }
     // [PERF:NOAA-FENCE-COMPLETION-CACHE V1441] Fence completion is monotonic
     // and the queue timelines are process-lifetime objects. One query proves
-    // retirement for every private slot carrying the same or an older value.
+    // retirement for every foliage slot carrying the same or an older value.
     struct FenceCompletionCacheEntry {
         ID3D12Fence* fence{};
         uint64_t completed{};
@@ -25610,10 +25895,19 @@ void track_taau_slot_use(
     ID3D12GraphicsCommandList* command_list,
     bool compose,
     uint32_t index,
-    bool tiled_culling = false) {
+    bool tiled_culling = false,
+    bool foliage_bound_basis = false,
+    uint32_t slot_count = 1) {
     std::scoped_lock lock{g_taau_slot_mutex};
     auto& pending = g_taau_pending_slot_uses[command_list];
-    pending.push_back({compose, index, tiled_culling});
+    // A reference frame contains roughly one hundred foliage owners. Reserve
+    // once per recording list instead of repeatedly reallocating the vector;
+    // ownership and per-slot fence retirement remain unchanged.
+    if (foliage_bound_basis && pending.capacity() < 128) {
+        pending.reserve(128);
+    }
+    pending.push_back(
+        {compose, index, tiled_culling, foliage_bound_basis, slot_count});
 }
 
 bool acquire_taau_override_slot(
@@ -25673,6 +25967,244 @@ bool acquire_tiled_culling_override_slot(
         slot.reserved.store(false, std::memory_order_release);
     }
     return false;
+}
+
+bool acquire_foliage_bound_basis_override_slot(
+    ID3D12GraphicsCommandList* command_list,
+    uint32_t& slot_index_out) {
+    if (command_list == nullptr ||
+        !ensure_foliage_bound_basis_resources()) {
+        return false;
+    }
+    auto* state = access_dlss_graphics_state(command_list, true);
+    if (state == nullptr) {
+        return false;
+    }
+    const uint64_t recording_epoch = state->recording_epoch;
+    if (state->foliage_chunk_epoch != recording_epoch) {
+        state->foliage_chunk_epoch = recording_epoch;
+        state->foliage_chunk_start = UINT32_MAX;
+        state->foliage_chunk_next = kFoliageBoundBasisChunkSize;
+    }
+    if (state->foliage_chunk_start != UINT32_MAX &&
+        state->foliage_chunk_next < kFoliageBoundBasisChunkSize) {
+        slot_index_out =
+            state->foliage_chunk_start + state->foliage_chunk_next;
+        ++state->foliage_chunk_next;
+        return true;
+    }
+
+    // [PERF:NOAA-FOLIAGE-CHUNKS V1442 1/3] Reserve and retire one contiguous
+    // block per recording list. Every slot keeps the same exact submitting
+    // queue fence as V1441, while the render worker pays the pending-map mutex
+    // only once per sixteen foliage draws.
+    static_assert(
+        kFoliageBoundBasisSlotCount % kFoliageBoundBasisChunkSize == 0);
+    const uint32_t start = g_foliage_bound_basis_slot_index.fetch_add(
+        kFoliageBoundBasisChunkSize, std::memory_order_relaxed);
+    for (uint32_t chunk_offset = 0;
+         chunk_offset < g_foliage_bound_basis_override_slots.size();
+         chunk_offset += kFoliageBoundBasisChunkSize) {
+        const uint32_t chunk_start =
+            (start + chunk_offset) % static_cast<uint32_t>(
+                g_foliage_bound_basis_override_slots.size());
+        uint32_t reserved_count{};
+        for (; reserved_count < kFoliageBoundBasisChunkSize;
+             ++reserved_count) {
+            auto& slot = g_foliage_bound_basis_override_slots[
+                chunk_start + reserved_count];
+            bool expected{};
+            if (!slot.reserved.compare_exchange_strong(
+                    expected, true, std::memory_order_acq_rel)) {
+                break;
+            }
+            if (!private_resource_slot_retired(
+                    slot.retirement_fence,
+                    slot.retirement_fence_value)) {
+                slot.reserved.store(false, std::memory_order_release);
+                break;
+            }
+        }
+        if (reserved_count != kFoliageBoundBasisChunkSize) {
+            for (uint32_t rollback = 0; rollback < reserved_count;
+                 ++rollback) {
+                g_foliage_bound_basis_override_slots[
+                    chunk_start + rollback].reserved.store(
+                        false, std::memory_order_release);
+            }
+            continue;
+        }
+        track_taau_slot_use(
+            command_list, false, chunk_start, false, true,
+            kFoliageBoundBasisChunkSize);
+        state->foliage_chunk_start = chunk_start;
+        state->foliage_chunk_next = 1;
+        slot_index_out = chunk_start;
+        return true;
+    }
+    return false;
+}
+
+bool foliage_bound_basis_table_cpu_handle(
+    const DlssGraphicsStateSnapshot& state,
+    D3D12_GPU_DESCRIPTOR_HANDLE table,
+    UINT descriptor_count,
+    D3D12_CPU_DESCRIPTOR_HANDLE& cpu_out) {
+    if (table.ptr == 0 || state.cbv_gpu_start.ptr == 0 ||
+        state.cbv_cpu_start.ptr == 0 ||
+        state.cbv_descriptor_increment == 0 ||
+        table.ptr < state.cbv_gpu_start.ptr) {
+        return false;
+    }
+    const UINT64 byte_offset = table.ptr - state.cbv_gpu_start.ptr;
+    if (byte_offset % state.cbv_descriptor_increment != 0) {
+        return false;
+    }
+    const UINT64 descriptor_index =
+        byte_offset / state.cbv_descriptor_increment;
+    if (descriptor_index + descriptor_count >
+        state.cbv_descriptor_count) {
+        return false;
+    }
+    cpu_out.ptr = state.cbv_cpu_start.ptr +
+        static_cast<SIZE_T>(descriptor_index) *
+            state.cbv_descriptor_increment;
+    return true;
+}
+
+void note_foliage_bound_basis_fallback(const char* reason) {
+    if (g_config.runtime_diagnostics) {
+        const uint64_t count = g_foliage_bound_basis_fallbacks.fetch_add(
+            1, std::memory_order_relaxed) + 1;
+        if (count <= 16 || (count & (count - 1)) == 0) {
+        log_line(
+            "V1521 foliage native snapshot fallback count=%llu reason=%s present=%llu",
+            static_cast<unsigned long long>(count), reason,
+            static_cast<unsigned long long>(
+                g_present_count.load(std::memory_order_relaxed)));
+        }
+    }
+}
+
+bool prepare_foliage_hmd_base_draw(
+    ID3D12GraphicsCommandList* command_list,
+    ID3D12PipelineState* pipeline) {
+    if (!foliage_bound_basis_route_active() || command_list == nullptr ||
+        g_create_cbv == nullptr || g_d3d12_device == nullptr) {
+        return false;
+    }
+
+    const auto* owner = lookup_foliage_bound_basis_pipeline(pipeline);
+    if (owner == nullptr) {
+        return false;
+    }
+    const auto* state = access_dlss_graphics_state(command_list, false);
+    if (state == nullptr || state->root_signature != owner->root_signature ||
+        state->cbv_srv_uav_heap == nullptr ||
+        state->tables[kFoliageBoundBasisVertexCbvRoot].ptr == 0) {
+        note_foliage_bound_basis_fallback("graphics_state");
+        return false;
+    }
+
+    D3D12_CPU_DESCRIPTOR_HANDLE native_b0_descriptor{};
+    if (!foliage_bound_basis_table_cpu_handle(
+            *state, state->tables[kFoliageBoundBasisVertexCbvRoot],
+            kFoliageBoundBasisPreviousCbvOffset + 1,
+            native_b0_descriptor)) {
+        note_foliage_bound_basis_fallback("native_vertex_table");
+        return false;
+    }
+    D3D12_CPU_DESCRIPTOR_HANDLE native_b12_descriptor{
+        native_b0_descriptor.ptr +
+            static_cast<SIZE_T>(kFoliageBoundBasisPreviousCbvOffset) *
+                state->cbv_descriptor_increment};
+
+    CbvDescriptorInfo source_b0{};
+    CbvDescriptorInfo source_b12{};
+    if (!load_cbv_descriptor(native_b0_descriptor.ptr, source_b0) ||
+        source_b0.size_in_bytes < 772 ||
+        source_b0.size_in_bytes > kFoliageBoundBasisB0Bytes ||
+        source_b0.size_in_bytes %
+            D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT != 0) {
+        note_foliage_bound_basis_fallback("b0_cbv_contract");
+        return false;
+    }
+    if (!load_cbv_descriptor(native_b12_descriptor.ptr, source_b12) ||
+        source_b12.size_in_bytes < 160 ||
+        source_b12.size_in_bytes > kFoliageBoundBasisB12Bytes ||
+        source_b12.size_in_bytes %
+            D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT != 0) {
+        note_foliage_bound_basis_fallback("b12_cbv_contract");
+        return false;
+    }
+
+    std::array<float,
+        kFoliageBoundBasisB0Bytes / sizeof(float)> private_b0;
+    std::array<float,
+        kFoliageBoundBasisB12Bytes / sizeof(float)> private_b12;
+    if (!copy_gpu_va_bytes(
+            source_b0.gpu_va, private_b0.data(),
+            source_b0.size_in_bytes) ||
+        !copy_gpu_va_bytes(
+            source_b12.gpu_va, private_b12.data(),
+            source_b12.size_in_bytes)) {
+        note_foliage_bound_basis_fallback("cbv_copy");
+        return false;
+    }
+
+    uint32_t slot_index{};
+    if (!acquire_foliage_bound_basis_override_slot(
+            command_list, slot_index)) {
+        note_foliage_bound_basis_fallback("slot");
+        return false;
+    }
+    const size_t upload_offset =
+        static_cast<size_t>(slot_index) * kFoliageBoundBasisSlotBytes;
+    const size_t previous_upload_offset =
+        upload_offset + kFoliageBoundBasisB0Bytes;
+    memcpy(g_foliage_bound_basis_upload_mapped + upload_offset,
+        private_b0.data(), source_b0.size_in_bytes);
+    memcpy(
+        g_foliage_bound_basis_upload_mapped + previous_upload_offset,
+        private_b12.data(), source_b12.size_in_bytes);
+
+    D3D12_CONSTANT_BUFFER_VIEW_DESC private_b0_desc{};
+    private_b0_desc.BufferLocation =
+        g_foliage_bound_basis_upload_gpu_va + upload_offset;
+    private_b0_desc.SizeInBytes = source_b0.size_in_bytes;
+    g_create_cbv(
+        g_d3d12_device, &private_b0_desc, native_b0_descriptor);
+    store_cbv_descriptor(
+        native_b0_descriptor.ptr,
+        CbvDescriptorInfo{
+            private_b0_desc.BufferLocation, private_b0_desc.SizeInBytes});
+    D3D12_CONSTANT_BUFFER_VIEW_DESC private_b12_desc{};
+    private_b12_desc.BufferLocation =
+        g_foliage_bound_basis_upload_gpu_va + previous_upload_offset;
+    private_b12_desc.SizeInBytes = source_b12.size_in_bytes;
+    g_create_cbv(
+        g_d3d12_device, &private_b12_desc, native_b12_descriptor);
+    store_cbv_descriptor(
+        native_b12_descriptor.ptr,
+        CbvDescriptorInfo{
+            private_b12_desc.BufferLocation,
+            private_b12_desc.SizeInBytes});
+
+    if (g_config.runtime_diagnostics) {
+        const uint64_t snapshotted = g_foliage_native_snapshots.fetch_add(
+            1, std::memory_order_relaxed) + 1;
+        if (take_bounded_log_slot(g_foliage_bound_basis_route_logs, 24)) {
+            const auto info = lookup_pipeline_info(pipeline);
+            log_line(
+                "V1521 foliage native snapshot draw=%llu vs=0x%llX ps=0x%llX b0_size=%u b12_size=%u current_descriptor_cpu=0x%zX previous_descriptor_cpu=0x%zX transformed=0 source=native_byte_identical",
+                static_cast<unsigned long long>(snapshotted),
+                static_cast<unsigned long long>(info.vs_hash),
+                static_cast<unsigned long long>(info.ps_hash),
+                source_b0.size_in_bytes, source_b12.size_in_bytes,
+                native_b0_descriptor.ptr, native_b12_descriptor.ptr);
+        }
+    }
+    return true;
 }
 
 bool acquire_taau_compose_slot(
@@ -42627,9 +43159,9 @@ void ensure_initialized() {
             log_line(
                 "V1424 full_vr_fallback_fov_source=raw_openxr_eye recursive_shared_fov_input=removed shared_fov_publication=retained taau_dlss_common=1 native_factory=unchanged");
             log_line(
-                "V1441 noaa_optimization=safe descriptor_copy=lock_free_functional_metadata gpu_va=epoch_validated_tls_hit diagnostics=release_zero_cost base=V1424");
+                "V1441 noaa_optimization=safe descriptor_copy=lock_free_functional_metadata gpu_va=epoch_validated_tls_hit foliage=pso_reused diagnostics=release_zero_cost base=V1424");
             log_line(
-                "V1442 noaa_optimization=aggressive tiled_culling=tls_bindings nonindexed=clean_route_fast_path gpu_command_stream=unchanged base=V1441");
+                "V1442 noaa_optimization=aggressive tiled_culling=tls_bindings foliage=16_slot_chunks nonindexed=clean_route_fast_path gpu_command_stream=unchanged base=V1441");
             log_line(
                 "V1443 focus_fire_projection=runtime_openxr_fov per_eye_xy=1 quest_constants=removed b1_double_application_guard=runtime_centered");
             // [PERF:WITCHER-SENSE-BOUNDED-DESCRIPTORS V1499 5/5]
@@ -42694,7 +43226,7 @@ void ensure_initialized() {
             log_line(
                 "V1408 clean_mono=V19005_net_port_from_V1357 launcher=mono_first schema=15 mode3_v1391_preserved=1");
             log_line(
-                "V1519 foliage_correction=removed redengine_shaders=original redengine_psos=original redengine_descriptors=original redengine_draws=original override_upload_ring=absent owner_registry=absent draw_interception=absent");
+                "V1521 foliage_orientation_transform=removed owners=5E2E73E55B072A74_7FC495F2BB36CAC0,F9282625E62BCC6A_5B6F5C6CA86B8C9D native_b0_b12_snapshot=byte_identical changed_floats_current=0 changed_floats_previous=0 retirement=exact_submitting_queue private_heap=0 descriptor_copies=0 heap_switches=0 root_rebinds=0 global_openxr_modes=1 shaders=original geometry=original culling=original");
             log_line(
                 "V1416 native_dlss_owner=public_streamline_v1409 mono=v19005_public_streamline aer_stereo=v1289_public_completion split_viewports=mode3_only private_ngx=optiscaler_only native_nvngx_direct_hooks=absent fallback=none");
             log_line(

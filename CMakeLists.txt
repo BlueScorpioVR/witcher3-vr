@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(witcher3vr VERSION 0.1519.0 LANGUAGES C CXX)
+project(witcher3vr VERSION 0.1521.0 LANGUAGES C CXX)
 
 include(CTest)
 
@@ -313,6 +313,16 @@ if(BUILD_TESTING)
         COMMAND w3vr_cbv_descriptor_cache_policy_tests
     )
 
+    add_executable(w3vr_foliage_native_snapshot_policy_tests
+        tests/foliage_native_snapshot_policy_tests.cpp
+    )
+    target_include_directories(
+        w3vr_foliage_native_snapshot_policy_tests PRIVATE src)
+    add_test(
+        NAME renderer_foliage_native_snapshot_policy
+        COMMAND w3vr_foliage_native_snapshot_policy_tests
+    )
+
     add_executable(w3vr_smoke_eye_authority_policy_tests
         tests/smoke_eye_authority_policy_tests.cpp
     )
@@ -334,10 +344,11 @@ if(BUILD_TESTING)
     )
 
     add_test(
-        NAME renderer_v1519_remove_foliage_correction_contract
+        NAME renderer_foliage_native_snapshot_contract
         COMMAND "${CMAKE_COMMAND}"
-            "-DSOURCE_ROOT=${CMAKE_CURRENT_SOURCE_DIR}"
-            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/v1519_remove_foliage_correction_contract.cmake"
+            "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
+            "-DLIFETIME_EVIDENCE=${CMAKE_CURRENT_SOURCE_DIR}/support/foliage_native_table_lifetime_contract.json"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/foliage_native_current_previous_descriptor_contract.cmake"
     )
 
     add_test(

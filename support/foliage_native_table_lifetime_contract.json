@@ -1,0 +1,9 @@
+{
+  "capture": "v18013_foliage_input_frame2808.rdc",
+  "renderdoc_version": "1.45",
+  "total_draws": 1651,
+  "target_draws": 119,
+  "unique_target_root3_allocations": 119,
+  "same_root3_immediate_neighbor_count": 0,
+  "neighbor_radius": 2
+}

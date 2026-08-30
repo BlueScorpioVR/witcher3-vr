@@ -15,6 +15,7 @@ set(required_fragments
     "private_resource_slot_retired("
     "build=V1511"
     "dump_last_seconds(\"V1511\", 15)"
+    "uint32_t slot_count{1}"
     "slot.retirement_fence = private_resource_ordered")
 
 foreach(required_fragment IN LISTS required_fragments)
