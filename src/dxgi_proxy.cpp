@@ -38,6 +38,92 @@
 #include "smoke_eye_authority_policy.h"
 #include "taau_submission_policy.h"
 
+// V1501 keeps V1499's recovered release performance, expands the recyclable
+// cache to 16,384 sets and gives every set two History plus four signature
+// ways. Cached compositor draws search only the protected History partition.
+// V1497 removes the duplicate packed-lock recenter transaction on manual F10
+// Cinema entry. The F10 edge already arms the recenter immediately; the
+// detector transition must arm it only for automatic Cinema entry. Re-arming
+// the manual transition after the first accepted pair caused a second recenter
+// and left Stereo TAAU's eyes in different submitted-pair epochs.
+// [FIX:MANUAL-CINEMA-SINGLE-RECENTER V1497 1/3]
+// V1496 closes the release-only gap exposed by V1495. V1495 enabled the
+// retained HUD in strict-Stereo gameplay, but V1494's submitted fallback still
+// recorded the PSO-selected eye only for automatic Full VR. Diagnostic logging
+// slowed submission enough for the pointer-exact path to win; a normal run
+// could miss it immediately after loading and leave the fallback without an
+// eye. Record the already-selected eye for every active strict-Stereo retained
+// route. The callee keeps AER and every non-strict route excluded.
+// [FIX:STRICT-STEREO-GAMEPLAY-HUD-EYE-AUTHORITY V1496 1/3]
+// V1495 physically replaces V1483's strict-Stereo baked-only gameplay gate.
+// The broader Stereo-DLSS run is ordinary gameplay with perfect L/R cadence,
+// while its HUD audit has a valid pipeline but zero retained publications and
+// composites. That is the severe baked-HUD flicker class already isolated and
+// runtime-fixed by V1238. Restore the configured strict-Stereo retained route
+// for gameplay, now using V1494's accepted-predecessor join instead of the old
+// ambiguous ownership. AER, DLSS transport, camera and cutscene math are
+// unchanged.
+// [FIX:STRICT-STEREO-GAMEPLAY-RETAINED-HUD V1495 1/3]
+// V1493 changes one strict-Stereo HUD join variable from V1492. The failing
+// transition submits four alternating eye captures at Presents 2772-2775, then
+// exposes its first final boundary at 2777. The global AER window of two would
+// retain only one eye. Strict Stereo therefore uses the observed minimum window
+// of four; queue order, eye/pair authority, AER and all rendering stay unchanged.
+// [FIX:STRICT-STEREO-HUD-FOUR-PRESENT-WINDOW V1493 1/5]
+// V1494 changes one authority from V1493. The retained compositor does not ask
+// for the scene pair currently shown by OpenXR; its established freshness gate
+// asks for that scene's exact accepted predecessor. Labeling the HUD as current
+// could therefore complete a pair that the compositor would never consume while
+// the scene was stalled. Use the already published predecessor pair/generation,
+// validate it against the current accepted scene, and leave the target itself
+// untouched. The PSO-selected eye, four-Present window, queue proof, AER and all
+// rendering remain unchanged.
+// [FIX:STRICT-STEREO-HUD-ACCEPTED-PREDECESSOR-JOIN V1494 1/7]
+// V1488 physically replaces V1487's unconditional strict-Stereo fallback
+// promotion. A lone reused-camera eye is only a transition artifact and stays
+// on V1486's centered fail-open path. The first temporally coherent L/R
+// fallback pair also remains centered and arms native ASYM for the following
+// pair, so one pair can never mix projection owners. A Present gap, generation
+// change or return of the normal factory camera revokes that episode proof.
+// [FIX:STRICT-STEREO-PERSISTENT-REUSED-CAMERA V1488 1/4]
+// V1487 physically replaces V1255's centered reused-camera fallback in strict
+// Stereo with a complete native-ASymmetric producer. Both eyes publish their
+// raw runtime FOV, frame-local off-axis descriptor and temporal proof into the
+// existing pair ledger before capture can accept the source. The <=2-Present
+// factory gate remains unchanged, so ordinary cutscenes stay on their proven
+// factory path. Transparent-effect admission follows the same separate native
+// fallback lifetime. AER keeps its independent centered sequential fallback.
+// [FIX:STRICT-STEREO-NATIVE-REUSED-CAMERA-FALLBACK V1487 1/3]
+// V1486 aligns V1484's transparent-effect admission with the already surviving
+// Full-VR camera lifetime used by V1255. A factory camera from the current or
+// preceding two Presents is precisely the condition that bypasses the centered
+// reused-camera fallback. The transparent draw may outlive REDengine task TLS
+// and the deferred Streamline tag, but it cannot outlive this Present-bounded
+// classification. This physically replaces V1485's expired backend-tag gate.
+// [FIX:FULL-VR-FACTORY-LIFETIME-AUTHORITY V1486 1/3]
+// V1484 removes V1199's blanket Full-VR exclusion from the already validated
+// ASYM transparent-effect correction. It admits that existing correction only
+// when the current exact render eye has a native factory-source bit; centered
+// Full-VR fallback frames, Cinema panels, SYM and every non-Mode-3 route remain
+// on their original path. No shader, projection math or draw-eye selector is
+// changed. The tiled-light V9233 route was already active in Cinema and is not
+// modified here.
+// [FIX:FULL-VR-TRANSPARENT-FIX-ADMISSION V1484 1/3]
+// V1480 keeps Streamline's packed capture resources in one canonical RGBA8
+// copy family across cutscene transitions. REDengine can expose the same final
+// color allocation as R8G8B8A8_UNORM (28) and later as
+// R8G8B8A8_TYPELESS (27); treating that view-compatible change as a physical
+// layout change destroyed the live capture ring while its cache resources were
+// still submitted. The ring now remains RGBA8 UNORM for 27/28/29 sources and
+// is recreated only for a real dimension or format-family change.
+// [FIX:STREAMLINE-RGBA8-COPY-FAMILY V1480 1/3]
+// V1479 physically removes V1477's strict-Stereo Full-VR AER-readiness HUD
+// substitution after runtime exposed gameplay HUD flicker. The surviving HUD
+// route is exactly V1476's strict predecessor-freshness contract.
+// V1499 physically replaces V1472/V1478's growing Witcher Senses descriptor
+// registry and generic legacy fallback with a bounded four-way cache for the
+// exact t0/t2/t3 classes. Descriptor copies no longer enable the generic CBV
+// mirror or reverse mutex solely for Witcher Senses.
 // V1443 replaces the focus/fire family's Quest-specific projection constants
 // with immutable variants derived from the active OpenXR runtime eye FOV.
 // V1442 starts physically from V1441 and removes additional CPU bookkeeping
@@ -797,6 +883,9 @@ bool puredark_afw_mode3_aer_dlss_final_source_active() {
 }
 
 bool retained_hud_projection_route_active() {
+    // [FIX:STRICT-STEREO-GAMEPLAY-RETAINED-HUD V1495 2/3] Strict Stereo uses
+    // one retained owner after bootstrap in gameplay and cutscenes. V1494's
+    // accepted-predecessor join supplies the exact eye/pair identity.
     return (mode3_stereo_transport_active() &&
             !mode3_aer_final_present_source_active() &&
             !mode3_aer_afw_baked_hud_cinema_active()) ||
@@ -902,6 +991,24 @@ bool reverse_diagnostic_hooks_requested() {
 
 bool native_asymmetric_noaa_route_active();
 bool automatic_focus_projection_route_configured();
+bool native_asymmetric_transparent_center_route_active();
+
+// Prepare only the descriptor and graphics-binding state needed by the
+// supported Mode-3 family. The GPU intervention remains ASYM-only, so SYM and
+// every non-Mode-3 route are rendering-identical to V1443.
+bool witcher_sense_history_suppression_route_configured() {
+    return g_config.openxr_enabled &&
+        g_config.openxr_mode == 3 &&
+        (g_config.temporal_backend == TemporalBackend::None ||
+            g_config.temporal_backend == TemporalBackend::Taau ||
+            g_config.temporal_backend == TemporalBackend::Dlss) &&
+        g_config.hmd_freelook;
+}
+
+bool witcher_sense_history_suppression_route_active() {
+    return witcher_sense_history_suppression_route_configured() &&
+        native_asymmetric_transparent_center_route_active();
+}
 
 // The tiled-light correction is release behavior for the validated native
 // asymmetric No-AA route. It is deliberately independent of diagnostics.
@@ -993,6 +1100,7 @@ bool descriptor_metadata_hooks_needed() {
 
 bool graphics_binding_hooks_needed() {
     return temporal_backend_is_dlss() || taau_metadata_hooks_needed() ||
+        witcher_sense_history_suppression_route_configured() ||
         mode3_hud_descriptor_hooks_needed() ||
         real_smoke_world_up_binding_route_active() ||
         foliage_bound_basis_route_active() ||
@@ -1019,6 +1127,7 @@ bool common_renderer_pipeline_hooks_needed() {
 
 bool renderer_hook_installation_needed() {
     return common_renderer_pipeline_hooks_needed() ||
+        witcher_sense_history_suppression_route_configured() ||
         descriptor_metadata_hooks_needed() || graphics_binding_hooks_needed() ||
         temporal_compute_hooks_needed();
 }
@@ -2690,14 +2799,22 @@ bool native_asymmetric_cinema_panel_active() {
 }
 
 bool native_asymmetric_full_vr_scene_active();
+bool native_asymmetric_source_eye_tagged(uint64_t pair_id, uint32_t eye);
+void log_line(const char* fmt, ...);
+bool native_asymmetric_full_vr_effect_source_active();
 
 bool native_asymmetric_transparent_center_route_active() {
+    const bool full_vr_scene = native_asymmetric_full_vr_scene_active();
+    // [FIX:FULL-VR-TRANSPARENT-FIX-ADMISSION V1484 2/3] V1199 suppressed the
+    // whole Full-VR lifecycle. Preserve its centered-fallback protection, but
+    // allow the established fix for a frame-local proven native-ASym source.
     return w3vr::mode3_transport::
         native_asymmetric_effect_center_application_active(
             automatic_focus_projection_route_configured(),
             native_stereo_runtime_enabled(),
             native_asymmetric_cinema_panel_active(),
-            native_asymmetric_full_vr_scene_active());
+            full_vr_scene,
+            native_asymmetric_full_vr_effect_source_active());
 }
 
 NativeAsymmetricPairSlot* native_asymmetric_pair_slot(uint64_t pair_id) {
@@ -2993,6 +3110,29 @@ void prune_engine_dual_frame_tags_locked(uint64_t newest_pair_id) {
 }
 std::array<std::atomic<uint64_t>, 2> g_full_vr_frame_camera_last_pair{};
 std::atomic<uint64_t> g_full_vr_factory_camera_last_present{UINT64_MAX};
+std::atomic<uint64_t>
+    g_full_vr_native_reused_camera_last_present{UINT64_MAX};
+std::mutex g_strict_stereo_reused_camera_episode_mutex{};
+w3vr::native_asymmetric_transport_policy::ReusedCameraEpisodeState
+    g_strict_stereo_reused_camera_episode{};
+
+void reset_strict_stereo_reused_camera_episode(uint32_t generation) {
+    std::scoped_lock lock{g_strict_stereo_reused_camera_episode_mutex};
+    w3vr::native_asymmetric_transport_policy::reset_reused_camera_episode(
+        g_strict_stereo_reused_camera_episode, generation);
+}
+
+bool strict_stereo_native_reused_camera_pair_admitted(
+    uint32_t generation,
+    uint64_t present,
+    uint64_t pair_id,
+    uint32_t eye) {
+    std::scoped_lock lock{g_strict_stereo_reused_camera_episode_mutex};
+    return w3vr::native_asymmetric_transport_policy::
+        admit_native_reused_camera_pair(
+            g_strict_stereo_reused_camera_episode,
+            generation, present, pair_id, eye);
+}
 
 HmdCameraPoseSnapshot snapshot_current_hmd_camera_pose() {
     std::scoped_lock lock{g_hmd_pose_snapshot_mutex};
@@ -3268,6 +3408,62 @@ thread_local uint64_t g_streamline_dlss_pair_id{UINT64_MAX};
 // through both the emitter and the deferred command execution scopes.
 thread_local EngineFrameTag g_streamline_dlss_route_tag{};
 thread_local bool g_streamline_dlss_route_tag_valid{};
+
+bool native_asymmetric_full_vr_effect_source_active() {
+    if (!native_asymmetric_full_vr_scene_active()) {
+        return false;
+    }
+
+    const uint64_t present =
+        g_present_count.load(std::memory_order_relaxed);
+    const uint64_t last_full_vr_factory =
+        g_full_vr_factory_camera_last_present.load(
+            std::memory_order_acquire);
+    const bool ordered_factory_lifetime =
+        last_full_vr_factory != UINT64_MAX &&
+        present >= last_full_vr_factory;
+    const uint64_t factory_age = ordered_factory_lifetime
+        ? present - last_full_vr_factory : UINT64_MAX;
+    const uint64_t last_native_reused_camera =
+        g_full_vr_native_reused_camera_last_present.load(
+            std::memory_order_acquire);
+    const bool ordered_native_reused_lifetime =
+        last_native_reused_camera != UINT64_MAX &&
+        present >= last_native_reused_camera;
+    const uint64_t native_reused_age = ordered_native_reused_lifetime
+        ? present - last_native_reused_camera : UINT64_MAX;
+    const bool native_factory_source =
+        ordered_factory_lifetime && factory_age <= 2;
+    const bool native_reused_source =
+        !mode3_aer_presentation_active() &&
+        ordered_native_reused_lifetime && native_reused_age <= 2;
+    const bool native_source = native_factory_source || native_reused_source;
+
+    // [FIX:FULL-VR-FACTORY-LIFETIME-AUTHORITY V1486 2/3] Preserve V1486's
+    // exact factory lifetime. V1487 adds a distinct lifetime for the strict-
+    // Stereo reused-camera source now that it is a verified native pair; never
+    // write that fallback into the factory gate which admits ordinary cameras.
+    if (g_config.runtime_diagnostics) {
+        static std::atomic<uint32_t> full_vr_effect_source_logs{};
+        const uint32_t log_index = full_vr_effect_source_logs.fetch_add(
+            1, std::memory_order_relaxed);
+        if (log_index < 64) {
+            log_line(
+                "V1487 Full VR transparent authority sample=%u authority=native_source_lifetime present=%llu factory_present=%llu factory_age=%llu reused_present=%llu reused_age=%llu factory_source=%u reused_source=%u native_source=%u",
+                log_index,
+                static_cast<unsigned long long>(present),
+                static_cast<unsigned long long>(last_full_vr_factory),
+                static_cast<unsigned long long>(factory_age),
+                static_cast<unsigned long long>(last_native_reused_camera),
+                static_cast<unsigned long long>(native_reused_age),
+                native_factory_source ? 1u : 0u,
+                native_reused_source ? 1u : 0u,
+                native_source ? 1u : 0u);
+        }
+    }
+    return native_source;
+}
+
 std::atomic<uint32_t> g_ngx_trace_count{};
 thread_local bool g_ngx_creating_feature{};
 std::atomic<uint64_t> g_streamline_reset_last_logged_present{UINT64_MAX};
@@ -4149,6 +4345,249 @@ bool load_resource_descriptor_fast(
     return false;
 }
 
+// [PERF:WITCHER-SENSE-BOUNDED-DESCRIPTORS V1499 1/5] Keep only the three
+// immutable inputs needed to admit the exact compositor. The old 65,536-slot,
+// 32-probe registry retained every handle ever seen and made descriptor-copy
+// cost grow throughout a run. This four-way cache is bounded, overwrites old
+// generations, and never enters the generic descriptor mutex/map.
+enum class WitcherSenseDescriptorKind : uint32_t {
+    None,
+    Scene,
+    History,
+    Auxiliary,
+};
+
+struct WitcherSenseDescriptorInfo {
+    ID3D12Resource* resource{};
+    UINT64 width{};
+    UINT height{};
+    WitcherSenseDescriptorKind kind{WitcherSenseDescriptorKind::None};
+};
+
+constexpr size_t kWitcherSenseDescriptorSetCount = 1u << 14;
+constexpr size_t kWitcherSenseDescriptorWays = 6;
+constexpr size_t kWitcherSenseHistoryWays = 2;
+constexpr size_t kWitcherSenseSignatureWays =
+    kWitcherSenseDescriptorWays - kWitcherSenseHistoryWays;
+struct WitcherSenseDescriptorSlot {
+    std::atomic<uint64_t> sequence{};
+    std::atomic<SIZE_T> key{};
+    std::atomic<ID3D12Resource*> resource{};
+    std::atomic<UINT64> width{};
+    std::atomic<UINT> height{};
+    std::atomic<uint32_t> kind{};
+};
+struct WitcherSenseDescriptorSet {
+    std::atomic_flag writer = ATOMIC_FLAG_INIT;
+    uint32_t next_history_victim{};
+    uint32_t next_signature_victim{};
+    std::array<WitcherSenseDescriptorSlot,
+        kWitcherSenseDescriptorWays> slots{};
+};
+std::array<WitcherSenseDescriptorSet,
+    kWitcherSenseDescriptorSetCount> g_witcher_sense_descriptor_cache{};
+
+WitcherSenseDescriptorKind classify_witcher_sense_descriptor(
+    const D3D12_RESOURCE_DESC& resource_desc,
+    DXGI_FORMAT view_format,
+    D3D12_SRV_DIMENSION view_dimension) {
+    if (resource_desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+        resource_desc.DepthOrArraySize != 1 || resource_desc.MipLevels != 1 ||
+        resource_desc.SampleDesc.Count != 1 ||
+        (view_dimension != D3D12_SRV_DIMENSION_UNKNOWN &&
+            view_dimension != D3D12_SRV_DIMENSION_TEXTURE2D)) {
+        return WitcherSenseDescriptorKind::None;
+    }
+    if (view_format == DXGI_FORMAT_UNKNOWN) {
+        view_format = resource_desc.Format;
+    }
+    if (view_format != resource_desc.Format) {
+        return WitcherSenseDescriptorKind::None;
+    }
+    if (resource_desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT) {
+        return WitcherSenseDescriptorKind::Scene;
+    }
+    if (resource_desc.Format == DXGI_FORMAT_R16G16_FLOAT &&
+        resource_desc.Width == 512 && resource_desc.Height == 512 &&
+        (resource_desc.Flags &
+            D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) != 0) {
+        return WitcherSenseDescriptorKind::History;
+    }
+    if (resource_desc.Format == DXGI_FORMAT_R11G11B10_FLOAT) {
+        return WitcherSenseDescriptorKind::Auxiliary;
+    }
+    return WitcherSenseDescriptorKind::None;
+}
+
+size_t witcher_sense_descriptor_set_index(SIZE_T cpu_handle) {
+    size_t hash = static_cast<size_t>(cpu_handle >> 5);
+    hash ^= hash >> 10;
+    return hash & (kWitcherSenseDescriptorSetCount - 1);
+}
+
+void lock_witcher_sense_descriptor_set(WitcherSenseDescriptorSet& set) {
+    while (set.writer.test_and_set(std::memory_order_acquire)) {
+        YieldProcessor();
+    }
+}
+
+void write_witcher_sense_descriptor_slot(
+    WitcherSenseDescriptorSlot& slot,
+    SIZE_T cpu_handle,
+    const WitcherSenseDescriptorInfo& info) {
+    const uint64_t sequence =
+        slot.sequence.fetch_add(1, std::memory_order_acq_rel);
+    slot.key.store(cpu_handle, std::memory_order_relaxed);
+    slot.resource.store(info.resource, std::memory_order_relaxed);
+    slot.width.store(info.width, std::memory_order_relaxed);
+    slot.height.store(info.height, std::memory_order_relaxed);
+    slot.kind.store(static_cast<uint32_t>(info.kind),
+        std::memory_order_relaxed);
+    slot.sequence.store(sequence + 2, std::memory_order_release);
+}
+
+void store_witcher_sense_descriptor_target(
+    SIZE_T cpu_handle,
+    const WitcherSenseDescriptorInfo& info) {
+    if (cpu_handle == 0 || info.resource == nullptr ||
+        info.kind == WitcherSenseDescriptorKind::None) {
+        return;
+    }
+    auto& set = g_witcher_sense_descriptor_cache[
+        witcher_sense_descriptor_set_index(cpu_handle)];
+    lock_witcher_sense_descriptor_set(set);
+    // [PERF:WITCHER-SENSE-EXPANDED-PARTITION-CACHE V1501 1/3] V1500's two
+    // signature ways made initial t0/t3 admission disappear in both TAAU and
+    // DLSS. Distribute handles over 16 times as many sets and restore four
+    // signature ways while keeping the alternating RG16F t2 pair isolated in
+    // ways 0-1. Entries remain recyclable and lookup stays bounded.
+    const bool history =
+        info.kind == WitcherSenseDescriptorKind::History;
+    const size_t first_way = history ? 0 : kWitcherSenseHistoryWays;
+    const size_t way_count = history
+        ? kWitcherSenseHistoryWays : kWitcherSenseSignatureWays;
+    size_t selected = kWitcherSenseDescriptorWays;
+    for (size_t way = 0; way < kWitcherSenseDescriptorWays; ++way) {
+        const auto key = set.slots[way].key.load(std::memory_order_relaxed);
+        if (key == cpu_handle) {
+            if (way >= first_way && way < first_way + way_count) {
+                selected = way;
+            } else {
+                write_witcher_sense_descriptor_slot(
+                    set.slots[way], 0, {});
+            }
+        }
+    }
+    if (selected == kWitcherSenseDescriptorWays) {
+        for (size_t offset = 0; offset < way_count; ++offset) {
+            const size_t way = first_way + offset;
+            if (set.slots[way].key.load(std::memory_order_relaxed) == 0) {
+                selected = way;
+                break;
+            }
+        }
+    }
+    if (selected == kWitcherSenseDescriptorWays) {
+        auto& next_victim = history
+            ? set.next_history_victim : set.next_signature_victim;
+        selected = first_way + next_victim++ % way_count;
+    }
+    write_witcher_sense_descriptor_slot(
+        set.slots[selected], cpu_handle, info);
+    set.writer.clear(std::memory_order_release);
+}
+
+void invalidate_witcher_sense_descriptor_target(SIZE_T cpu_handle) {
+    if (cpu_handle == 0) {
+        return;
+    }
+    auto& set = g_witcher_sense_descriptor_cache[
+        witcher_sense_descriptor_set_index(cpu_handle)];
+    bool present = false;
+    for (auto& slot : set.slots) {
+        if (slot.key.load(std::memory_order_acquire) == cpu_handle) {
+            present = true;
+            break;
+        }
+    }
+    if (!present) {
+        return;
+    }
+    lock_witcher_sense_descriptor_set(set);
+    for (auto& slot : set.slots) {
+        if (slot.key.load(std::memory_order_relaxed) != cpu_handle) {
+            continue;
+        }
+        write_witcher_sense_descriptor_slot(slot, 0, {});
+        break;
+    }
+    set.writer.clear(std::memory_order_release);
+}
+
+bool load_witcher_sense_descriptor_target(
+    SIZE_T cpu_handle,
+    WitcherSenseDescriptorInfo& info_out,
+    WitcherSenseDescriptorKind expected_kind =
+        WitcherSenseDescriptorKind::None) {
+    if (cpu_handle == 0) {
+        return false;
+    }
+    auto& set = g_witcher_sense_descriptor_cache[
+        witcher_sense_descriptor_set_index(cpu_handle)];
+    const bool expected_history =
+        expected_kind == WitcherSenseDescriptorKind::History;
+    const size_t first_way = expected_history
+        ? 0 : (expected_kind == WitcherSenseDescriptorKind::None
+            ? 0 : kWitcherSenseHistoryWays);
+    const size_t way_count = expected_history
+        ? kWitcherSenseHistoryWays
+        : (expected_kind == WitcherSenseDescriptorKind::None
+            ? kWitcherSenseDescriptorWays : kWitcherSenseSignatureWays);
+    for (size_t offset = 0; offset < way_count; ++offset) {
+        auto& slot = set.slots[first_way + offset];
+        for (size_t attempt = 0; attempt < 3; ++attempt) {
+            const uint64_t begin =
+                slot.sequence.load(std::memory_order_acquire);
+            if ((begin & 1u) != 0) {
+                YieldProcessor();
+                continue;
+            }
+            const auto key = slot.key.load(std::memory_order_relaxed);
+            WitcherSenseDescriptorInfo snapshot{};
+            snapshot.resource =
+                slot.resource.load(std::memory_order_relaxed);
+            snapshot.width = slot.width.load(std::memory_order_relaxed);
+            snapshot.height = slot.height.load(std::memory_order_relaxed);
+            snapshot.kind = static_cast<WitcherSenseDescriptorKind>(
+                slot.kind.load(std::memory_order_relaxed));
+            const uint64_t end =
+                slot.sequence.load(std::memory_order_acquire);
+            if (begin != end || (end & 1u) != 0) {
+                continue;
+            }
+            if (key == cpu_handle && snapshot.resource != nullptr &&
+                snapshot.kind != WitcherSenseDescriptorKind::None &&
+                (expected_kind == WitcherSenseDescriptorKind::None ||
+                    snapshot.kind == expected_kind)) {
+                info_out = snapshot;
+                return true;
+            }
+            break;
+        }
+    }
+    return false;
+}
+
+void copy_witcher_sense_descriptor_target(
+    SIZE_T dest_cpu, SIZE_T src_cpu) {
+    WitcherSenseDescriptorInfo source{};
+    if (load_witcher_sense_descriptor_target(src_cpu, source)) {
+        store_witcher_sense_descriptor_target(dest_cpu, source);
+    } else {
+        invalidate_witcher_sense_descriptor_target(dest_cpu);
+    }
+}
+
 struct RootDescriptorRangeInfo {
     D3D12_DESCRIPTOR_RANGE_TYPE type{};
     UINT num_descriptors{};
@@ -4287,6 +4726,7 @@ bool dlss_graphics_state_tracking_active() {
     // the graphics snapshot it consumes; retained HUD and TAAU may still
     // provide the same state, but are no longer hidden prerequisites.
     return asymmetric_tiled_culling_fix_needed() ||
+        witcher_sense_history_suppression_route_configured() ||
         real_smoke_world_up_binding_route_active() ||
         foliage_bound_basis_route_active() ||
         retained_hud_projection_route_configured();
@@ -4473,6 +4913,8 @@ struct Mode3EarlyHudPending {
     uint64_t recorded_present{};
     bool submitted_join{};
     bool destination_was_shader_read{};
+    uint32_t strict_eye{UINT32_MAX};
+    bool strict_eye_valid{};
 };
 // [FIX:AER-AFW-PREEXECUTE-HUD-SNAPSHOT V1282 1/6] Command lists may be reset
 // by another renderer worker as soon as the real ExecuteCommandLists returns.
@@ -4497,11 +4939,23 @@ struct Mode3SubmittedEarlyHudPending {
     ID3D12Fence* producer_queue_fence{};
     uint64_t producer_queue_fence_value{};
     uint64_t submission_serial{};
+    bool scene_only_draw_recorded{};
 };
+struct Mode3StrictHudCommandListEye {
+    uint32_t generation{};
+    uint32_t eye{UINT32_MAX};
+};
+// [FIX:STRICT-STEREO-HUD-FOUR-PRESENT-WINDOW V1493 2/5]
+constexpr uint64_t kMode3StrictHudJoinMaxPresentDistance = 4;
 std::array<Mode3EarlyHudSlot, kMode3EarlyHudSlotCount>
     g_mode3_early_hud_slots{};
 std::unordered_map<ID3D12GraphicsCommandList*, Mode3EarlyHudPending>
     g_mode3_early_hud_pending_by_command_list{};
+// [FIX:STRICT-STEREO-HUD-ACCEPTED-PREDECESSOR-JOIN V1494 2/7] This latch contains
+// only the eye already selected for the real HUD PSO. It deliberately carries
+// no synthetic task/pair identity and is erased on command-list Reset.
+std::unordered_map<ID3D12GraphicsCommandList*, Mode3StrictHudCommandListEye>
+    g_mode3_strict_hud_command_list_eyes{};
 std::deque<Mode3SubmittedEarlyHudPending>
     g_mode3_early_hud_submitted{};
 std::mutex g_mode3_early_hud_mutex{};
@@ -4518,6 +4972,43 @@ std::atomic<uint32_t> g_mode3_hud_generation_drain_pending{};
 std::atomic<uint32_t> g_mode3_hud_srv_root{UINT32_MAX};
 std::atomic<uint32_t> g_mode3_hud_srv_offset{UINT32_MAX};
 std::mutex g_hud_composite_pso_creation_mutex{};
+
+void record_mode3_strict_hud_command_list_eye(
+    ID3D12GraphicsCommandList* command_list,
+    int hud_eye) {
+    if (!mode3_strict_stereo_submitted_hud_join_active() ||
+        command_list == nullptr || hud_eye < 0 || hud_eye > 1) {
+        return;
+    }
+    const uint32_t generation =
+        g_streamline_capture_generation.load(std::memory_order_acquire);
+    std::scoped_lock lock{g_mode3_early_hud_mutex};
+    const uint32_t eye = static_cast<uint32_t>(hud_eye);
+    g_mode3_strict_hud_command_list_eyes[command_list] = {
+        generation, eye};
+    const auto pending =
+        g_mode3_early_hud_pending_by_command_list.find(command_list);
+    if (pending != g_mode3_early_hud_pending_by_command_list.end() &&
+        pending->second.generation == generation) {
+        pending->second.strict_eye = eye;
+        pending->second.strict_eye_valid = true;
+    }
+}
+
+// [FIX:STRICT-STEREO-HUD-FOUR-PRESENT-WINDOW V1493 3/5] This wider bound is
+// isolated to the strict accepted-scene join. AER retains its validated global
+// two-Present policy.
+constexpr bool strict_stereo_hud_join_window_matches(
+    uint32_t candidate_generation,
+    uint32_t current_generation,
+    uint64_t candidate_present,
+    uint64_t boundary_present) noexcept {
+    const uint64_t distance = candidate_present > boundary_present
+        ? candidate_present - boundary_present
+        : boundary_present - candidate_present;
+    return candidate_generation == current_generation &&
+        distance <= kMode3StrictHudJoinMaxPresentDistance;
+}
 
 bool mode3_early_hud_pair_ready();
 bool mode3_retained_hud_pair_ready_for_active_route();
@@ -11541,21 +12032,18 @@ constexpr bool kForceMode3AerAfwSubmittedHudJoinBuild = true;
 void record_mode3_aer_afw_final_hud_tag(
     ID3D12GraphicsCommandList* command_list,
     int hud_eye,
-    uint64_t hud_pair_id = 0) {
+    uint64_t /*hud_pair_id*/ = 0) {
     const bool aer_afw_route =
+        mode3_aer_presentation_active() &&
         mode3_aer_afw_post_hud_gameplay_active();
-    const bool strict_stereo_route =
-        mode3_strict_stereo_submitted_hud_join_active();
-    if ((!aer_afw_route && !strict_stereo_route) ||
-        command_list == nullptr) {
+    if (!aer_afw_route || command_list == nullptr) {
         return;
     }
 
     const uint32_t generation =
         g_streamline_capture_generation.load(std::memory_order_acquire);
     EngineFrameTag tag{};
-    bool exact_tag = (strict_stereo_route &&
-            current_exact_engine_render_tag(tag)) ||
+    bool exact_tag =
         lookup_dlss_recording_producer(command_list, tag) ||
         // [FIX:AER-TAAU-FULL-VR-HUD-COMMAND-TAG V1302 3/5] Keep the retained
         // t1 label on the same exact TAAU command-list identity used to choose
@@ -11567,30 +12055,7 @@ void record_mode3_aer_afw_final_hud_tag(
         (hud_eye < 0 || hud_eye > 1 ||
             tag.eye == static_cast<uint32_t>(hud_eye));
 
-    // [FIX:MODE3-SUBMITTED-HUD-STEREO V1293 1/6] TAAU has no Streamline
-    // command tag. Its strict-Stereo HUD selector already obtained an exact
-    // pair from the completed-task queue; recover that same immutable tag by
-    // pair and eye. Never substitute a newer queue entry or Present parity.
-    if (!exact_tag && strict_stereo_route && hud_pair_id != 0 &&
-        hud_pair_id != UINT64_MAX && hud_eye >= 0 && hud_eye <= 1) {
-        std::scoped_lock lock{g_engine_completed_tag_queue_mutex};
-        for (const auto& completed : g_engine_completed_tag_queue) {
-            if (completed.eye != static_cast<uint32_t>(hud_eye) ||
-                completed.pair_id != hud_pair_id ||
-                completed.generation != generation) {
-                continue;
-            }
-            tag = completed;
-            tag.task_provenance_valid = true;
-            exact_tag = true;
-            break;
-        }
-    }
-
     if (!exact_tag) {
-        if (!aer_afw_route) {
-            return;
-        }
         const uint64_t next_ordinal =
             g_mode3_afw_natural_render_ordinal.load(
                 std::memory_order_acquire);
@@ -13175,6 +13640,338 @@ void STDMETHODCALLTYPE hook_om_set_render_targets(
         render_target_descriptors, rts_single_handle_to_descriptor_range,
         depth_stencil_descriptor);
 }
+
+// The captured frame proved that the exact 4x1 compositor consumes scene t0,
+// Focus-history t2 and auxiliary t3 from root 1. Runtime validation proved that
+// clearing only the 512x512 RG16F t2 after the draw removes the orbiting
+// peer-eye duplicate. The bounded immutable snapshot signature admits the PSO;
+// cached-PSO draws resolve only the classified t2 target.
+constexpr UINT kWitcherSenseHistorySrvRoot = 1;
+constexpr UINT kWitcherSenseHistoryFocusOffset = 2;
+constexpr size_t kWitcherSenseHistoryRtvSlotCount = 16;
+
+std::atomic<ID3D12PipelineState*>
+    g_witcher_sense_history_compositor_pipeline{};
+std::mutex g_witcher_sense_history_rtv_mutex{};
+ID3D12DescriptorHeap* g_witcher_sense_history_rtv_heap{};
+UINT g_witcher_sense_history_rtv_increment{};
+std::array<std::atomic<ID3D12Resource*>,
+    kWitcherSenseHistoryRtvSlotCount>
+    g_witcher_sense_history_rtv_resources{};
+std::atomic<uint32_t> g_witcher_sense_history_match_logs{};
+std::atomic<uint32_t> g_witcher_sense_history_failure_logs{};
+std::atomic<uint32_t> g_witcher_sense_history_clear_logs{};
+
+bool witcher_sense_history_target_matches(
+    const WitcherSenseDescriptorInfo& info) {
+    return info.resource != nullptr &&
+        info.kind == WitcherSenseDescriptorKind::History &&
+        info.width == 512 && info.height == 512;
+}
+
+bool register_witcher_sense_history_target(
+    ID3D12Device* device,
+    const WitcherSenseDescriptorInfo& info) {
+    if (device == nullptr || !witcher_sense_history_target_matches(info)) {
+        return false;
+    }
+    for (size_t index = 0;
+         index < g_witcher_sense_history_rtv_resources.size(); ++index) {
+        if (g_witcher_sense_history_rtv_resources[index].load(
+                std::memory_order_acquire) == info.resource) {
+            return true;
+        }
+    }
+
+    std::scoped_lock lock{g_witcher_sense_history_rtv_mutex};
+    if (g_witcher_sense_history_rtv_heap == nullptr) {
+        D3D12_DESCRIPTOR_HEAP_DESC heap_desc{};
+        heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+        heap_desc.NumDescriptors = static_cast<UINT>(
+            kWitcherSenseHistoryRtvSlotCount);
+        heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+        if (FAILED(device->CreateDescriptorHeap(
+                &heap_desc,
+                IID_PPV_ARGS(&g_witcher_sense_history_rtv_heap)))) {
+            return false;
+        }
+        g_witcher_sense_history_rtv_increment =
+            device->GetDescriptorHandleIncrementSize(
+                D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+        if (g_witcher_sense_history_rtv_increment == 0) {
+            return false;
+        }
+    }
+
+    size_t free_index = g_witcher_sense_history_rtv_resources.size();
+    for (size_t index = 0;
+         index < g_witcher_sense_history_rtv_resources.size(); ++index) {
+        auto* const registered =
+            g_witcher_sense_history_rtv_resources[index].load(
+                std::memory_order_relaxed);
+        if (registered == info.resource) {
+            return true;
+        }
+        if (registered == nullptr &&
+            free_index == g_witcher_sense_history_rtv_resources.size()) {
+            free_index = index;
+        }
+    }
+    if (free_index == g_witcher_sense_history_rtv_resources.size()) {
+        if (g_config.logging_enabled && take_bounded_log_slot(
+                g_witcher_sense_history_failure_logs, 2)) {
+            log_line(
+                "V1499 Witcher Sense history RTV cache exhausted resource=%p",
+                info.resource);
+        }
+        return false;
+    }
+
+    auto handle =
+        g_witcher_sense_history_rtv_heap->
+            GetCPUDescriptorHandleForHeapStart();
+    handle.ptr += free_index *
+        static_cast<SIZE_T>(g_witcher_sense_history_rtv_increment);
+    D3D12_RENDER_TARGET_VIEW_DESC rtv_desc{};
+    rtv_desc.Format = DXGI_FORMAT_R16G16_FLOAT;
+    rtv_desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+    rtv_desc.Texture2D.MipSlice = 0;
+    rtv_desc.Texture2D.PlaneSlice = 0;
+    device->CreateRenderTargetView(info.resource, &rtv_desc, handle);
+    // The descriptor itself does not own the resource. Registration happens
+    // only inside CreateSRV, while REDengine still owns a valid reference.
+    info.resource->AddRef();
+    g_witcher_sense_history_rtv_resources[free_index].store(
+        info.resource, std::memory_order_release);
+    return true;
+}
+
+bool lookup_witcher_sense_history_rtv(
+    ID3D12Resource* resource,
+    D3D12_CPU_DESCRIPTOR_HANDLE& handle_out) {
+    if (resource == nullptr || g_witcher_sense_history_rtv_heap == nullptr ||
+        g_witcher_sense_history_rtv_increment == 0) {
+        return false;
+    }
+    for (size_t index = 0;
+         index < g_witcher_sense_history_rtv_resources.size(); ++index) {
+        if (g_witcher_sense_history_rtv_resources[index].load(
+                std::memory_order_acquire) != resource) {
+            continue;
+        }
+        handle_out =
+            g_witcher_sense_history_rtv_heap->
+                GetCPUDescriptorHandleForHeapStart();
+        handle_out.ptr += index *
+            static_cast<SIZE_T>(g_witcher_sense_history_rtv_increment);
+        return true;
+    }
+    return false;
+}
+
+bool resolve_witcher_sense_descriptor_target(
+    const DlssGraphicsStateSnapshot& state,
+    UINT root_parameter,
+    UINT descriptor_offset,
+    WitcherSenseDescriptorKind expected_kind,
+    WitcherSenseDescriptorInfo& info_out) {
+    if (state.cbv_srv_uav_heap == nullptr ||
+        root_parameter >= state.tables.size() ||
+        state.tables[root_parameter].ptr == 0 ||
+        state.cbv_descriptor_increment == 0 ||
+        state.cbv_cpu_start.ptr == 0 || state.cbv_gpu_start.ptr == 0) {
+        return false;
+    }
+    const auto table = state.tables[root_parameter];
+    if (table.ptr < state.cbv_gpu_start.ptr) {
+        return false;
+    }
+    const SIZE_T base_index =
+        (table.ptr - state.cbv_gpu_start.ptr) /
+        state.cbv_descriptor_increment;
+    const SIZE_T descriptor_index = base_index + descriptor_offset;
+    if (descriptor_index >= state.cbv_descriptor_count) {
+        return false;
+    }
+    const SIZE_T cpu_handle = state.cbv_cpu_start.ptr +
+        descriptor_index * state.cbv_descriptor_increment;
+    return load_witcher_sense_descriptor_target(
+        cpu_handle, info_out, expected_kind);
+}
+
+bool witcher_sense_history_input_signature_matches(
+    const WitcherSenseDescriptorInfo& t0,
+    const WitcherSenseDescriptorInfo& t2,
+    const WitcherSenseDescriptorInfo& t3) {
+    if (t0.resource == nullptr ||
+        t0.kind != WitcherSenseDescriptorKind::Scene ||
+        !witcher_sense_history_target_matches(t2) ||
+        t3.resource == nullptr ||
+        t3.kind != WitcherSenseDescriptorKind::Auxiliary ||
+        t0.resource == t2.resource || t0.resource == t3.resource ||
+        t2.resource == t3.resource ||
+        g_game_render_width == 0 || g_game_render_height == 0) {
+        return false;
+    }
+    return t0.width == g_game_render_width &&
+        t0.height == g_game_render_height &&
+        t3.width == g_game_render_width &&
+        t3.height == g_game_render_height;
+}
+
+bool resolve_witcher_sense_history_target(
+    ID3D12GraphicsCommandList* command_list,
+    ID3D12PipelineState* draw_pipeline,
+    UINT vertex_count_per_instance,
+    UINT instance_count,
+    ID3D12Resource*& target_out,
+    D3D12_CPU_DESCRIPTOR_HANDLE& rtv_out) {
+    if (!witcher_sense_history_suppression_route_active() ||
+        command_list == nullptr || draw_pipeline == nullptr ||
+        vertex_count_per_instance != 4 || instance_count != 1) {
+        return false;
+    }
+
+    auto* const cached_pipeline =
+        g_witcher_sense_history_compositor_pipeline.load(
+            std::memory_order_acquire);
+    if (cached_pipeline != nullptr && cached_pipeline != draw_pipeline) {
+        return false;
+    }
+    auto* const state = access_dlss_graphics_state(command_list, false);
+    if (state == nullptr) {
+        return false;
+    }
+
+    // [PERF:WITCHER-SENSE-BOUNDED-DESCRIPTORS V1499 4/5] Automatic admission
+    // still verifies t0/t2/t3 once; after the PSO is cached every draw resolves
+    // only t2 from the bounded target cache.
+    WitcherSenseDescriptorInfo t2{};
+    if (cached_pipeline == nullptr) {
+        WitcherSenseDescriptorInfo t0{};
+        WitcherSenseDescriptorInfo t3{};
+        const bool exact_signature =
+            resolve_witcher_sense_descriptor_target(
+                *state, kWitcherSenseHistorySrvRoot, 0,
+                WitcherSenseDescriptorKind::Scene, t0) &&
+            resolve_witcher_sense_descriptor_target(
+                *state, kWitcherSenseHistorySrvRoot,
+                kWitcherSenseHistoryFocusOffset,
+                WitcherSenseDescriptorKind::History, t2) &&
+            resolve_witcher_sense_descriptor_target(
+                *state, kWitcherSenseHistorySrvRoot, 3,
+                WitcherSenseDescriptorKind::Auxiliary, t3) &&
+            witcher_sense_history_input_signature_matches(t0, t2, t3) &&
+            lookup_witcher_sense_history_rtv(t2.resource, rtv_out);
+        if (!exact_signature) {
+            return false;
+        }
+        draw_pipeline->AddRef();
+        ID3D12PipelineState* expected{};
+        if (!g_witcher_sense_history_compositor_pipeline.
+                compare_exchange_strong(
+                    expected, draw_pipeline,
+                    std::memory_order_acq_rel,
+                    std::memory_order_acquire)) {
+            draw_pipeline->Release();
+            if (expected != draw_pipeline) {
+                return false;
+            }
+        }
+        if (g_config.logging_enabled && take_bounded_log_slot(
+                g_witcher_sense_history_match_logs, 1)) {
+            log_line(
+                "V1499 Witcher Sense exact compositor cached pso=%p "
+                "root=%u focus_offset=%u t2=%p target=%ux%u",
+                draw_pipeline, kWitcherSenseHistorySrvRoot,
+                kWitcherSenseHistoryFocusOffset, t2.resource,
+                g_game_render_width, g_game_render_height);
+        }
+    } else {
+        // [PERF:WITCHER-SENSE-EXPANDED-PARTITION-CACHE V1501 2/3] Cached
+        // draws probe only the two protected History ways. The expanded
+        // signature partition is paid only by initial admission/copy writes.
+        if (!resolve_witcher_sense_descriptor_target(
+                *state, kWitcherSenseHistorySrvRoot,
+                kWitcherSenseHistoryFocusOffset,
+                WitcherSenseDescriptorKind::History, t2) ||
+            !witcher_sense_history_target_matches(t2) ||
+            !lookup_witcher_sense_history_rtv(t2.resource, rtv_out)) {
+            if (g_config.logging_enabled && take_bounded_log_slot(
+                    g_witcher_sense_history_failure_logs, 8)) {
+                log_line(
+                    "V1499 Witcher Sense cached compositor bounded t2 unavailable "
+                    "pso=%p present=%llu",
+                    draw_pipeline,
+                    static_cast<unsigned long long>(
+                        g_present_count.load(std::memory_order_relaxed)));
+            }
+            return false;
+        }
+        target_out = t2.resource;
+        return true;
+    }
+
+    target_out = t2.resource;
+    return true;
+}
+
+// The native compositor sees its unchanged current input. Scope teardown then
+// clears only t2 before that texture can become the peer eye's temporal history.
+struct WitcherSenseHistorySuppressionDrawScope {
+    ID3D12GraphicsCommandList* command_list{};
+    ID3D12Resource* history{};
+    D3D12_CPU_DESCRIPTOR_HANDLE rtv{};
+
+    WitcherSenseHistorySuppressionDrawScope(
+        ID3D12GraphicsCommandList* list,
+        ID3D12PipelineState* pipeline,
+        UINT vertices,
+        UINT instances)
+        : command_list(list) {
+        if (!resolve_witcher_sense_history_target(
+                list, pipeline, vertices, instances, history, rtv)) {
+            command_list = nullptr;
+        }
+    }
+
+    ~WitcherSenseHistorySuppressionDrawScope() {
+        if (command_list == nullptr || history == nullptr ||
+            rtv.ptr == 0 || g_resource_barrier == nullptr) {
+            return;
+        }
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = history;
+        barrier.Transition.Subresource = 0;
+        barrier.Transition.StateBefore =
+            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        barrier.Transition.StateAfter =
+            D3D12_RESOURCE_STATE_RENDER_TARGET;
+        g_resource_barrier(command_list, 1, &barrier);
+        const FLOAT transparent[4]{0.0f, 0.0f, 0.0f, 0.0f};
+        command_list->ClearRenderTargetView(
+            rtv, transparent, 0, nullptr);
+        std::swap(
+            barrier.Transition.StateBefore,
+            barrier.Transition.StateAfter);
+        g_resource_barrier(command_list, 1, &barrier);
+        if (g_config.logging_enabled && take_bounded_log_slot(
+                g_witcher_sense_history_clear_logs, 8)) {
+            log_line(
+                "V1499 Witcher Sense peer-eye history suppressed "
+                "resource=%p present=%llu",
+                history,
+                static_cast<unsigned long long>(
+                    g_present_count.load(std::memory_order_relaxed)));
+        }
+    }
+
+    WitcherSenseHistorySuppressionDrawScope(
+        const WitcherSenseHistorySuppressionDrawScope&) = delete;
+    WitcherSenseHistorySuppressionDrawScope& operator=(
+        const WitcherSenseHistorySuppressionDrawScope&) = delete;
+};
 
 void apply_hud_frame_scale() {
     char settings_path[MAX_PATH]{};
@@ -15218,13 +16015,51 @@ void STDMETHODCALLTYPE hook_create_srv(
     const D3D12_SHADER_RESOURCE_VIEW_DESC* desc,
     D3D12_CPU_DESCRIPTOR_HANDLE dest_descriptor) {
     g_create_srv(device, resource, desc, dest_descriptor);
-    if (!descriptor_metadata_hooks_needed() || resource == nullptr ||
+    const bool witcher_sense_metadata =
+        witcher_sense_history_suppression_route_configured();
+    if ((!descriptor_metadata_hooks_needed() && !witcher_sense_metadata) ||
         dest_descriptor.ptr == 0) {
+        return;
+    }
+    if (resource == nullptr) {
+        if (witcher_sense_metadata) {
+            invalidate_witcher_sense_descriptor_target(
+                dest_descriptor.ptr);
+        }
         return;
     }
     const auto resource_desc = resource->GetDesc();
     const auto view_format =
         desc != nullptr ? desc->Format : resource_desc.Format;
+    const auto view_dimension = desc != nullptr
+        ? desc->ViewDimension : D3D12_SRV_DIMENSION_UNKNOWN;
+    const auto effective_view_format =
+        view_format != DXGI_FORMAT_UNKNOWN
+        ? view_format : resource_desc.Format;
+    const auto witcher_sense_kind = witcher_sense_metadata
+        ? classify_witcher_sense_descriptor(
+            resource_desc, effective_view_format, view_dimension)
+        : WitcherSenseDescriptorKind::None;
+    const bool witcher_sense_target =
+        witcher_sense_kind != WitcherSenseDescriptorKind::None;
+    // [PERF:WITCHER-SENSE-BOUNDED-DESCRIPTORS V1499 2/5] Snapshot a compact
+    // classified target while CreateSRV owns a valid resource reference. Only
+    // the 512x512 RG16F history class gets a private retained RTV.
+    if (witcher_sense_metadata) {
+        if (witcher_sense_target) {
+            WitcherSenseDescriptorInfo witcher_info{};
+            witcher_info.resource = resource;
+            witcher_info.width = resource_desc.Width;
+            witcher_info.height = resource_desc.Height;
+            witcher_info.kind = witcher_sense_kind;
+            store_witcher_sense_descriptor_target(
+                dest_descriptor.ptr, witcher_info);
+            register_witcher_sense_history_target(device, witcher_info);
+        } else {
+            invalidate_witcher_sense_descriptor_target(
+                dest_descriptor.ptr);
+        }
+    }
     const bool rt_temporal_descriptor_candidate =
         rt_symmetric_dlss_per_eye_ao_history_active() &&
         (desc == nullptr ||
@@ -15367,6 +16202,10 @@ void STDMETHODCALLTYPE hook_create_uav(
     const D3D12_UNORDERED_ACCESS_VIEW_DESC* desc,
     D3D12_CPU_DESCRIPTOR_HANDLE dest_descriptor) {
     g_create_uav(device, resource, counter_resource, desc, dest_descriptor);
+    if (witcher_sense_history_suppression_route_configured() &&
+        dest_descriptor.ptr != 0) {
+        invalidate_witcher_sense_descriptor_target(dest_descriptor.ptr);
+    }
     if (resource == nullptr || dest_descriptor.ptr == 0) {
         return;
     }
@@ -18299,6 +19138,8 @@ void install_reverse_hooks() {
     const bool uav_metadata_hooks = taau_metadata_hooks_needed() ||
         rt_symmetric_dlss_per_eye_ao_history_active();
     const bool render_target_metadata_hooks = taau_metadata_hooks_needed();
+    const bool witcher_sense_descriptor_hooks =
+        witcher_sense_history_suppression_route_configured();
     const bool puredark_afw_execute_publication =
         puredark_afw_mode3_aer_any_route_configured();
     const bool dlss_cache_execute_publication =
@@ -18331,7 +19172,8 @@ void install_reverse_hooks() {
         }
     }
 
-    if (buffer_metadata_hooks && g_create_cbv == nullptr) {
+    if ((buffer_metadata_hooks || witcher_sense_descriptor_hooks) &&
+        g_create_cbv == nullptr) {
         auto target = method<void*>(g_d3d12_device, 17);
         if (MH_CreateHook(target, reinterpret_cast<void*>(&hook_create_cbv), reinterpret_cast<void**>(&g_create_cbv)) == MH_OK &&
             MH_EnableHook(target) == MH_OK) {
@@ -18349,7 +19191,8 @@ void install_reverse_hooks() {
         }
     }
 
-    if (descriptor_hooks && g_create_srv == nullptr) {
+    if ((descriptor_hooks || witcher_sense_descriptor_hooks) &&
+        g_create_srv == nullptr) {
         auto target = method<void*>(g_d3d12_device, 18);
         if (MH_CreateHook(target, reinterpret_cast<void*>(&hook_create_srv), reinterpret_cast<void**>(&g_create_srv)) == MH_OK &&
             MH_EnableHook(target) == MH_OK) {
@@ -18359,7 +19202,8 @@ void install_reverse_hooks() {
         }
     }
 
-    if (uav_metadata_hooks && g_create_uav == nullptr) {
+    if ((uav_metadata_hooks || witcher_sense_descriptor_hooks) &&
+        g_create_uav == nullptr) {
         auto target = method<void*>(g_d3d12_device, 19);
         if (MH_CreateHook(target, reinterpret_cast<void*>(&hook_create_uav), reinterpret_cast<void**>(&g_create_uav)) == MH_OK &&
             MH_EnableHook(target) == MH_OK) {
@@ -18404,7 +19248,8 @@ void install_reverse_hooks() {
         }
     }
 
-    if ((hud_descriptor_hooks || metadata_hooks) &&
+    if ((hud_descriptor_hooks || metadata_hooks ||
+            witcher_sense_descriptor_hooks) &&
         g_copy_descriptors == nullptr) {
         auto target = method<void*>(g_d3d12_device, 23);
         if (MH_CreateHook(target, reinterpret_cast<void*>(&hook_copy_descriptors), reinterpret_cast<void**>(&g_copy_descriptors)) == MH_OK &&
@@ -18415,7 +19260,8 @@ void install_reverse_hooks() {
         }
     }
 
-    if ((hud_descriptor_hooks || metadata_hooks) &&
+    if ((hud_descriptor_hooks || metadata_hooks ||
+            witcher_sense_descriptor_hooks) &&
         g_copy_descriptors_simple == nullptr) {
         auto target = method<void*>(g_d3d12_device, 24);
         if (MH_CreateHook(target, reinterpret_cast<void*>(&hook_copy_descriptors_simple), reinterpret_cast<void**>(&g_copy_descriptors_simple)) == MH_OK &&
@@ -20108,6 +20954,11 @@ void STDMETHODCALLTYPE hook_create_cbv(
     D3D12_CPU_DESCRIPTOR_HANDLE dest_descriptor) {
     g_create_cbv(device, desc, dest_descriptor);
 
+    if (witcher_sense_history_suppression_route_configured() &&
+        dest_descriptor.ptr != 0) {
+        invalidate_witcher_sense_descriptor_target(dest_descriptor.ptr);
+    }
+
     if ((!taau_metadata_hooks_needed() &&
             !real_smoke_world_up_binding_route_active() &&
             !foliage_bound_basis_route_active() &&
@@ -20910,7 +21761,9 @@ void STDMETHODCALLTYPE hook_copy_descriptors(
         src_descriptor_range_sizes,
         descriptor_heaps_type);
 
-    if (!descriptor_metadata_hooks_needed() ||
+    const bool witcher_sense_metadata =
+        witcher_sense_history_suppression_route_configured();
+    if ((!descriptor_metadata_hooks_needed() && !witcher_sense_metadata) ||
         descriptor_heaps_type !=
             D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV ||
         dest_descriptor_range_starts == nullptr || src_descriptor_range_starts == nullptr) {
@@ -20924,6 +21777,9 @@ void STDMETHODCALLTYPE hook_copy_descriptors(
     UINT src_range = 0;
     UINT dest_index = 0;
     UINT src_index = 0;
+    // [PERF:WITCHER-SENSE-BOUNDED-DESCRIPTORS V1499 3/5] Witcher Senses owns
+    // only its bounded target cache here. It no longer enables the generic
+    // CBV mirror, legacy resource propagation, or global reverse mutex.
     const bool cbv_metadata = taau_metadata_hooks_needed() ||
         real_smoke_world_up_binding_route_active() ||
         foliage_bound_basis_route_active() ||
@@ -20931,6 +21787,8 @@ void STDMETHODCALLTYPE hook_copy_descriptors(
         rt_symmetric_dlss_per_eye_ao_history_active();
     const bool legacy_resource_metadata = taau_metadata_hooks_needed() ||
         rt_symmetric_dlss_per_eye_ao_history_active();
+    const bool fast_resource_metadata =
+        descriptor_metadata_hooks_needed() && !cbv_metadata;
     std::unique_lock<std::mutex> lock{g_reverse_mutex, std::defer_lock};
     if (descriptor_heaps_type ==
             D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV &&
@@ -20947,12 +21805,14 @@ void STDMETHODCALLTYPE hook_copy_descriptors(
 
         const auto dest_cpu = dest_descriptor_range_starts[dest_range].ptr + static_cast<SIZE_T>(dest_index) * increment;
         const auto src_cpu = src_descriptor_range_starts[src_range].ptr + static_cast<SIZE_T>(src_index) * increment;
+        if (witcher_sense_metadata) {
+            copy_witcher_sense_descriptor_target(dest_cpu, src_cpu);
+        }
         if (descriptor_heaps_type ==
                 D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV && cbv_metadata) {
             copy_cbv_descriptor_metadata(
                 dest_cpu, src_cpu, increment, legacy_resource_metadata);
-        } else if (descriptor_heaps_type ==
-                D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV) {
+        } else if (fast_resource_metadata) {
             ID3D12Resource* resource{};
             DXGI_FORMAT format{DXGI_FORMAT_UNKNOWN};
             if (load_resource_descriptor_fast(src_cpu, resource, format)) {
@@ -20986,7 +21846,9 @@ void STDMETHODCALLTYPE hook_copy_descriptors_simple(
         src_descriptor_range_start,
         descriptor_heaps_type);
 
-    if (!descriptor_metadata_hooks_needed() ||
+    const bool witcher_sense_metadata =
+        witcher_sense_history_suppression_route_configured();
+    if ((!descriptor_metadata_hooks_needed() && !witcher_sense_metadata) ||
         descriptor_heaps_type !=
             D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV ||
         dest_descriptor_range_start.ptr == 0 || src_descriptor_range_start.ptr == 0) {
@@ -21003,6 +21865,8 @@ void STDMETHODCALLTYPE hook_copy_descriptors_simple(
         rt_symmetric_dlss_per_eye_ao_history_active();
     const bool legacy_resource_metadata = taau_metadata_hooks_needed() ||
         rt_symmetric_dlss_per_eye_ao_history_active();
+    const bool fast_resource_metadata =
+        descriptor_metadata_hooks_needed() && !cbv_metadata;
     std::unique_lock<std::mutex> lock{g_reverse_mutex, std::defer_lock};
     if (descriptor_heaps_type ==
             D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV &&
@@ -21012,12 +21876,14 @@ void STDMETHODCALLTYPE hook_copy_descriptors_simple(
     for (UINT index = 0; index < num_descriptors; ++index) {
         const auto dest_cpu = dest_descriptor_range_start.ptr + static_cast<SIZE_T>(index) * increment;
         const auto src_cpu = src_descriptor_range_start.ptr + static_cast<SIZE_T>(index) * increment;
+        if (witcher_sense_metadata) {
+            copy_witcher_sense_descriptor_target(dest_cpu, src_cpu);
+        }
         if (descriptor_heaps_type ==
                 D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV && cbv_metadata) {
             copy_cbv_descriptor_metadata(
                 dest_cpu, src_cpu, increment, legacy_resource_metadata);
-        } else if (descriptor_heaps_type ==
-                D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV) {
+        } else if (fast_resource_metadata) {
             ID3D12Resource* resource{};
             DXGI_FORMAT format{DXGI_FORMAT_UNKNOWN};
             if (load_resource_descriptor_fast(src_cpu, resource, format)) {
@@ -21362,6 +22228,8 @@ HRESULT STDMETHODCALLTYPE hook_reset_command_list(
     // occupies one ring slot and leaves its CPU state ahead of the resource.
     {
         std::scoped_lock lock{g_mode3_early_hud_mutex};
+        // [FIX:STRICT-STEREO-HUD-ACCEPTED-PREDECESSOR-JOIN V1494 4/7]
+        g_mode3_strict_hud_command_list_eyes.erase(command_list);
         const auto found =
             g_mode3_early_hud_pending_by_command_list.find(command_list);
         if (found != g_mode3_early_hud_pending_by_command_list.end()) {
@@ -21799,6 +22667,14 @@ void STDMETHODCALLTYPE hook_set_pipeline_state(
                     hud_eye_authority = "taau_exact_tag_missing";
                 }
             }
+            // [FIX:STRICT-STEREO-HUD-ACCEPTED-PREDECESSOR-JOIN V1494 3/7]
+            // [FIX:STRICT-STEREO-GAMEPLAY-HUD-EYE-AUTHORITY V1496 2/3]
+            // Freeze the eye that actually selects REDengine's HUD PSO for
+            // every active strict-Stereo retained route. V1494 scoped this to
+            // automatic Full VR, so V1495 gameplay lost its submitted fallback
+            // whenever the pointer-exact join missed at release timing.
+            record_mode3_strict_hud_command_list_eye(
+                command_list, hud_eye);
             record_mode3_aer_afw_final_hud_tag(
                 command_list, hud_eye, hud_pair_id);
             if (hud_eye == 0) {
@@ -22624,7 +23500,8 @@ void STDMETHODCALLTYPE hook_draw_indexed_instanced(
                 real_smoke_center_fix_route_configured(),
                 native_stereo_runtime_enabled(),
                 native_asymmetric_cinema_panel_active(),
-                native_asymmetric_full_vr_scene_active());
+                native_asymmetric_full_vr_scene_active(),
+                native_asymmetric_full_vr_effect_source_active());
         bool variant_selected{};
         if (real_smoke_asymmetric_center) {
             variant_selected = select_real_smoke_offaxis_pipeline(
@@ -22864,6 +23741,7 @@ void reset_mode3_hud_publication_state(uint32_t generation) {
     }
     {
         std::scoped_lock lock{g_mode3_early_hud_mutex};
+        g_mode3_strict_hud_command_list_eyes.clear();
         reset_mode3_early_hud_generation_locked(generation);
     }
 }
@@ -23209,12 +24087,21 @@ bool capture_mode3_early_hud(
     if (slot.srv_format == DXGI_FORMAT_UNKNOWN) {
         slot.srv_format = source_desc.Format;
     }
-    g_mode3_early_hud_pending_by_command_list[command_list] = {
+    Mode3EarlyHudPending pending{
         slot_index, generation, slot.capture_serial,
         g_present_count.load(std::memory_order_relaxed),
         mode3_aer_afw_post_hud_gameplay_active() ||
             mode3_strict_stereo_submitted_hud_join_active(),
         destination_was_shader_read};
+    const auto strict_eye =
+        g_mode3_strict_hud_command_list_eyes.find(command_list);
+    if (strict_eye != g_mode3_strict_hud_command_list_eyes.end() &&
+        strict_eye->second.generation == generation &&
+        strict_eye->second.eye <= 1) {
+        pending.strict_eye = strict_eye->second.eye;
+        pending.strict_eye_valid = true;
+    }
+    g_mode3_early_hud_pending_by_command_list[command_list] = pending;
     // [DIAG:MODE3-HUD-CONTENT-ORDER 1/2] A resource can receive the correct
     // eye/pair label at PRESENT while still containing pixels frozen before
     // that pair's marker projection ran. Record the immutable copy point and
@@ -23768,6 +24655,12 @@ void STDMETHODCALLTYPE hook_draw_instanced(
     UINT start_instance_location) {
     auto* draw_pipeline =
         load_command_list_pipeline_effect_nonblocking(command_list);
+    // Construct before every early-return path. Only the exact cached 4x1
+    // compositor owns a target; scope teardown runs after its native draw.
+    WitcherSenseHistorySuppressionDrawScope
+        witcher_sense_history_suppression{
+            command_list, draw_pipeline,
+            vertex_count_per_instance, instance_count};
     if (prepare_foliage_hmd_base_draw(command_list, draw_pipeline)) {
         g_draw_instanced(
             command_list, vertex_count_per_instance, instance_count,
@@ -28962,7 +29855,10 @@ take_mode3_aer_afw_hud_submissions_before_execute(
                 submission.has_capture = true;
             }
         }
-        if (submission.has_tag) {
+        const bool strict_capture = submission.has_capture &&
+            submission.recorded_capture.strict_eye_valid &&
+            submission.recorded_capture.strict_eye <= 1;
+        if (submission.has_tag || strict_capture) {
             std::scoped_lock scene_only_lock{
                 g_mode3_scene_only_output_mutex};
             const auto draw_marker =
@@ -28970,7 +29866,9 @@ take_mode3_aer_afw_hud_submissions_before_execute(
             if (draw_marker != g_mode3_scene_only_draw_generations.end()) {
                 submission.scene_only_draw_recorded =
                     draw_marker->second ==
-                        submission.recorded_tag.tag.generation;
+                        (submission.has_tag
+                            ? submission.recorded_tag.tag.generation
+                            : submission.recorded_capture.generation);
                 g_mode3_scene_only_draw_generations.erase(draw_marker);
             }
         }
@@ -28990,14 +29888,18 @@ take_mode3_aer_afw_hud_submissions_before_execute(
             static std::atomic<uint32_t> preexecute_snapshot_logs{};
             if (take_bounded_log_slot(preexecute_snapshot_logs, 96)) {
                 log_line(
-                    "V1293 Mode-3 HUD pre-execute snapshot tag=%d "
-                    "capture=%d present=%d eye=%u pair=%llu generation=%u "
+                    "V1492 Mode-3 HUD pre-execute snapshot tag=%d "
+                    "capture=%d present=%d draw=%d strict_eye=%d/%u "
+                    "eye=%u pair=%llu generation=%u "
                     "tag_present=%llu capture_present=%llu "
                     "boundary_present=%llu submission_serial=%llu "
                     "command_list=%p",
                     submission.has_tag ? 1 : 0,
                     submission.has_capture ? 1 : 0,
                     submission.has_present ? 1 : 0,
+                    submission.scene_only_draw_recorded ? 1 : 0,
+                    submission.recorded_capture.strict_eye_valid ? 1 : 0,
+                    submission.recorded_capture.strict_eye,
                     submission.recorded_tag.tag.eye,
                     static_cast<unsigned long long>(
                         submission.recorded_tag.tag.pair_id),
@@ -29068,7 +29970,8 @@ void publish_mode3_aer_afw_hud_submissions_before_execute(
                 cross_queue_publication ? producer_queue_fence : nullptr,
                 cross_queue_publication
                     ? producer_queue_fence_value : 0,
-                submission.submission_serial});
+                submission.submission_serial,
+                submission.scene_only_draw_recorded});
         }
         if (has_tag) {
             std::scoped_lock lock{g_mode3_aer_afw_hud_mutex};
@@ -29088,6 +29991,169 @@ void publish_mode3_aer_afw_hud_submissions_before_execute(
         const uint32_t generation =
             g_streamline_capture_generation.load(std::memory_order_acquire);
         if (present_boundary.generation != generation) {
+            continue;
+        }
+        if (mode3_strict_stereo_submitted_hud_join_active()) {
+            // [FIX:STRICT-STEREO-HUD-ACCEPTED-PREDECESSOR-JOIN V1494 5/7]
+            // The current accepted scene validates the lifecycle, but the
+            // established retained-HUD gate consumes its published predecessor.
+            const uint64_t current_accepted_scene_pair =
+                g_packed_accepted_pair_signal.load(std::memory_order_acquire);
+            const uint32_t predecessor_generation =
+                g_mode3_strict_hud_target_generation.load(
+                    std::memory_order_acquire);
+            const uint64_t accepted_predecessor_pair =
+                g_mode3_strict_hud_target_pair.load(
+                    std::memory_order_acquire);
+            Mode3SubmittedEarlyHudPending selected_capture{};
+            bool capture_ready{};
+            bool labeled{};
+            bool pair_complete_after_label{};
+            uint32_t ready_eye_mask{};
+            if (current_accepted_scene_pair != 0 &&
+                current_accepted_scene_pair != UINT64_MAX &&
+                predecessor_generation == generation &&
+                accepted_predecessor_pair != 0 &&
+                accepted_predecessor_pair != UINT64_MAX &&
+                accepted_predecessor_pair <= current_accepted_scene_pair) {
+                std::scoped_lock lock{g_mode3_early_hud_mutex};
+                g_mode3_early_hud_submitted.erase(
+                    std::remove_if(
+                        g_mode3_early_hud_submitted.begin(),
+                        g_mode3_early_hud_submitted.end(),
+                        [&](const Mode3SubmittedEarlyHudPending& candidate) {
+                            return candidate.pending.generation != generation ||
+                                (present_boundary.recorded_present >
+                                        candidate.pending.recorded_present &&
+                                    present_boundary.recorded_present -
+                                            candidate.pending.recorded_present >
+                                        kMode3StrictHudJoinMaxPresentDistance);
+                        }),
+                    g_mode3_early_hud_submitted.end());
+                for (uint32_t eye = 0; eye < 2; ++eye) {
+                    const uint32_t slot_index =
+                        g_mode3_early_hud_latest_slot[eye];
+                    if (slot_index >= kMode3EarlyHudSlotCount) {
+                        continue;
+                    }
+                    const auto& slot = g_mode3_early_hud_slots[slot_index];
+                    if (slot.initialized && slot.generation == generation &&
+                        slot.eye == eye &&
+                        slot.pair_id == accepted_predecessor_pair) {
+                        ready_eye_mask |= 1u << eye;
+                    }
+                }
+                if (ready_eye_mask != 0x3u) {
+                    for (const auto& candidate :
+                            g_mode3_early_hud_submitted) {
+                        const uint32_t eye = candidate.pending.strict_eye;
+                        const bool capture_ordered_for_present =
+                            candidate.queue == queue ||
+                            (queue == g_command_queue &&
+                                candidate.queue != nullptr &&
+                                candidate.queue != queue &&
+                                candidate.producer_queue_fence != nullptr &&
+                                candidate.producer_queue_fence_value != 0);
+                        if (!candidate.pending.strict_eye_valid || eye > 1 ||
+                            !candidate.scene_only_draw_recorded ||
+                            (ready_eye_mask & (1u << eye)) != 0 ||
+                            !capture_ordered_for_present ||
+                            !strict_stereo_hud_join_window_matches(
+                                    candidate.pending.generation, generation,
+                                    candidate.pending.recorded_present,
+                                    present_boundary.recorded_present) ||
+                            (capture_ready &&
+                                candidate.submission_serial <=
+                                    selected_capture.submission_serial)) {
+                            continue;
+                        }
+                        selected_capture = candidate;
+                        capture_ready = true;
+                    }
+                }
+                if (capture_ready) {
+                    EngineFrameTag accepted_predecessor_tag{};
+                    accepted_predecessor_tag.eye =
+                        selected_capture.pending.strict_eye;
+                    accepted_predecessor_tag.generation = generation;
+                    accepted_predecessor_tag.pair_id =
+                        accepted_predecessor_pair;
+                    labeled = apply_mode3_early_hud_label_locked(
+                        selected_capture.pending, accepted_predecessor_tag,
+                        generation,
+                        selected_capture.producer_queue_fence,
+                        selected_capture.producer_queue_fence_value);
+                    if (labeled) {
+                        pair_complete_after_label =
+                            g_mode3_early_hud_accepted_generation ==
+                                generation &&
+                            g_mode3_early_hud_accepted_pair ==
+                                accepted_predecessor_pair;
+                        const uint64_t consumed_serial =
+                            selected_capture.submission_serial;
+                        g_mode3_early_hud_submitted.erase(
+                            std::remove_if(
+                                g_mode3_early_hud_submitted.begin(),
+                                g_mode3_early_hud_submitted.end(),
+                                [&](const Mode3SubmittedEarlyHudPending& candidate) {
+                                    if (candidate.queue !=
+                                            selected_capture.queue) {
+                                        return false;
+                                    }
+                                    return pair_complete_after_label
+                                        ? candidate.submission_serial <=
+                                            consumed_serial
+                                        : candidate.submission_serial ==
+                                            consumed_serial;
+                                }),
+                            g_mode3_early_hud_submitted.end());
+                    }
+                }
+            }
+            if (labeled) {
+                EngineFrameTag accepted_predecessor_tag{};
+                accepted_predecessor_tag.eye =
+                    selected_capture.pending.strict_eye;
+                accepted_predecessor_tag.generation = generation;
+                accepted_predecessor_tag.pair_id =
+                    accepted_predecessor_pair;
+                record_mode3_scene_only_hud_output(
+                    accepted_predecessor_tag,
+                    selected_capture.scene_only_draw_recorded);
+            }
+            if (g_config.runtime_diagnostics) {
+                static std::atomic<uint32_t> strict_scene_join_logs{};
+                if (take_bounded_log_slot(strict_scene_join_logs, 64)) {
+                    log_line(
+                        "V1494 strict Stereo HUD accepted-predecessor join "
+                        "capture=%d labeled=%d complete=%d eye=%u "
+                        "ready_mask=0x%X accepted=%llu predecessor=%llu "
+                        "generation=%u predecessor_generation=%u "
+                        "capture_present=%llu boundary_present=%llu "
+                        "capture_serial=%llu present_serial=%llu "
+                        "capture_command_list=%p present_command_list=%p "
+                        "queue=%p capture_queue=%p draw=%d",
+                        capture_ready ? 1 : 0, labeled ? 1 : 0,
+                        pair_complete_after_label ? 1 : 0,
+                        selected_capture.pending.strict_eye, ready_eye_mask,
+                        static_cast<unsigned long long>(
+                            current_accepted_scene_pair),
+                        static_cast<unsigned long long>(
+                            accepted_predecessor_pair),
+                        generation, predecessor_generation,
+                        static_cast<unsigned long long>(
+                            selected_capture.pending.recorded_present),
+                        static_cast<unsigned long long>(
+                            present_boundary.recorded_present),
+                        static_cast<unsigned long long>(
+                            selected_capture.submission_serial),
+                        static_cast<unsigned long long>(
+                            submission.submission_serial),
+                        selected_capture.command_list, command_list,
+                        queue, selected_capture.queue,
+                        selected_capture.scene_only_draw_recorded ? 1 : 0);
+                }
+            }
             continue;
         }
         Mode3AerAfwSubmittedHudTag selected_tag{};
@@ -29514,28 +30580,38 @@ void __fastcall hook_engine_frame_builder(void* render_context, void* frame_data
         last_full_vr_factory != UINT64_MAX &&
         present >= last_full_vr_factory &&
         present - last_full_vr_factory <= 2;
+    const bool strict_stereo_native_reused_camera_configured =
+        w3vr::native_asymmetric_transport_policy::
+            reused_camera_fallback_uses_native_asymmetric_projection({
+                native_asymmetric_noaa_route_active(),
+                mode3_aer_presentation_active()});
+    if (automatic_full_vr_active &&
+        strict_stereo_native_reused_camera_configured &&
+        full_vr_factory_recent) {
+        // [FIX:STRICT-STEREO-PERSISTENT-REUSED-CAMERA V1488 2/4] A normal
+        // factory camera is a physical source-owner boundary. Any later reuse
+        // must prove a new complete fallback pair before native admission.
+        reset_strict_stereo_reused_camera_episode(
+            g_streamline_capture_generation.load(
+                std::memory_order_acquire));
+    }
     const bool mono_full_vr_factory_recent =
         mono_transport && full_vr_factory_recent;
-    const bool symmetric_asymmetric_full_vr_fallback =
-        w3vr::native_asymmetric_transport_policy::
-            frame_fallback_uses_symmetric_projection({
-                native_asymmetric_noaa_route_active(),
-                automatic_full_vr_active});
     const bool stereo_fallback_allowed =
         w3vr::native_asymmetric_transport_policy::
             stereo_frame_fallback_admissible({
                 stereo_frame_tag_valid,
-                symmetric_asymmetric_full_vr_fallback,
+                native_asymmetric_noaa_route_active(),
                 full_vr_factory_recent});
     if (g_config.runtime_diagnostics && frame_data != nullptr &&
         automatic_full_vr_active && stereo_frame_tag_valid &&
-        symmetric_asymmetric_full_vr_fallback && full_vr_factory_recent) {
+        native_asymmetric_noaa_route_active() && full_vr_factory_recent) {
         static std::atomic<uint64_t> factory_bypass_count{};
         const uint64_t count = factory_bypass_count.fetch_add(
             1, std::memory_order_relaxed) + 1;
         if (count <= 16 || count % 600 == 0) {
             log_cinema_camera_diagnostic(
-                "V1255 asymmetric frame fallback bypassed count=%llu present=%llu "
+                "V1488 stereo reused-camera fallback bypassed count=%llu present=%llu "
                 "factory_present=%llu factory_age=%llu eye=%d pair=%llu aer=%u",
                 static_cast<unsigned long long>(count),
                 static_cast<unsigned long long>(present),
@@ -29836,6 +30912,37 @@ void __fastcall hook_engine_frame_builder(void* render_context, void* frame_data
                     native_asymmetric_frame_writer_warmup ? 1 : 0,
                     native_asymmetric_frame_writer_pre_valid ? 1 : 0);
             }
+        }
+    }
+
+    if (g_config.runtime_diagnostics && fallback_frame_camera_applied &&
+        fallback_pixel_projection ==
+            w3vr::mode3_transport::AfwPixelProjection::NativeAsymmetric) {
+        static std::atomic<uint32_t> reused_camera_pair_logs{};
+        const uint32_t sample = reused_camera_pair_logs.fetch_add(
+            1, std::memory_order_relaxed);
+        if (sample < 64) {
+            auto* reused_slot = native_asymmetric_pair_slot(correction_pair);
+            log_line(
+                "V1488 strict Stereo persistent native reused-camera sample=%u "
+                "present=%llu pair=%llu eye=%d factory_mask=0x%X "
+                "temporal_mask=0x%X dlss_input_mask=0x%X",
+                sample,
+                static_cast<unsigned long long>(present),
+                static_cast<unsigned long long>(correction_pair),
+                correction_eye,
+                reused_slot != nullptr
+                    ? reused_slot->factory_mask.load(
+                        std::memory_order_acquire)
+                    : 0u,
+                reused_slot != nullptr
+                    ? reused_slot->temporal_mask.load(
+                        std::memory_order_acquire)
+                    : 0u,
+                reused_slot != nullptr
+                    ? reused_slot->dlss_input_mask.load(
+                        std::memory_order_acquire)
+                    : 0u);
         }
     }
 
@@ -32105,29 +33212,31 @@ bool prepare_full_vr_frame_camera(
     // consume it. The original descriptor is restored immediately afterward.
     std::array<float, 512> corrected = original_camera;
     bool native_asymmetric_full_vr_projection_applied{};
-    bool shared_asymmetric_fallback_fov_ready{};
-    bool shared_asymmetric_fallback_fov_published{};
-    float shared_asymmetric_fallback_horizontal_span{};
-    float shared_asymmetric_fallback_vertical_fov{};
+    bool centered_reused_fallback_fov_ready{};
+    bool centered_reused_fallback_fov_published{};
+    float centered_reused_fallback_horizontal_span{};
+    float centered_reused_fallback_vertical_fov{};
     NativeAsymmetricPairSlot* native_asymmetric_full_vr_slot{};
     uint8_t native_asymmetric_full_vr_eye_bit{};
-    const bool automatic_full_vr =
-        g_config.cinema_full_vr &&
-        g_automatic_full_vr_camera_active.load(std::memory_order_acquire) &&
-        !g_force_mono_cinema.load(std::memory_order_relaxed);
-    // [FIX:ASYM-CINEMA-FALLBACK-ONLY V1255 1/2] Ordinary cutscene pairs are
-    // already correct through their normal factory route. The only bad
-    // episodes reuse an embedded camera and reach this final-frame fallback.
-    // Correct those frames with the centered envelope, pose and stereo
-    // baseline consumed by the fallback presenter; never manufacture an
-    // incomplete raw off-axis pair.
-    const bool symmetric_asymmetric_full_vr_fallback =
+    const bool strict_stereo_native_reused_camera_configured =
         w3vr::native_asymmetric_transport_policy::
-            frame_fallback_uses_symmetric_projection({
+            reused_camera_fallback_uses_native_asymmetric_projection({
                 native_asymmetric_noaa_route_active(),
-                automatic_full_vr});
+                mode3_aer_presentation_active()});
+    const uint32_t generation =
+        g_streamline_capture_generation.load(std::memory_order_acquire);
+    // [FIX:STRICT-STEREO-PERSISTENT-REUSED-CAMERA V1488 3/4] Freeze the
+    // projection owner for the whole pair. The proof pair remains centered;
+    // only a subsequent contiguous pair may publish native ASYM metadata.
+    const bool native_asymmetric_reused_camera_fallback =
+        strict_stereo_native_reused_camera_configured &&
+        strict_stereo_native_reused_camera_pair_admitted(
+            generation, present, pair_id, static_cast<uint32_t>(eye));
+    const bool centered_reused_camera_fallback =
+        native_asymmetric_noaa_route_active() &&
+        !native_asymmetric_reused_camera_fallback;
     const XrFovf* xr_fov{};
-    if (symmetric_asymmetric_full_vr_fallback) {
+    if (native_asymmetric_noaa_route_active()) {
         // [FIX:FULL-VR-FALLBACK-RAW-FOV V1424] V1418 publishes the centered
         // fallback envelope for the final OpenXR submit. Under AER that
         // published FOV returns in the next immutable render tag. Treating it
@@ -32194,18 +33303,13 @@ bool prepare_full_vr_frame_camera(
             corrected[7] = vertical_fov *
                 (180.0f / 3.14159265358979323846f);
             corrected[10] = horizontal_span / vertical_span;
-            if (symmetric_asymmetric_full_vr_fallback) {
-                shared_asymmetric_fallback_horizontal_span = horizontal_span;
-                shared_asymmetric_fallback_vertical_fov = vertical_fov;
-                shared_asymmetric_fallback_fov_ready = true;
+            if (centered_reused_camera_fallback) {
+                centered_reused_fallback_horizontal_span = horizontal_span;
+                centered_reused_fallback_vertical_fov = vertical_fov;
+                centered_reused_fallback_fov_ready = true;
             }
         }
-        // [FIX:FULL-VR-ASYMMETRIC-FALLBACK V1255 1/2] Normal factory pairs keep
-        // their raw-FOV descriptor. A reused-camera fallback is centered in
-        // both AER and strict Stereo because neither presenter owns a complete
-        // native pair for that interval.
-        if (native_asymmetric_noaa_route_active() &&
-            !symmetric_asymmetric_full_vr_fallback) {
+        if (native_asymmetric_reused_camera_fallback) {
             if (g_game_render_width == 0 || g_game_render_width > 16384 ||
                 g_game_render_height == 0 || g_game_render_height > 16384) {
                 return false;
@@ -32247,8 +33351,7 @@ bool prepare_full_vr_frame_camera(
             native_asymmetric_full_vr_projection_applied = true;
         }
     }
-    if (native_asymmetric_noaa_route_active() &&
-        !symmetric_asymmetric_full_vr_fallback &&
+    if (native_asymmetric_reused_camera_fallback &&
         !native_asymmetric_full_vr_projection_applied) {
         return false;
     }
@@ -32411,18 +33514,18 @@ bool prepare_full_vr_frame_camera(
             frame_camera, corrected.data(), sizeof(corrected))) {
         return false;
     }
-    // [FIX:OPENING-CUTSCENE-ASYM-FALLBACK-FOV V1418 2/2] Opening cutscenes
-    // can bypass the normal view factory while ASYM remains requested. Their
-    // proven fallback producer is deliberately centered, so publish its exact
-    // content FOV only after that corrected camera has been written. Mono and
-    // native asymmetric factory pairs remain unchanged.
-    if (symmetric_asymmetric_full_vr_fallback &&
+    // [FIX:OPENING-CUTSCENE-ASYM-FALLBACK-FOV V1418 2/2] AER's sequential
+    // fallback and strict Stereo's V1488 proof pair are deliberately centered.
+    // Publish their exact content FOV only after the corrected camera write;
+    // an admitted strict-Stereo pair publishes raw FOV through the native
+    // ledger instead.
+    if (centered_reused_camera_fallback &&
         !native_asymmetric_full_vr_projection_applied &&
-        shared_asymmetric_fallback_fov_ready) {
-        shared_asymmetric_fallback_fov_published =
+        centered_reused_fallback_fov_ready) {
+        centered_reused_fallback_fov_published =
             publish_shared_mode3_projection_fov(
-                shared_asymmetric_fallback_horizontal_span,
-                shared_asymmetric_fallback_vertical_fov);
+                centered_reused_fallback_horizontal_span,
+                centered_reused_fallback_vertical_fov);
     }
     if (native_asymmetric_full_vr_projection_applied &&
         native_asymmetric_full_vr_slot != nullptr &&
@@ -32433,6 +33536,8 @@ bool prepare_full_vr_frame_camera(
         // the complete corrected descriptor has been written successfully.
         native_asymmetric_full_vr_slot->factory_mask.fetch_or(
             native_asymmetric_full_vr_eye_bit, std::memory_order_release);
+        g_full_vr_native_reused_camera_last_present.store(
+            present, std::memory_order_release);
     }
 
     capture_engine_corrected_temporal_matrix(
@@ -32495,15 +33600,15 @@ bool prepare_full_vr_frame_camera(
         1, std::memory_order_relaxed) + 1;
     if (count <= 32 || count % 120 == 0) {
         log_cinema_camera_diagnostic(
-            "Full VR final frame camera applied count=%llu present=%llu eye=%d pair=%llu taau_reset=%d asymmetric=%d symmetric_asym_fallback=%d shared_fov_published=%d matrix_hash=0x%llX pos=%.5f,%.5f,%.5f fov=%.4f aspect=%.6f",
+            "Full VR final frame camera applied count=%llu present=%llu eye=%d pair=%llu taau_reset=%d asymmetric=%d native_stereo_reused=%d centered_shared_fov_published=%d matrix_hash=0x%llX pos=%.5f,%.5f,%.5f fov=%.4f aspect=%.6f",
             static_cast<unsigned long long>(count),
             static_cast<unsigned long long>(present),
             eye,
             static_cast<unsigned long long>(pair_id),
             new_fallback_episode ? 1 : 0,
             native_asymmetric_full_vr_projection_applied ? 1 : 0,
-            symmetric_asymmetric_full_vr_fallback ? 1 : 0,
-            shared_asymmetric_fallback_fov_published ? 1 : 0,
+            native_asymmetric_reused_camera_fallback ? 1 : 0,
+            centered_reused_fallback_fov_published ? 1 : 0,
             static_cast<unsigned long long>(fnv1a64(
                 corrected_matrix.data(), sizeof(corrected_matrix))),
             corrected_camera[0], corrected_camera[1], corrected_camera[2],
@@ -38623,6 +39728,9 @@ void apply_engine_dual_render_transition(
     g_full_vr_frame_camera_last_pair[1].store(0, std::memory_order_release);
     g_full_vr_factory_camera_last_present.store(
         UINT64_MAX, std::memory_order_release);
+    g_full_vr_native_reused_camera_last_present.store(
+        UINT64_MAX, std::memory_order_release);
+    reset_strict_stereo_reused_camera_episode(generation);
     g_engine_completed_eye.store(-1);
     g_engine_completed_generation.store(0);
     g_engine_completed_pair_id.store(0);
@@ -42143,7 +43251,7 @@ void ensure_initialized() {
                 "focus_fire_b1=stereo_and_aer_centered_draw_proven "
                 "aer_taau_hud=scene_and_retained_pair_fail_open");
             log_line(
-                "witcher3vr dxgi proxy initialized build=V1443 base=V1442_runtime_focus_fire_centers "
+                "witcher3vr dxgi proxy initialized build=V1501 base=V1499_witcher_sense_expanded_partition_cache "
                 "anchor_smoothing_ini=%d anchor_smoothing_seconds=%.4f "
                 "first_person_strafe_ini=%d mode3_aer_presentation=%d raytracing_enabled=%d raytracing_history_buffers=%d "
                 "aer_afw_enabled=%d persistent_registry=%d optiscaler_enabled=%d "
@@ -42211,6 +43319,43 @@ void ensure_initialized() {
                 "V1442 noaa_optimization=aggressive tiled_culling=tls_bindings foliage=16_slot_chunks nonindexed=clean_route_fast_path gpu_command_stream=unchanged base=V1441");
             log_line(
                 "V1443 focus_fire_projection=runtime_openxr_fov per_eye_xy=1 quest_constants=removed b1_double_application_guard=runtime_centered");
+            // [PERF:WITCHER-SENSE-BOUNDED-DESCRIPTORS V1499 5/5]
+            log_line(
+                "V1499 witcher_sense_history_suppression=automatic_post_compositor_clear always_on=1 route=asym_only selector=exact_4x1_root1_bounded_signature focus=t2_512x512_rg16f descriptor_cache=1024x4_recyclable post_cache_t2=bounded_exact_resolve generic_cbv_mirror=off generic_reverse_mutex=off diagnostic_logging_required=0 current_draw=unchanged future_peer_history=zero");
+            // [PERF:WITCHER-SENSE-EXPANDED-PARTITION-CACHE V1501 3/3]
+            log_line(
+                "V1501 witcher_sense_descriptor_cache=16384_sets_x6 history_ways=2 signature_ways=4 cross_class_eviction=removed cached_history_probe=2 recyclable=1 generic_cbv_mirror=off generic_reverse_mutex=off gpu_clear=V1499_unchanged diagnostic_logging_required=0 base=V1499");
+            log_line(
+                "V1479 stereo_full_vr_hud=V1476_strict_predecessor_freshness v1477_aer_readiness_substitution=removed gameplay_flicker_regression=removed");
+            // [FIX:STREAMLINE-RGBA8-COPY-FAMILY V1480 3/3]
+            log_line(
+                "V1480 streamline_capture_format=canonical_rgba8_unorm compatible_sources=rgba8_typeless_unorm_srgb false_transition_recreation=removed dimensions_and_other_format_families=unchanged");
+            // [FIX:STRICT-STEREO-GAMEPLAY-RETAINED-HUD V1495 3/3]
+            log_line(
+                "V1495 strict_stereo_gameplay_hud=retained_after_bootstrap accepted_predecessor_join=V1494 native_baked=fail_open_only full_vr_and_cinema=unchanged aer_post_afw=unchanged base=V1494");
+            // [FIX:STRICT-STEREO-GAMEPLAY-HUD-EYE-AUTHORITY V1496 3/3]
+            log_line(
+                "V1496 strict_stereo_gameplay_hud_eye=exact_pso_selected submitted_fallback=gameplay_full_vr_cinema diagnostic_logging_required=0 pointer_exact=unchanged aer=unchanged base=V1495");
+            log_line(
+                "V1497 manual_cinema_recenter=single_f10_owner automatic_cinema_recenter=detector_owner taau_submitted_pair_gate=unchanged base=V1496");
+            // [FIX:FULL-VR-TRANSPARENT-FIX-ADMISSION V1484 3/3]
+            log_line(
+                "V1484 full_vr_transparent_fix=exact_native_asymmetric_source_only centered_fallback=excluded cinema_panel=excluded tiled_light=unchanged base=V1483");
+            // [FIX:FULL-VR-FACTORY-LIFETIME-AUTHORITY V1486 3/3]
+            log_line(
+                "V1486 full_vr_transparent_authority=factory_lifetime same_boundary=V1255 current_or_previous_two_presents=1 centered_fallback=excluded backend_independent=1 base=V1485");
+            // [FIX:STRICT-STEREO-NATIVE-REUSED-CAMERA-FALLBACK V1487 3/3]
+            log_line(
+                "V1487 strict_stereo_reused_camera=native_asymmetric_complete_pair factory_gate=current_or_previous_two_presents temporal_proof=verified_frame_writer transparent_authority=separate_native_reused_lifetime aer=centered_sequential_unchanged hud_change=none base=V1486");
+            // [FIX:STRICT-STEREO-PERSISTENT-REUSED-CAMERA V1488 4/4]
+            log_line(
+                "V1488 strict_stereo_reused_camera_admission=complete_centered_proof_pair_then_native_next_pair isolated_eye=centered present_gap=revokes generation_change=revokes factory_return=revokes pair_decision=frozen aer=unchanged hud_change=none base=V1487");
+            // [FIX:STRICT-STEREO-HUD-ACCEPTED-PREDECESSOR-JOIN V1494 6/7]
+            log_line(
+                "V1494 strict_stereo_full_vr_hud=accepted_predecessor_pair_plus_pso_selected_eye current_accepted_scene=validation_only capture_and_draw_same_submission=required one_copy_per_eye=1 reset=revokes generation_reset=revokes missing_pair_or_eye=fail_open no_present_parity=1 aer=unchanged camera=V1493_unchanged base=V1493");
+            // [FIX:STRICT-STEREO-HUD-FOUR-PRESENT-WINDOW V1493 4/5]
+            log_line(
+                "V1493 strict_stereo_hud_join_max_present_distance=4 observed_capture_burst=2772_to_2775 first_boundary=2777 aer_window=unchanged_2 rendering=unchanged base=V1492");
             log_line(
                 "V1363 dlss_scene_history_reset=removed_rejected_V1340 projection_switch_reset=V1331_only");
             log_line(
@@ -42236,7 +43381,7 @@ void ensure_initialized() {
             log_line(
                 "V1417 presentation_size=universal_final_openxr_subimage_fov_pair scale1=exact_identity pixels=resample_free foveated_rendering=preserved producer_temporal_transport=unchanged");
             log_line(
-                "V1418 opening_cutscene_asym_fallback_fov=published_after_corrected_camera_write mono=unchanged native_asymmetric_factory=unchanged");
+                "V1418 aer_opening_cutscene_centered_fallback_fov=published_after_corrected_camera_write mono=unchanged strict_stereo_superseded_by_V1487 native_asymmetric_factory=unchanged");
             log_line(
                 "V1279 DLSS compatibility=public_streamline_aer_private_history_ngx_stereo legacy_module_agnostic_discovery=disabled_by_V1288");
             log_line(
@@ -46135,12 +47280,41 @@ bool update_packed_eye_cache() {
 
 }
 
+// [FIX:STREAMLINE-RGBA8-COPY-FAMILY V1480 2/3] D3D12 permits resource copies
+// within the RGBA8 typeless family. Canonicalizing the private ring also keeps
+// every resource swappable with the existing typed packed-present cache.
+DXGI_FORMAT canonical_streamline_capture_format(DXGI_FORMAT source_format) {
+    switch (source_format) {
+    case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+    case DXGI_FORMAT_R8G8B8A8_UNORM:
+    case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+        return DXGI_FORMAT_R8G8B8A8_UNORM;
+    default:
+        return source_format;
+    }
+}
+
 bool ensure_streamline_capture_ring(const D3D12_RESOURCE_DESC& source_desc) {
     std::scoped_lock lock{g_streamline_capture_mutex};
+    const DXGI_FORMAT capture_format =
+        canonical_streamline_capture_format(source_desc.Format);
     if (g_streamline_capture_ring[0][0].resource != nullptr &&
         g_streamline_capture_width == source_desc.Width &&
         g_streamline_capture_height == source_desc.Height &&
-        g_streamline_capture_format == source_desc.Format) {
+        g_streamline_capture_format == capture_format) {
+        if (source_desc.Format != capture_format &&
+            g_config.runtime_diagnostics) {
+            static std::atomic<bool> alias_logged{};
+            bool expected = false;
+            if (alias_logged.compare_exchange_strong(expected, true)) {
+                log_line(
+                    "V1480 Streamline RGBA8 copy-family alias reused ring source_format=%u capture_format=%u size=%llux%u",
+                    static_cast<unsigned>(source_desc.Format),
+                    static_cast<unsigned>(capture_format),
+                    static_cast<unsigned long long>(source_desc.Width),
+                    source_desc.Height);
+            }
+        }
         return true;
     }
 
@@ -46170,6 +47344,7 @@ bool ensure_streamline_capture_ring(const D3D12_RESOURCE_DESC& source_desc) {
 
     g_streamline_capture_pending_publications.clear();
     auto capture_desc = source_desc;
+    capture_desc.Format = capture_format;
     capture_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
     D3D12_HEAP_PROPERTIES heap_props{};
     heap_props.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -46192,11 +47367,12 @@ bool ensure_streamline_capture_ring(const D3D12_RESOURCE_DESC& source_desc) {
 
     g_streamline_capture_width = static_cast<UINT>(source_desc.Width);
     g_streamline_capture_height = source_desc.Height;
-    g_streamline_capture_format = source_desc.Format;
-    log_line("Streamline stereo capture ring created size=%ux%u format=%u",
+    g_streamline_capture_format = capture_format;
+    log_line("Streamline stereo capture ring created size=%ux%u format=%u source_format=%u",
         g_streamline_capture_width,
         g_streamline_capture_height,
-        static_cast<unsigned>(g_streamline_capture_format));
+        static_cast<unsigned>(g_streamline_capture_format),
+        static_cast<unsigned>(source_desc.Format));
     return true;
 }
 
@@ -46696,8 +47872,14 @@ void render_openxr_test_frame(
                 UINT64_MAX, std::memory_order_release);
         }
         if (cinema_mode) {
-            g_auto_recenter_on_packed_lock_armed.store(
-                true, std::memory_order_release);
+            // [FIX:MANUAL-CINEMA-SINGLE-RECENTER V1497 2/3] The F10 handler
+            // owns the immediate manual-entry arm. Only an automatic Cinema
+            // transition may arm here, otherwise the detector re-arms after
+            // the first packed pair and causes a second recenter.
+            if (!g_force_mono_cinema.load(std::memory_order_relaxed)) {
+                g_auto_recenter_on_packed_lock_armed.store(
+                    true, std::memory_order_release);
+            }
             if (clean_mono_transport_active()) {
                 {
                     std::scoped_lock view_lock{
@@ -50404,7 +51586,8 @@ void handle_f3_capture_hotkey(IDXGISwapChain* swapchain) {
     if (w3vr::pipeline_flight::enabled()) {
         w3vr::pipeline_flight::dump_last_ten_seconds();
     }
-    w3vr::route_flight::dump_last_seconds("V1443", 15);
+    // [FIX:STRICT-STEREO-HUD-ACCEPTED-PREDECESSOR-JOIN V1494 7/7]
+    w3vr::route_flight::dump_last_seconds("V1501", 15);
     trigger_renderdoc_capture(
         g_game_swapchain != nullptr ? g_game_swapchain : swapchain);
 }
@@ -50870,6 +52053,8 @@ HRESULT STDMETHODCALLTYPE hook_present(IDXGISwapChain* swapchain, UINT sync_inte
         }
         if (forced) {
             g_engine_hmd_forward_valid.store(false, std::memory_order_release);
+            // [FIX:MANUAL-CINEMA-SINGLE-RECENTER V1497 3/3] This exact F10
+            // edge is the sole owner of the manual Cinema recenter arm.
             g_auto_recenter_on_packed_lock_armed.store(
                 true, std::memory_order_release);
             // Rearm the bounded source/camera checks even when F10 changes an

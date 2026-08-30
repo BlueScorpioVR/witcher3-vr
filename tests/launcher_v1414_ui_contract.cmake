@@ -94,7 +94,7 @@ endforeach()
 
 foreach(required IN ITEMS
         "bool optiscaler_enabled{};"
-        "bool route_logging{true};"
+        "bool route_logging{};"
         "bool performance_logging{};"
         "bool renderdoc_enabled{};")
     string(FIND "${header}" "${required}" found)
@@ -122,7 +122,7 @@ foreach(required IN ITEMS
         "config_version=16"
         "[renderdoc]"
         "streamline_device_bridge=0"
-        "route_flight_recorder=1"
+        "route_flight_recorder=0"
         "pipeline_flight_recorder=0")
     string(FIND "${defaults}" "${required}" found)
     if(found EQUAL -1)

@@ -1,12 +1,16 @@
 #include "config.h"
+#include "ofxr_launch_environment.h"
 
 #include <Windows.h>
 
+#include <algorithm>
+#include <array>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string_view>
+#include <vector>
 
 namespace fs = std::filesystem;
 
@@ -54,6 +58,32 @@ size_t CountOccurrences(const std::string& text, const std::string& token) {
     return count;
 }
 
+std::vector<std::wstring> ParseEnvironmentBlock(
+    const std::vector<wchar_t>& block) {
+    std::vector<std::wstring> entries;
+    for (size_t offset = 0; offset < block.size() && block[offset] != L'\0';) {
+        const std::wstring entry(block.data() + offset);
+        entries.push_back(entry);
+        offset += entry.size() + 1;
+    }
+    return entries;
+}
+
+size_t CountEnvironmentVariable(
+    const std::vector<std::wstring>& entries, std::wstring_view name) {
+    const std::wstring prefix = std::wstring(name) + L"=";
+    return static_cast<size_t>(std::count_if(
+        entries.begin(), entries.end(), [&prefix](const std::wstring& entry) {
+            return entry.size() >= prefix.size() &&
+                _wcsnicmp(entry.c_str(), prefix.c_str(), prefix.size()) == 0;
+        }));
+}
+
+bool HasEnvironmentEntry(
+    const std::vector<std::wstring>& entries, std::wstring_view expected) {
+    return std::find(entries.begin(), entries.end(), expected) != entries.end();
+}
+
 struct TempDirectory {
     fs::path path;
     TempDirectory() {
@@ -69,7 +99,8 @@ struct TempDirectory {
 
 w3vr::ConfigPaths MakePaths(const fs::path& root) {
     return {root, root / "witcher3vr.ini", root / "optiscaler_bridge.ini",
-        root / "dx12user.settings", root / "witcher3.exe"};
+        root / "ofxr_bridge.ini", root / "dx12user.settings",
+        root / "witcher3.exe"};
 }
 
 void WriteBaseFixtures(const w3vr::ConfigPaths& paths) {
@@ -180,6 +211,9 @@ void TestAllModes(const w3vr::ConfigPaths& paths) {
         state.height = 2592 + index;
         state.dlss_quality = index % 5;
         state.optiscaler_enabled = true;
+        state.frame_generation_backend =
+            static_cast<w3vr::FrameGenerationBackend>(index %
+                static_cast<int>(w3vr::FrameGenerationBackend::Count));
         state.hud_convergence_delta = 7;
         state.presentation_scale = 0.85f;
         state.menu_scale = 0.75f;
@@ -396,8 +430,19 @@ void TestAllModes(const w3vr::ConfigPaths& paths) {
         Require(optiscaler.Get("optiscaler", "enabled") ==
                 std::string(expected_optiscaler ? "1" : "0"),
             "OptiScaler was not constrained to a DLSS render profile");
+        w3vr::IniDocument ofxr;
+        Require(w3vr::BuildUpdatedOfxrDocument(
+                paths, state, ofxr, error),
+            "OFXR Bridge sidecar document build failed");
+        const std::array<std::string, 3> expected_ofxr{
+            "off", "fidelityfx", "nvidia"};
+        Require(ofxr.Get("ofxr", "backend") ==
+                expected_ofxr[static_cast<size_t>(
+                    state.frame_generation_backend)],
+            "OFXR Bridge backend was not persisted");
         Write(paths.vr_ini, vr.Serialize());
         Write(paths.optiscaler_bridge_ini, optiscaler.Serialize());
+        Write(paths.ofxr_bridge_ini, ofxr.Serialize());
         Write(paths.game_settings, game.Serialize());
         const auto loaded = w3vr::LoadConfiguration(paths);
         Require(loaded.warning.empty(), "saved mode should infer exactly");
@@ -410,6 +455,9 @@ void TestAllModes(const w3vr::ConfigPaths& paths) {
             "round-trip fullscreen projection mismatch");
         Require(loaded.state.optiscaler_enabled == expected_optiscaler,
             "round-trip OptiScaler sidecar mismatch");
+        Require(loaded.state.frame_generation_backend ==
+                state.frame_generation_backend,
+            "round-trip OFXR Bridge backend mismatch");
         if (w3vr::ModeUsesDlss(state.mode)) {
             Require(loaded.state.dlss_quality == state.dlss_quality,
                 "round-trip DLSS/DLAA selection mismatch");
@@ -559,6 +607,9 @@ void TestReleaseDefaults() {
         "steady icons must default to disabled");
     Require(!defaults.optiscaler_enabled,
         "OptiScaler must default to disabled");
+    Require(defaults.frame_generation_backend ==
+            w3vr::FrameGenerationBackend::Off,
+        "OFXR Bridge must default to Off");
     Require(!defaults.vertical_pitch_enabled,
         "vertical mouse/pad pitch must default to disabled");
     Require(!defaults.first_person_combat_exit,
@@ -578,8 +629,8 @@ void TestReleaseDefaults() {
         "experimental fullscreen projection must default to disabled");
     Require(!defaults.diagnostic_logging,
         "diagnostic logging must default to disabled");
-    Require(defaults.route_logging,
-        "lightweight route logging must default to enabled");
+    Require(!defaults.route_logging,
+        "lightweight route logging must default to disabled");
     Require(!defaults.performance_logging,
         "lightweight performance logging must default to disabled");
     Require(!defaults.renderdoc_enabled,
@@ -628,7 +679,7 @@ void TestEmbeddedLauncherDefaults() {
         defaults->Get("renderdoc", "enabled") == "0" &&
         defaults->Get("renderdoc", "streamline_device_bridge") == "0" &&
         defaults->Get("debug", "pipeline_flight_recorder") == "0" &&
-        defaults->Get("debug", "route_flight_recorder") == "1",
+        defaults->Get("debug", "route_flight_recorder") == "0",
         "embedded launcher defaults do not match schema 16 release policy");
 }
 
@@ -641,6 +692,7 @@ void TestHudEditorSetup(const fs::path& root) {
         launcher_directory,
         launcher_directory / "witcher3vr.ini",
         launcher_directory / "optiscaler_bridge.ini",
+        launcher_directory / "ofxr_bridge.ini",
         documents / "dx12user.settings",
         launcher_directory / "witcher3.exe"};
     const fs::path script = game / "mods" / "modWitcher3VRHUDEditor" /
@@ -1016,6 +1068,8 @@ void TestFallbackAndAtomicSave(const w3vr::ConfigPaths& paths) {
     state.height = 3216;
     std::wstring error;
     Require(w3vr::SaveConfiguration(paths, state, error), "atomic save failed");
+    Require(Read(paths.ofxr_bridge_ini).find("backend=off") != std::string::npos,
+        "atomic save did not create the default OFXR Bridge sidecar");
     Require(fs::exists(paths.vr_ini.wstring() + L".w3vr.bak"),
         "VR backup was not created");
     Require(fs::exists(paths.game_settings.wstring() + L".w3vr.bak"),
@@ -1080,7 +1134,7 @@ void TestFirstRunConfiguration(const fs::path& root) {
         "logging_enabled=0\r\n"
         "runtime_diagnostics=0\r\n"
         "pipeline_flight_recorder=0\r\n"
-        "route_flight_recorder=1\r\n";
+        "route_flight_recorder=0\r\n";
     Require(w3vr::EnsureVrConfiguration(
         paths, defaults, created, error), "first-run INI creation failed");
     Require(created, "first-run INI was not reported as created");
@@ -1510,6 +1564,62 @@ void TestFailurePaths(const fs::path& root) {
     Require(!error.empty(), "write failure should explain itself");
 }
 
+void TestOfxrLaunchEnvironment(const fs::path& root) {
+    const fs::path launcher = root / "ofxr-environment";
+    std::vector<wchar_t> block;
+    std::wstring error;
+
+    Require(!w3vr::BuildEnabledOfxrLaunchEnvironment(
+            launcher, w3vr::FrameGenerationBackend::Off, block, error) &&
+            block.empty() && !error.empty(),
+        "OFXR environment builder must reject Off; legacy launch owns it");
+
+    Require(!w3vr::BuildEnabledOfxrLaunchEnvironment(
+            launcher, w3vr::FrameGenerationBackend::Nvidia, block, error) &&
+            error.find(L"missing") != std::wstring::npos,
+        "OFXR selected backend must reject a missing bridge package");
+
+    const fs::path package = launcher / "ofxr";
+    Write(package / "XR_APILAYER_XRFrameBridge_diagnostic.dll", "fixture");
+    Write(package / "XR_APILAYER_XRFrameBridge_diagnostic.json", "fixture");
+    Require(SetEnvironmentVariableW(
+            L"XRFG_FLOW_BACKEND", L"parent-sentinel") != FALSE,
+        "test could not seed the parent OFXR backend variable");
+
+    Require(w3vr::BuildEnabledOfxrLaunchEnvironment(
+            launcher, w3vr::FrameGenerationBackend::Nvidia, block, error),
+        "NVIDIA OFXR child environment build failed");
+    Require(block.size() >= 2 && block[block.size() - 1] == L'\0' &&
+            block[block.size() - 2] == L'\0',
+        "OFXR child environment must be double-NUL terminated");
+    auto entries = ParseEnvironmentBlock(block);
+    Require(HasEnvironmentEntry(entries,
+            L"XR_API_LAYER_PATH=" + package.wstring()) &&
+            HasEnvironmentEntry(entries,
+                L"XR_ENABLE_API_LAYERS=XR_APILAYER_XRFrameBridge_diagnostic") &&
+            HasEnvironmentEntry(entries, L"XRFG_FLOW_BACKEND=nvidia"),
+        "NVIDIA OFXR child environment contains wrong values");
+    Require(CountEnvironmentVariable(entries, L"XR_API_LAYER_PATH") == 1 &&
+            CountEnvironmentVariable(entries, L"XR_ENABLE_API_LAYERS") == 1 &&
+            CountEnvironmentVariable(entries, L"XRFG_FLOW_BACKEND") == 1,
+        "OFXR managed child variables must occur exactly once");
+    wchar_t parent_backend[32]{};
+    Require(GetEnvironmentVariableW(
+            L"XRFG_FLOW_BACKEND", parent_backend,
+            static_cast<DWORD>(std::size(parent_backend))) > 0 &&
+            std::wstring_view(parent_backend) == L"parent-sentinel",
+        "OFXR environment builder mutated the launcher process");
+
+    Require(w3vr::BuildEnabledOfxrLaunchEnvironment(
+            launcher, w3vr::FrameGenerationBackend::FidelityFx, block, error),
+        "FidelityFX OFXR child environment build failed");
+    entries = ParseEnvironmentBlock(block);
+    Require(HasEnvironmentEntry(entries, L"XRFG_FLOW_BACKEND=fidelityfx") &&
+            !HasEnvironmentEntry(entries, L"XRFG_FLOW_BACKEND=nvidia"),
+        "FidelityFX OFXR child environment contains wrong backend");
+    SetEnvironmentVariableW(L"XRFG_FLOW_BACKEND", nullptr);
+}
+
 } // namespace
 
 int main() {
@@ -1530,6 +1640,7 @@ int main() {
         TestFirstRunConfiguration(temporary.path);
         TestVrBaselineAndRestore(paths);
         TestFailurePaths(temporary.path);
+        TestOfxrLaunchEnvironment(temporary.path);
         std::cout << "All launcher configuration tests passed.\n";
         return 0;
     } catch (const std::exception& exception) {

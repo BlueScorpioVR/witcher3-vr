@@ -13,25 +13,51 @@ void require(bool condition, const char* message) {
 }
 
 int main() {
-    require(!policy::frame_fallback_uses_symmetric_projection(
-            {false, true}),
+    require(!policy::reused_camera_fallback_uses_native_asymmetric_projection(
+            {false, false}),
         "an unconfigured asymmetric route needs no fallback override");
-    require(!policy::frame_fallback_uses_symmetric_projection(
+    require(policy::reused_camera_fallback_uses_native_asymmetric_projection(
             {true, false}),
-        "asymmetric gameplay must keep its established factory route");
-    require(policy::frame_fallback_uses_symmetric_projection(
+        "strict Stereo must complete a reused camera as native asymmetric");
+    require(!policy::reused_camera_fallback_uses_native_asymmetric_projection(
             {true, true}),
-        "an asymmetric Full VR frame fallback must be symmetric");
+        "AER must retain its independent centered sequential fallback");
+
+    policy::ReusedCameraEpisodeState episode{};
+    require(!policy::admit_native_reused_camera_pair(
+            episode, 7, 100, 50, 1),
+        "one isolated fallback eye must remain centered");
+    require(!policy::admit_native_reused_camera_pair(
+            episode, 7, 110, 51, 1),
+        "a distant one-eye fallback must start a fresh centered episode");
+    require(!policy::admit_native_reused_camera_pair(
+            episode, 7, 111, 51, 0),
+        "the complete proof pair must keep one centered decision");
+    require(policy::admit_native_reused_camera_pair(
+            episode, 7, 112, 52, 1),
+        "the pair after complete L/R proof may enter native projection");
+    require(policy::admit_native_reused_camera_pair(
+            episode, 7, 113, 52, 0),
+        "both eyes of an admitted pair must keep native projection");
+    require(!policy::admit_native_reused_camera_pair(
+            episode, 7, 120, 53, 1),
+        "a presentation gap must revoke native episode admission");
+    require(!policy::admit_native_reused_camera_pair(
+            episode, 8, 121, 54, 1),
+        "a renderer generation change must revoke admission");
+    policy::reset_reused_camera_episode(episode, 8);
+    require(!episode.initialized && !episode.native_armed,
+        "an explicit factory reset must clear the episode proof");
 
     require(!policy::stereo_frame_fallback_admissible(
             {false, true, false}),
         "an untagged frame cannot own the stereo fallback");
     require(policy::stereo_frame_fallback_admissible(
             {true, true, false}),
-        "an asymmetric route must repair a reused camera when the factory is stale");
+        "a stereo route must repair a reused camera when the factory is stale");
     require(!policy::stereo_frame_fallback_admissible(
             {true, true, true}),
-        "an asymmetric route must not rewrite an ordinary factory camera");
+        "a native asymmetric route must not rewrite an ordinary factory camera");
     require(policy::stereo_frame_fallback_admissible(
             {true, false, true}),
         "a symmetric route keeps its established internal fallback proof");

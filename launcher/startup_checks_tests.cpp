@@ -54,7 +54,8 @@ int wmain() {
 
         const w3vr::ConfigPaths paths{
             root, root / L"witcher3vr.ini", root / L"optiscaler_bridge.ini",
-            root / L"dx12user.settings", root / L"witcher3.exe"};
+            root / L"ofxr_bridge.ini", root / L"dx12user.settings",
+            root / L"witcher3.exe"};
         {
             std::ofstream ini(paths.vr_ini, std::ios::binary | std::ios::trunc);
             ini << "[meta]\r\nconfig_version=16\r\n";

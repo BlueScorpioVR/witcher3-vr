@@ -76,9 +76,10 @@ constexpr bool native_asymmetric_effect_center_application_active(
     bool preparation_configured,
     bool actual_native_asymmetric,
     bool cinema_panel,
-    bool full_vr_scene) noexcept {
+    bool full_vr_scene,
+    bool full_vr_native_source) noexcept {
     return preparation_configured && actual_native_asymmetric &&
-        !cinema_panel && !full_vr_scene;
+        !cinema_panel && (!full_vr_scene || full_vr_native_source);
 }
 
 // Validate the producer-owned projection at the exact AFW transaction. Native
@@ -298,6 +299,16 @@ constexpr bool late_hud_composite_source_ready(
     bool scene_only_pair_ready) noexcept {
     return route == HudProjectionRoute::Gameplay ||
         scene_only_pair_ready;
+}
+
+// Strict Stereo gameplay already owns a native eye-local HUD draw. Its
+// retained scene-only replacement is useful only after automatic/manual Cinema
+// lifecycle begins; AER has an independent post-AFW route and does not consume
+// this policy.
+constexpr bool retained_hud_scene_lifecycle_active(
+    bool cinema_active,
+    bool automatic_full_vr_camera_active) noexcept {
+    return cinema_active || automatic_full_vr_camera_active;
 }
 
 // Retained HUD capture must be able to discover REDengine's native t1 source

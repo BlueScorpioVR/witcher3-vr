@@ -5,7 +5,12 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
-add_library(w3vr_launcher_config STATIC config.cpp config.h)
+add_library(w3vr_launcher_config STATIC
+    config.cpp
+    config.h
+    ofxr_launch_environment.cpp
+    ofxr_launch_environment.h
+)
 target_compile_definitions(w3vr_launcher_config PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
 target_compile_options(w3vr_launcher_config PRIVATE /W4 /permissive-)
 target_link_libraries(w3vr_launcher_config PUBLIC shell32 ole32)

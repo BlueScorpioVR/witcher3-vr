@@ -10,7 +10,7 @@ file(READ "${DXGI_PROXY_SOURCE}" dxgi_proxy)
 file(READ "${OPTISCALER_BRIDGE_INI}" bridge_ini)
 
 foreach(required_fragment IN ITEMS
-        "build=V1443 base=V1442_runtime_focus_fire_centers"
+        "build=V1501 base=V1499_witcher_sense_expanded_partition_cache"
         "bool optiscaler_enabled{false};"
         "\"optiscaler_bridge.ini\", \"optiscaler\", \"enabled\", false"
         "bool native_dlss_public_streamline_owner_active()"

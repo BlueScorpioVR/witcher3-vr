@@ -268,6 +268,29 @@ std::string ReadString(const IniDocument& doc, const char* section,
     return raw ? Lower(Unquote(*raw)) : fallback;
 }
 
+FrameGenerationBackend ReadFrameGenerationBackend(const IniDocument& ini) {
+    const auto value = ReadString(ini, "ofxr", "backend", "off");
+    if (value == "fidelityfx") {
+        return FrameGenerationBackend::FidelityFx;
+    }
+    if (value == "nvidia") {
+        return FrameGenerationBackend::Nvidia;
+    }
+    return FrameGenerationBackend::Off;
+}
+
+const char* FrameGenerationBackendIniValue(
+    FrameGenerationBackend backend) noexcept {
+    switch (backend) {
+    case FrameGenerationBackend::FidelityFx:
+        return "fidelityfx";
+    case FrameGenerationBackend::Nvidia:
+        return "nvidia";
+    default:
+        return "off";
+    }
+}
+
 CinemaAspect ReadCinemaAspect(const IniDocument& ini) {
     const bool legacy_five_four = ReadBool(
         ini, "openxr", "cinema_5x4", true);
@@ -1116,6 +1139,7 @@ ConfigPaths DiscoverPaths() {
         directory,
         directory / L"witcher3vr.ini",
         directory / L"optiscaler_bridge.ini",
+        directory / L"ofxr_bridge.ini",
         documents / L"The Witcher 3" / L"dx12user.settings",
         directory / L"witcher3.exe",
     };
@@ -1417,6 +1441,12 @@ LoadResult LoadConfiguration(const ConfigPaths& paths) {
         result.state.optiscaler_enabled = ModeUsesDlss(result.state.mode) &&
             ReadBool(*optiscaler, "optiscaler", "enabled", false);
     }
+    std::wstring ofxr_error;
+    if (const auto ofxr = IniDocument::Load(
+            paths.ofxr_bridge_ini, ofxr_error)) {
+        result.state.frame_generation_backend =
+            ReadFrameGenerationBackend(*ofxr);
+    }
     result.state.hud_convergence_delta = std::clamp(
         ReadInt(*vr, "openxr", "hud_stereo_shift_px", -36) + 16, -64, 64);
     result.state.presentation_scale = std::clamp(
@@ -1489,7 +1519,7 @@ LoadResult LoadConfiguration(const ConfigPaths& paths) {
         ReadBool(*vr, "debug", "logging_enabled", false) &&
         ReadBool(*vr, "debug", "runtime_diagnostics", false);
     result.state.route_logging = ReadBool(
-        *vr, "debug", "route_flight_recorder", true);
+        *vr, "debug", "route_flight_recorder", false);
     result.state.performance_logging = ReadBool(
         *vr, "debug", "pipeline_flight_recorder", false);
     result.state.renderdoc_enabled = ReadBool(
@@ -1671,6 +1701,31 @@ bool BuildUpdatedOptiscalerDocument(const ConfigPaths& paths,
     return true;
 }
 
+bool BuildUpdatedOfxrDocument(const ConfigPaths& paths,
+    const LauncherState& state, IniDocument& ofxr,
+    std::wstring& error) {
+    const DWORD attributes = GetFileAttributesW(paths.ofxr_bridge_ini.c_str());
+    if (attributes != INVALID_FILE_ATTRIBUTES) {
+        const auto loaded = IniDocument::Load(paths.ofxr_bridge_ini, error);
+        if (!loaded) return false;
+        ofxr = *loaded;
+    } else {
+        const DWORD lookup_error = GetLastError();
+        if (lookup_error != ERROR_FILE_NOT_FOUND &&
+            lookup_error != ERROR_PATH_NOT_FOUND) {
+            SetLastError(lookup_error);
+            error = LastErrorMessage(
+                L"Checking OFXR Bridge configuration",
+                paths.ofxr_bridge_ini);
+            return false;
+        }
+        ofxr = IniDocument::FromText("[ofxr]\r\nbackend=off\r\n");
+    }
+    ofxr.Set("ofxr", "backend",
+        FrameGenerationBackendIniValue(state.frame_generation_backend));
+    return true;
+}
+
 bool AtomicWriteWithBackup(const std::filesystem::path& path,
     const std::string& contents, std::wstring& error) {
     const auto temporary = path.wstring() + L".w3vr.tmp";
@@ -1714,13 +1769,17 @@ bool SaveConfiguration(const ConfigPaths& paths, const LauncherState& state,
     IniDocument vr;
     IniDocument game;
     IniDocument optiscaler;
+    IniDocument ofxr;
     if (!BuildUpdatedDocuments(paths, state, vr, game, error)) return false;
     if (!BuildUpdatedOptiscalerDocument(
             paths, state, optiscaler, error)) return false;
+    if (!BuildUpdatedOfxrDocument(paths, state, ofxr, error)) return false;
     if (!AtomicWriteWithBackup(paths.vr_ini, vr.Serialize(), error)) return false;
     if (!AtomicWriteWithBackup(paths.game_settings, game.Serialize(), error)) return false;
     if (!AtomicWriteWithBackup(paths.optiscaler_bridge_ini,
             optiscaler.Serialize(), error)) return false;
+    if (!AtomicWriteWithBackup(paths.ofxr_bridge_ini,
+            ofxr.Serialize(), error)) return false;
     return true;
 }
 

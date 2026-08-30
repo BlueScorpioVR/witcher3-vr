@@ -23,6 +23,7 @@ int main() {
     using w3vr::mode3_transport::final_color_submission_backend;
     using w3vr::mode3_transport::immutable_pair_view_ready;
     using w3vr::mode3_transport::late_hud_composite_source_ready;
+    using w3vr::mode3_transport::retained_hud_scene_lifecycle_active;
     using w3vr::mode3_transport::native_hud_source_bootstrap_active;
     using w3vr::mode3_transport::real_smoke_variant_bootstrap_allowed;
     using w3vr::mode3_transport::select_swapchain_dimension;
@@ -37,19 +38,22 @@ int main() {
 
     // Effect variants and their functional metadata are prepared before F2,
     // including a SYM startup, for both Stereo and AER. Draw substitution is
-    // native-ASym-only and is suppressed for Cinema panels and Full VR scenes.
+    // native-ASym-only. Cinema panels and centered Full-VR fallbacks remain
+    // suppressed; an exact native-ASym Full-VR source admits the same fix.
     const bool effect_preparation =
         native_asymmetric_effect_preparation_configured(
             true, true, true, true);
     assert(effect_preparation);
     assert(!native_asymmetric_effect_center_application_active(
-        effect_preparation, false, false, false));
+        effect_preparation, false, false, false, false));
     assert(native_asymmetric_effect_center_application_active(
-        effect_preparation, true, false, false));
+        effect_preparation, true, false, false, false));
     assert(!native_asymmetric_effect_center_application_active(
-        effect_preparation, true, true, false));
+        effect_preparation, true, true, false, false));
     assert(!native_asymmetric_effect_center_application_active(
-        effect_preparation, true, false, true));
+        effect_preparation, true, false, true, false));
+    assert(native_asymmetric_effect_center_application_active(
+        effect_preparation, true, false, true, true));
     assert(!native_asymmetric_effect_preparation_configured(
         false, true, true, true));
     assert(!native_asymmetric_effect_preparation_configured(
@@ -241,6 +245,13 @@ int main() {
         HudProjectionRoute::Cinema, false));
     assert(late_hud_composite_source_ready(
         HudProjectionRoute::Cinema, true));
+
+    // Strict Stereo gameplay keeps the native baked HUD. Retained removal may
+    // start on the early Full-VR camera flag or the later Cinema detector.
+    assert(!retained_hud_scene_lifecycle_active(false, false));
+    assert(retained_hud_scene_lifecycle_active(true, false));
+    assert(retained_hud_scene_lifecycle_active(false, true));
+    assert(retained_hud_scene_lifecycle_active(true, true));
 
     // Every retained-HUD route must be able to discover native t1 before the
     // first complete scene-only pair exists. Strict Stereo previously omitted

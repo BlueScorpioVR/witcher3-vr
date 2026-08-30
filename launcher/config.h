@@ -27,6 +27,13 @@ enum class CameraFollowPolicy {
     AlwaysOff,
 };
 
+enum class FrameGenerationBackend {
+    Off,
+    FidelityFx,
+    Nvidia,
+    Count,
+};
+
 constexpr bool CameraFollowEnabled(
     CameraFollowPolicy policy, bool horse_or_boat, bool first_person) {
     if (policy == CameraFollowPolicy::AlwaysOff) return false;
@@ -57,6 +64,8 @@ struct LauncherState {
     int height{2784};
     int dlss_quality{3};
     bool optiscaler_enabled{};
+    FrameGenerationBackend frame_generation_backend{
+        FrameGenerationBackend::Off};
     int hud_convergence_delta{-20};
     float presentation_scale{1.0f};
     float menu_scale{0.85f};
@@ -80,7 +89,7 @@ struct LauncherState {
     bool fast_movement_transitions{true};
     bool fullscreen_projection{};
     bool diagnostic_logging{};
-    bool route_logging{true};
+    bool route_logging{};
     bool performance_logging{};
     bool renderdoc_enabled{};
 };
@@ -93,6 +102,7 @@ struct ConfigPaths {
     std::filesystem::path launcher_directory;
     std::filesystem::path vr_ini;
     std::filesystem::path optiscaler_bridge_ini;
+    std::filesystem::path ofxr_bridge_ini;
     std::filesystem::path game_settings;
     std::filesystem::path game_executable;
 };
@@ -146,6 +156,9 @@ bool BuildUpdatedDocuments(const ConfigPaths& paths, const LauncherState& state,
     IniDocument& vr_ini, IniDocument& game_settings, std::wstring& error);
 bool BuildUpdatedOptiscalerDocument(const ConfigPaths& paths,
     const LauncherState& state, IniDocument& optiscaler,
+    std::wstring& error);
+bool BuildUpdatedOfxrDocument(const ConfigPaths& paths,
+    const LauncherState& state, IniDocument& ofxr,
     std::wstring& error);
 bool SaveConfiguration(const ConfigPaths& paths, const LauncherState& state,
     std::wstring& error);

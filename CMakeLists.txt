@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(witcher3vr VERSION 0.1443.0 LANGUAGES C CXX)
+project(witcher3vr VERSION 0.1487.0 LANGUAGES C CXX)
 
 include(CTest)
 
@@ -421,6 +421,13 @@ if(BUILD_TESTING)
     )
 
     add_test(
+        NAME renderer_streamline_rgba8_copy_family_contract
+        COMMAND "${CMAKE_COMMAND}"
+            "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/streamline_rgba8_copy_family_contract.cmake"
+    )
+
+    add_test(
         NAME renderer_cross_queue_rt_history_ownership_contract
         COMMAND "${CMAKE_COMMAND}"
             "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
@@ -435,10 +442,10 @@ if(BUILD_TESTING)
     )
 
     add_test(
-        NAME renderer_opening_cutscene_asym_fallback_fov_contract
+        NAME renderer_strict_stereo_native_reused_camera_fallback_contract
         COMMAND "${CMAKE_COMMAND}"
             "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
-            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/opening_cutscene_asym_fallback_fov_contract.cmake"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/strict_stereo_native_reused_camera_fallback_contract.cmake"
     )
 
     add_test(
@@ -472,6 +479,83 @@ if(BUILD_TESTING)
     )
 
     add_test(
+        NAME renderer_witcher_sense_bounded_history_suppression_contract
+        COMMAND "${CMAKE_COMMAND}"
+            "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/witcher_sense_bounded_history_suppression_contract.cmake"
+    )
+
+    add_test(
+        NAME renderer_witcher_sense_bounded_descriptor_hot_path_contract
+        COMMAND "${CMAKE_COMMAND}"
+            "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/witcher_sense_bounded_descriptor_hot_path_contract.cmake"
+    )
+
+    add_test(
+        NAME renderer_witcher_sense_expanded_partition_cache_contract
+        COMMAND "${CMAKE_COMMAND}"
+            "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/witcher_sense_expanded_partition_cache_contract.cmake"
+    )
+
+    add_test(
+        NAME renderer_stereo_full_vr_hud_revert_contract
+        COMMAND "${CMAKE_COMMAND}"
+            "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/stereo_full_vr_hud_revert_contract.cmake"
+    )
+
+    add_test(
+        NAME renderer_strict_stereo_gameplay_retained_hud_contract
+        COMMAND "${CMAKE_COMMAND}"
+            "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/strict_stereo_gameplay_retained_hud_contract.cmake"
+    )
+
+    add_test(
+        NAME renderer_strict_stereo_gameplay_eye_authority_contract
+        COMMAND "${CMAKE_COMMAND}"
+            "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/strict_stereo_gameplay_eye_authority_contract.cmake"
+    )
+
+    add_test(
+        NAME renderer_manual_cinema_single_recenter_contract
+        COMMAND "${CMAKE_COMMAND}"
+            "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/manual_cinema_single_recenter_contract.cmake"
+    )
+
+    add_test(
+        NAME renderer_strict_stereo_hud_accepted_predecessor_join_contract
+        COMMAND "${CMAKE_COMMAND}"
+            "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/strict_stereo_hud_accepted_predecessor_join_contract.cmake"
+    )
+
+    add_test(
+        NAME renderer_strict_stereo_hud_four_present_window_contract
+        COMMAND "${CMAKE_COMMAND}"
+            "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/strict_stereo_hud_four_present_window_contract.cmake"
+    )
+
+    add_test(
+        NAME renderer_full_vr_transparent_fix_admission_contract
+        COMMAND "${CMAKE_COMMAND}"
+            "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/full_vr_transparent_fix_admission_contract.cmake"
+    )
+
+    add_test(
+        NAME renderer_full_vr_native_source_lifetime_authority_contract
+        COMMAND "${CMAKE_COMMAND}"
+            "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/full_vr_native_source_lifetime_authority_contract.cmake"
+    )
+
+    add_test(
         NAME launcher_v1414_ui_contract
         COMMAND "${CMAKE_COMMAND}"
             "-DLAUNCHER_MAIN=${CMAKE_CURRENT_SOURCE_DIR}/launcher/main.cpp"
@@ -481,6 +565,17 @@ if(BUILD_TESTING)
             "-DSTARTUP_CHECKS=${CMAKE_CURRENT_SOURCE_DIR}/launcher/startup_checks.cpp"
             "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/launcher_v1414_ui_contract.cmake"
+    )
+
+    add_test(
+        NAME launcher_v1498_ofxr_off_old_launch_contract
+        COMMAND "${CMAKE_COMMAND}"
+            "-DLAUNCHER_MAIN=${CMAKE_CURRENT_SOURCE_DIR}/launcher/main.cpp"
+            "-DLAUNCHER_CONFIG_HEADER=${CMAKE_CURRENT_SOURCE_DIR}/launcher/config.h"
+            "-DOFXR_ENV_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/launcher/ofxr_launch_environment.cpp"
+            "-DOFXR_ENV_HEADER=${CMAKE_CURRENT_SOURCE_DIR}/launcher/ofxr_launch_environment.h"
+            "-DLAUNCHER_CMAKE=${CMAKE_CURRENT_SOURCE_DIR}/launcher/CMakeLists.txt"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/launcher_v1498_ofxr_off_old_launch_contract.cmake"
     )
 
 endif()

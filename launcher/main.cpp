@@ -1,4 +1,5 @@
 #include "config.h"
+#include "ofxr_launch_environment.h"
 #include "openxr_resolution.h"
 #include "resources.h"
 #include "startup_checks.h"
@@ -24,6 +25,7 @@ using w3vr::LauncherState;
 using w3vr::RenderMode;
 using w3vr::CinemaAspect;
 using w3vr::CameraFollowPolicy;
+using w3vr::FrameGenerationBackend;
 
 constexpr wchar_t kWindowClass[] = L"Witcher3VRLauncherWindow";
 constexpr int kClientWidth = 1180;
@@ -39,6 +41,7 @@ enum ControlId {
     IdHeight,
     IdDlssQuality,
     IdOptiscaler,
+    IdOfxrBridge,
     IdConvergence,
     IdConvergenceValue,
     IdPresentationScale,
@@ -401,6 +404,16 @@ bool CaptureState(LauncherState& state, std::wstring& error) {
         Item(IdDlssQuality), CB_GETCURSEL, 0, 0)), 0, 4);
     state.optiscaler_enabled = w3vr::ModeUsesDlss(state.mode) &&
         SendMessageW(Item(IdOptiscaler), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    const int frame_generation_backend = static_cast<int>(SendMessageW(
+        Item(IdOfxrBridge), CB_GETCURSEL, 0, 0));
+    if (frame_generation_backend < 0 ||
+        frame_generation_backend >=
+            static_cast<int>(FrameGenerationBackend::Count)) {
+        error = L"Select an OFXR Bridge backend.";
+        return false;
+    }
+    state.frame_generation_backend =
+        static_cast<FrameGenerationBackend>(frame_generation_backend);
     state.hud_convergence_delta = static_cast<int>(SendMessageW(
         Item(IdConvergence), TBM_GETPOS, 0, 0));
     state.presentation_scale = static_cast<float>(SendMessageW(
@@ -605,7 +618,7 @@ void FocusLaunchedGame(HANDLE process, DWORD process_id) {
     }
 }
 
-bool LaunchGame(std::wstring& error) {
+bool LaunchGame(FrameGenerationBackend backend, std::wstring& error) {
     if (GetFileAttributesW(g_app.paths.game_executable.c_str()) == INVALID_FILE_ATTRIBUTES) {
         error = L"witcher3.exe was not found next to the launcher.";
         return false;
@@ -613,9 +626,29 @@ bool LaunchGame(std::wstring& error) {
     std::wstring command = L"\"" + g_app.paths.game_executable.wstring() + L"\"";
     STARTUPINFOW startup{sizeof(startup)};
     PROCESS_INFORMATION process{};
-    if (!CreateProcessW(g_app.paths.game_executable.c_str(), command.data(),
+    BOOL launched{};
+    if (backend == FrameGenerationBackend::Off) {
+        // [FIX:OFXR-OFF-OLD-LAUNCH V1498 2/2] Preserve the historical launch
+        // call exactly: no OFXR helper, no custom environment block and no
+        // OpenXR API-layer creation flag.
+        launched = CreateProcessW(
+            g_app.paths.game_executable.c_str(), command.data(),
             nullptr, nullptr, FALSE, 0, nullptr,
-            g_app.paths.launcher_directory.c_str(), &startup, &process)) {
+            g_app.paths.launcher_directory.c_str(), &startup, &process);
+    } else {
+        std::vector<wchar_t> environment;
+        if (!w3vr::BuildEnabledOfxrLaunchEnvironment(
+                g_app.paths.launcher_directory, backend,
+                environment, error)) {
+            return false;
+        }
+        launched = CreateProcessW(
+            g_app.paths.game_executable.c_str(), command.data(),
+            nullptr, nullptr, FALSE, CREATE_UNICODE_ENVIRONMENT,
+            environment.data(), g_app.paths.launcher_directory.c_str(),
+            &startup, &process);
+    }
+    if (!launched) {
         error = L"Could not start witcher3.exe (Windows error " +
             std::to_wstring(GetLastError()) + L").";
         return false;
@@ -789,6 +822,8 @@ void RestoreLauncherDefaults() {
     SendMessageW(Item(IdDlssQuality), CB_SETCURSEL, defaults.dlss_quality, 0);
     SendMessageW(Item(IdOptiscaler), BM_SETCHECK,
         defaults.optiscaler_enabled ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(Item(IdOfxrBridge), CB_SETCURSEL,
+        static_cast<int>(defaults.frame_generation_backend), 0);
     SendMessageW(Item(IdConvergence), TBM_SETPOS, TRUE,
         defaults.hud_convergence_delta);
     SendMessageW(Item(IdPresentationScale), TBM_SETPOS, TRUE,
@@ -908,7 +943,7 @@ void Save(bool launch) {
             std::to_wstring(state.height) + L".")
         : L"Settings saved. Backups use the .w3vr.bak suffix.");
     if (launch) {
-        if (!LaunchGame(error)) {
+        if (!LaunchGame(state.frame_generation_backend, error)) {
             MessageBoxW(g_app.window, error.c_str(), L"Launch failed",
                 MB_OK | MB_ICONERROR);
             return;
@@ -934,6 +969,11 @@ void PopulateControls() {
     ComboAdd(quality, L"Balanced");
     ComboAdd(quality, L"Performance");
     ComboAdd(quality, L"Ultra Performance");
+
+    HWND ofxr_bridge = Item(IdOfxrBridge);
+    ComboAdd(ofxr_bridge, L"Off");
+    ComboAdd(ofxr_bridge, L"FidelityFX");
+    ComboAdd(ofxr_bridge, L"NVIDIA");
 
     HWND cinema_aspect = Item(IdCinemaAspect);
     ComboAdd(cinema_aspect, L"5:4");
@@ -965,6 +1005,8 @@ void PopulateControls() {
     SendMessageW(quality, CB_SETCURSEL, loaded.state.dlss_quality, 0);
     SendMessageW(Item(IdOptiscaler), BM_SETCHECK,
         loaded.state.optiscaler_enabled ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(ofxr_bridge, CB_SETCURSEL,
+        static_cast<int>(loaded.state.frame_generation_backend), 0);
     SendMessageW(Item(IdConvergence), TBM_SETPOS, TRUE,
         loaded.state.hud_convergence_delta);
     SendMessageW(Item(IdPresentationScale), TBM_SETPOS, TRUE,
@@ -1053,7 +1095,7 @@ void CreateInterface(HWND window) {
 
     AddTooltip(AddControl(L"BUTTON", L"Startup rendering", BS_GROUPBOX,
         20, 18, 560, 142),
-        L"Select the render route, headset render resolution, DLSS quality, and optional OptiScaler bridge used at game startup.");
+        L"Select the render route, headset render resolution, DLSS quality, OptiScaler, and the optional process-scoped OFXR frame-generation bridge.");
     AddTooltips(
         L"AER + AFW uses PureDark AFW to generate the missing eye from alternating real eyes. Stereo renders both eyes. Mono uses one clean cyclopean producer for both headset views, without eye separation, stereo tick locks, or AFW.",
         {AddLabel(L"Render mode", 38, 40, 95, 22),
@@ -1073,10 +1115,13 @@ void CreateInterface(HWND window) {
          AddLabel(L"x", 451, 80, 12, 22, 0, SS_CENTER),
          AddControl(L"EDIT", L"", WS_BORDER | ES_NUMBER | ES_CENTER |
              WS_TABSTOP, 466, 76, 70, 25, IdHeight, WS_EX_CLIENTEDGE)});
-    AddTooltip(AddControl(L"BUTTON",
-        L"OptiScaler (download the dedicated package from the release page)",
-        BS_AUTOCHECKBOX | WS_TABSTOP, 38, 112, 520, 28, IdOptiscaler),
-        L"Uses the game's DLSS route to run FSR through OptiScaler. Useful for AMD Radeon graphics cards.");
+    AddTooltip(AddControl(L"BUTTON", L"OptiScaler",
+        BS_AUTOCHECKBOX | WS_TABSTOP, 38, 112, 150, 28, IdOptiscaler),
+        L"OptiScaler (download the dedicated package from the release page). Uses the game's DLSS route to run FSR through OptiScaler. Useful for AMD Radeon graphics cards.");
+    AddTooltips(
+        L"Optional OpenXR frame-generation bridge. Off launches normally. FidelityFX or NVIDIA is enabled only for the child started by Save && Launch; a normal game launch remains unaffected.",
+        {AddLabel(L"OFXR Bridge", 202, 116, 96, 22),
+         AddCombo(300, 108, 258, IdOfxrBridge)});
 
     AddTooltip(AddControl(L"BUTTON", L"Comfort and interface", BS_GROUPBOX,
         20, 174, 560, 408),
@@ -1292,7 +1337,7 @@ void CreateInterface(HWND window) {
         L"Writes the selected launcher, renderer, and game settings without starting the game.");
     AddTooltip(AddControl(L"BUTTON", L"Save && Launch",
         BS_DEFPUSHBUTTON | WS_TABSTOP, 1002, 624, 158, 36, IdSaveLaunch),
-        L"Writes all settings, enforces render-mode compatibility, and starts The Witcher 3.");
+        L"Writes all settings, enforces render-mode compatibility, and starts The Witcher 3. If selected, OFXR Bridge is enabled only for this child process.");
 
     HWND kofi = AddControl(WC_LINK,
         L"If you're enjoying the mod, consider <a href=\"https://ko-fi.com/tig3rmast3r\">supporting it on Ko-fi</a>.",
