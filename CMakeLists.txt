@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(witcher3vr VERSION 0.1510.0 LANGUAGES C CXX)
+project(witcher3vr VERSION 0.1519.0 LANGUAGES C CXX)
 
 include(CTest)
 
@@ -72,6 +72,22 @@ set_target_properties(witcher3vr_dxgi PROPERTIES OUTPUT_NAME dxgi)
 target_link_options(witcher3vr_dxgi PRIVATE /MAP)
 
 if(BUILD_TESTING)
+    add_executable(w3vr_world_detail_range_policy_tests
+        tests/world_detail_range_policy_tests.cpp
+    )
+    target_include_directories(w3vr_world_detail_range_policy_tests
+        PRIVATE src)
+    add_test(NAME renderer_world_detail_range_policy
+        COMMAND w3vr_world_detail_range_policy_tests)
+
+    add_executable(w3vr_witcher_sense_extent_policy_tests
+        tests/witcher_sense_extent_policy_tests.cpp
+    )
+    target_include_directories(w3vr_witcher_sense_extent_policy_tests
+        PRIVATE src)
+    add_test(NAME renderer_witcher_sense_extent_policy
+        COMMAND w3vr_witcher_sense_extent_policy_tests)
+
     add_executable(w3vr_optiscaler_jitter_policy_tests
         tests/optiscaler_jitter_policy_tests.cpp
     )
@@ -297,16 +313,6 @@ if(BUILD_TESTING)
         COMMAND w3vr_cbv_descriptor_cache_policy_tests
     )
 
-    add_executable(w3vr_foliage_hmd_base_policy_tests
-        tests/foliage_hmd_base_policy_tests.cpp
-    )
-    target_include_directories(
-        w3vr_foliage_hmd_base_policy_tests PRIVATE src)
-    add_test(
-        NAME renderer_foliage_hmd_base_policy
-        COMMAND w3vr_foliage_hmd_base_policy_tests
-    )
-
     add_executable(w3vr_smoke_eye_authority_policy_tests
         tests/smoke_eye_authority_policy_tests.cpp
     )
@@ -328,11 +334,10 @@ if(BUILD_TESTING)
     )
 
     add_test(
-        NAME renderer_foliage_native_current_previous_descriptor_contract
+        NAME renderer_v1519_remove_foliage_correction_contract
         COMMAND "${CMAKE_COMMAND}"
-            "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
-            "-DLIFETIME_EVIDENCE=${CMAKE_CURRENT_SOURCE_DIR}/support/foliage_native_table_lifetime_contract.json"
-            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/foliage_native_current_previous_descriptor_contract.cmake"
+            "-DSOURCE_ROOT=${CMAKE_CURRENT_SOURCE_DIR}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/v1519_remove_foliage_correction_contract.cmake"
     )
 
     add_test(
@@ -458,6 +463,13 @@ if(BUILD_TESTING)
     )
 
     add_test(
+        NAME renderer_smoke_packed_basis_world_up_contract
+        COMMAND "${CMAKE_COMMAND}"
+            "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/smoke_packed_basis_world_up_contract.cmake"
+    )
+
+    add_test(
         NAME renderer_clean_mode1_contract
         COMMAND "${CMAKE_COMMAND}"
             "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
@@ -497,6 +509,13 @@ if(BUILD_TESTING)
         COMMAND "${CMAKE_COMMAND}"
             "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/witcher_sense_expanded_partition_cache_contract.cmake"
+    )
+
+    add_test(
+        NAME renderer_witcher_sense_aligned_extent_contract
+        COMMAND "${CMAKE_COMMAND}"
+            "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/witcher_sense_aligned_extent_contract.cmake"
     )
 
     add_test(
@@ -601,6 +620,31 @@ if(BUILD_TESTING)
             "-DOFXR_ENV_HEADER=${CMAKE_CURRENT_SOURCE_DIR}/launcher/ofxr_launch_environment.h"
             "-DLAUNCHER_TEST_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/launcher/tests.cpp"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/launcher_v1510_ofxr_root_layout_contract.cmake"
+    )
+
+    add_test(
+        NAME launcher_v1512_ofxr_startup_whitelist_contract
+        COMMAND "${CMAKE_COMMAND}"
+            "-DSTARTUP_CHECKS_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/launcher/startup_checks.cpp"
+            "-DSTARTUP_CHECKS_TEST_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/launcher/startup_checks_tests.cpp"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/launcher_v1512_ofxr_startup_whitelist_contract.cmake"
+    )
+
+    add_test(
+        NAME renderer_v1516_world_detail_range_contract
+        COMMAND "${CMAKE_COMMAND}"
+            "-DRENDERER_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/world_detail_range_contract.cmake"
+    )
+
+    add_test(
+        NAME launcher_v1518_world_detail_range_contract
+        COMMAND "${CMAKE_COMMAND}"
+            "-DLAUNCHER_MAIN_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/launcher/main.cpp"
+            "-DLAUNCHER_CONFIG_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/launcher/config.cpp"
+            "-DLAUNCHER_CONFIG_HEADER=${CMAKE_CURRENT_SOURCE_DIR}/launcher/config.h"
+            "-DLAUNCHER_DEFAULT_INI=${CMAKE_CURRENT_SOURCE_DIR}/launcher/witcher3vr.default.ini"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/launcher_v1518_world_detail_range_contract.cmake"
     )
 
 endif()

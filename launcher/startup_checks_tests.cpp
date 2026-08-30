@@ -31,6 +31,8 @@ int wmain() {
         Touch(root / L"DXGI.DLL");
         Touch(root / L"OptiScaler.dll");
         Touch(root / L"renderdoc.dll");
+        // [FIX:OFXR-STARTUP-WHITELIST V1512 2/2]
+        Touch(root / L"XR_APILAYER_XRFrameBridge_diagnostic.dll");
         Touch(root / L"ReShade64.dll");
         Touch(root / L"d3d12.dll");
         Touch(root / L"not-a-library.txt");
@@ -43,6 +45,9 @@ int wmain() {
             "foreign DLL scan did not return the expected sorted names");
         Require(w3vr::IsKnownDx12Dll(L"NvNgX_DlSs.DlL"),
             "known DLL matching is not case-insensitive");
+        Require(w3vr::IsKnownDx12Dll(
+                L"xr_apilayer_xrframebridge_DIAGNOSTIC.DLL"),
+            "OFXR layer DLL matching is not case-insensitive");
         Require(!w3vr::IsKnownDx12Dll(L"version.dll"),
             "foreign proxy DLL was incorrectly allowlisted");
 

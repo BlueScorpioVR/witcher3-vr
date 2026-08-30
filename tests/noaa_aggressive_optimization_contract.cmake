@@ -5,7 +5,7 @@ endif()
 file(READ "${DXGI_PROXY_SOURCE}" source)
 
 set(required_fragments
-    "build=V1509 base=V1508_aer_full_vr_scene_only_admission"
+    "build=V1511 base=V1509_witcher_sense_aligned_extent"
     "PERF:NOAA-TILED-TLS V1442"
     "return asymmetric_tiled_culling_fix_needed() ||"
     "snapshot.compute_tables = state->compute_tables"
@@ -13,11 +13,7 @@ set(required_fragments
     "if (slot.state.recording_epoch != recording_epoch)"
     "slot.recording_epoch_source->load("
     "slot.state.recording_epoch = recording_epoch"
-    "PERF:NOAA-FOLIAGE-CHUNKS V1442"
-    "constexpr uint32_t kFoliageBoundBasisChunkSize = 16"
-    "uint32_t slot_count{1}"
     "advance_command_list_recording_epoch(command_list)"
-    "kFoliageBoundBasisChunkSize)"
     "PERF:NOAA-NONINDEXED-FAST-PATH V1442"
     "if (clean_strict_noaa && !functional_aim_candidate &&")
 

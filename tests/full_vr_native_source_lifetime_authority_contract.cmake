@@ -5,7 +5,7 @@ endif()
 file(READ "${DXGI_PROXY_SOURCE}" source)
 
 foreach(required_fragment IN ITEMS
-        "build=V1509 base=V1508_aer_full_vr_scene_only_admission"
+        "build=V1511 base=V1509_witcher_sense_aligned_extent"
         "[FIX:FULL-VR-FACTORY-LIFETIME-AUTHORITY V1486 1/3]"
         "[FIX:FULL-VR-FACTORY-LIFETIME-AUTHORITY V1486 2/3]"
         "[FIX:FULL-VR-FACTORY-LIFETIME-AUTHORITY V1486 3/3]"
@@ -17,7 +17,7 @@ foreach(required_fragment IN ITEMS
         "g_full_vr_native_reused_camera_last_present.store("
         "authority=native_source_lifetime"
         "effects=native_source_lifetime"
-        "dump_last_seconds(\"V1509\", 15)")
+        "dump_last_seconds(\"V1511\", 15)")
     string(FIND "${source}" "${required_fragment}" fragment_index)
     if(fragment_index EQUAL -1)
         message(FATAL_ERROR
@@ -37,4 +37,3 @@ foreach(forbidden_fragment IN ITEMS
 endforeach()
 
 message(STATUS "V1507 Full-VR native-source lifetime authority contract verified")
-

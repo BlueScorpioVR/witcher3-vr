@@ -59,6 +59,8 @@ const auto kKnownDx12Dlls = std::to_array<std::wstring_view>({
     L"amd_fidelityfx_dx12.dll",
     L"amd_fidelityfx_upscaler_dx12.dll",
     L"renderdoc.dll",
+    // [FIX:OFXR-STARTUP-WHITELIST V1512 1/2] Root-owned XRFG-V041 layer.
+    L"XR_APILAYER_XRFrameBridge_diagnostic.dll",
 });
 
 bool SameFilename(std::wstring_view left, std::wstring_view right) {

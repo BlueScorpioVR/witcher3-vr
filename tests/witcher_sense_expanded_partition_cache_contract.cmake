@@ -5,7 +5,7 @@ endif()
 file(READ "${DXGI_PROXY_SOURCE}" source)
 
 set(required_fragments
-    "build=V1509 base=V1508_aer_full_vr_scene_only_admission"
+    "build=V1511 base=V1509_witcher_sense_aligned_extent"
     "constexpr size_t kWitcherSenseDescriptorSetCount = 1u << 14;"
     "constexpr size_t kWitcherSenseDescriptorWays = 6;"
     "constexpr size_t kWitcherSenseHistoryWays = 2;"
@@ -56,4 +56,3 @@ foreach(retired_fragment
 endforeach()
 
 message(STATUS "V1501 Witcher Senses expanded partition cache verified")
-

@@ -5,7 +5,7 @@ endif()
 file(READ "${DXGI_PROXY_SOURCE}" source)
 
 foreach(required_fragment IN ITEMS
-        "build=V1509 base=V1508_aer_full_vr_scene_only_admission"
+        "build=V1511 base=V1509_witcher_sense_aligned_extent"
         "[FIX:STRICT-STEREO-HUD-FOUR-PRESENT-WINDOW V1493 1/5]"
         "[FIX:STRICT-STEREO-HUD-FOUR-PRESENT-WINDOW V1493 2/5]"
         "[FIX:STRICT-STEREO-HUD-FOUR-PRESENT-WINDOW V1493 3/5]"
@@ -15,7 +15,7 @@ foreach(required_fragment IN ITEMS
         "distance <= kMode3StrictHudJoinMaxPresentDistance"
         "strict_stereo_hud_join_max_present_distance=4"
         "aer_window=unchanged_2"
-        "dump_last_seconds(\"V1509\", 15)")
+        "dump_last_seconds(\"V1511\", 15)")
     string(FIND "${source}" "${required_fragment}" fragment_position)
     if(fragment_position EQUAL -1)
         message(FATAL_ERROR
@@ -24,4 +24,3 @@ foreach(required_fragment IN ITEMS
 endforeach()
 
 message(STATUS "V1493 strict-Stereo HUD four-Present window contract verified")
-

@@ -10,7 +10,7 @@ file(READ "${DXGI_PROXY_SOURCE}" dxgi_proxy)
 file(READ "${OPTISCALER_BRIDGE_INI}" bridge_ini)
 
 foreach(required_fragment IN ITEMS
-        "build=V1509 base=V1508_aer_full_vr_scene_only_admission"
+        "build=V1511 base=V1509_witcher_sense_aligned_extent"
         "bool optiscaler_enabled{false};"
         "\"optiscaler_bridge.ini\", \"optiscaler\", \"enabled\", false"
         "bool native_dlss_public_streamline_owner_active()"

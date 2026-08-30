@@ -5,7 +5,7 @@ endif()
 file(READ "${DXGI_PROXY_SOURCE}" source)
 
 foreach(required_fragment IN ITEMS
-        "build=V1509 base=V1508_aer_full_vr_scene_only_admission"
+        "build=V1511 base=V1509_witcher_sense_aligned_extent"
         "[FIX:AER-FULL-VR-RETAINED-HUD V1508 1/6]"
         "[FIX:AER-FULL-VR-RETAINED-HUD V1508 2/6]"
         "[FIX:AER-FULL-VR-RETAINED-HUD V1508 3/6]"
@@ -23,7 +23,7 @@ foreach(required_fragment IN ITEMS
         "if (mode3_aer_submitted_hud_join_active() &&"
         "aer_full_vr_exact_command_list"
         "V1508 aer_full_vr_hud=stereo_retained_single_owner"
-        "dump_last_seconds(\"V1509\", 15)")
+        "dump_last_seconds(\"V1511\", 15)")
     string(FIND "${source}" "${required_fragment}" fragment_position)
     if(fragment_position EQUAL -1)
         message(FATAL_ERROR
@@ -47,4 +47,3 @@ foreach(forbidden_fragment IN ITEMS
 endforeach()
 
 message(STATUS "V1508 AER Full-VR retained-HUD contract verified")
-

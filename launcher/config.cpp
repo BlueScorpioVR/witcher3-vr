@@ -27,7 +27,7 @@ constexpr std::array<ModeSettings, 8> kModes{{
     {3, true, false, "dlss", 6, true},
 }};
 
-constexpr int kCurrentConfigVersion = 16;
+constexpr int kCurrentConfigVersion = 17;
 constexpr float kCinemaHudReferenceScale = 1.30f;
 constexpr int kCinemaHudReferenceShift = -72;
 constexpr float kFullVrHudReferenceScale = 1.00f;
@@ -483,6 +483,14 @@ void MigrateConfigurationToV16(IniDocument& ini) {
     // policy once: route recording on, performance recording off.
     ini.Set("debug", "route_flight_recorder", "1");
     ini.Set("debug", "pipeline_flight_recorder", "0");
+    RemoveObsoleteSettings(ini);
+    ini.Set("meta", "config_version", "16");
+}
+
+void MigrateConfigurationToV17(IniDocument& ini) {
+    // V17 exposes V1516's renderer-owned range without changing established
+    // visuals for existing or new installations. FillMissingFrom supplies the
+    // 1.000 default; an already authored test/tuning value remains untouched.
     RemoveObsoleteSettings(ini);
     ini.Set("meta", "config_version", std::to_string(kCurrentConfigVersion));
 }
@@ -1244,6 +1252,9 @@ bool EnsureVrConfiguration(const ConfigPaths& paths,
         if (existing_version < 16) {
             MigrateConfigurationToV16(migrated);
         }
+        if (existing_version < 17) {
+            MigrateConfigurationToV17(migrated);
+        }
         // This is deliberately independent from version migration: extending
         // the default template must heal a partial current-version INI on the
         // very next launcher start, without overwriting manual tuning.
@@ -1451,6 +1462,8 @@ LoadResult LoadConfiguration(const ConfigPaths& paths) {
         ReadInt(*vr, "openxr", "hud_stereo_shift_px", -36) + 16, -64, 64);
     result.state.presentation_scale = std::clamp(
         ReadFloat(*vr, "openxr", "presentation_scale", 1.0f), 0.5f, 1.0f);
+    result.state.world_detail_range = std::clamp(
+        ReadFloat(*vr, "openxr", "world_detail_range", 1.0f), 0.4f, 1.0f);
     result.state.menu_scale = std::clamp(
         ReadFloat(*vr, "openxr", "menu_scale", 0.85f), 0.3f, 1.5f);
     result.state.cinema_scale = std::clamp(
@@ -1565,6 +1578,8 @@ bool BuildUpdatedDocuments(const ConfigPaths& paths, const LauncherState& state,
         std::to_string(std::clamp(state.hud_convergence_delta - 16, -256, 256)));
     vr_ini.Set("openxr", "presentation_scale", FloatString(
         state.presentation_scale));
+    vr_ini.Set("openxr", "world_detail_range", FloatString(
+        std::clamp(state.world_detail_range, 0.4f, 1.0f)));
     vr_ini.Set("openxr", "menu_scale", FloatString(state.menu_scale));
     vr_ini.Set("openxr", "cinema_scale", FloatString(state.cinema_scale));
     vr_ini.Set("openxr", "cinema_hud_scale",

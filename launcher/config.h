@@ -68,6 +68,7 @@ struct LauncherState {
         FrameGenerationBackend::Off};
     int hud_convergence_delta{-20};
     float presentation_scale{1.0f};
+    float world_detail_range{1.0f};
     float menu_scale{0.85f};
     float cinema_scale{0.9f};
     CinemaAspect cinema_aspect{CinemaAspect::FiveFour};

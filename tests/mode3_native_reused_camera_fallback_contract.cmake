@@ -5,7 +5,7 @@ endif()
 file(READ "${DXGI_PROXY_SOURCE}" source)
 
 foreach(required_fragment IN ITEMS
-        "build=V1509 base=V1508_aer_full_vr_scene_only_admission"
+        "build=V1511 base=V1509_witcher_sense_aligned_extent"
         "[FIX:AER-CINEMA-NATIVE-ASYM-PAIR-AUTHORITY V1507 1/6]"
         "[FIX:AER-CINEMA-NATIVE-ASYM-PAIR-AUTHORITY V1507 2/6]"
         "[FIX:AER-CINEMA-NATIVE-ASYM-PAIR-AUTHORITY V1507 3/6]"
@@ -26,7 +26,7 @@ foreach(required_fragment IN ITEMS
         "mode3_source_projection_ready &&"
         "g_sequential_cinema_pair_native_asymmetric;"
         "V1507 aer_full_vr_projection=stereo_native_asym_contract"
-        "dump_last_seconds(\"V1509\", 15)")
+        "dump_last_seconds(\"V1511\", 15)")
     string(FIND "${source}" "${required_fragment}" fragment_position)
     if(fragment_position EQUAL -1)
         message(FATAL_ERROR
@@ -70,4 +70,3 @@ if(NOT aer_effect_exclusion EQUAL -1)
 endif()
 
 message(STATUS "V1507 Mode3 native reused-camera and AER Cinema pair authority contract verified")
-

@@ -5,14 +5,14 @@ endif()
 file(READ "${DXGI_PROXY_SOURCE}" source)
 
 foreach(required_fragment IN ITEMS
-        "build=V1509 base=V1508_aer_full_vr_scene_only_admission"
+        "build=V1511 base=V1509_witcher_sense_aligned_extent"
         "[FIX:STRICT-STEREO-GAMEPLAY-HUD-EYE-AUTHORITY V1496 1/3]"
         "[FIX:STRICT-STEREO-GAMEPLAY-HUD-EYE-AUTHORITY V1496 2/3]"
         "[FIX:STRICT-STEREO-GAMEPLAY-HUD-EYE-AUTHORITY V1496 3/3]"
         "record_mode3_strict_hud_command_list_eye(\n                command_list, hud_eye);"
         "strict_stereo_gameplay_hud_eye=exact_pso_selected"
         "diagnostic_logging_required=0"
-        "dump_last_seconds(\"V1509\", 15)")
+        "dump_last_seconds(\"V1511\", 15)")
     string(FIND "${source}" "${required_fragment}" fragment_position)
     if(fragment_position EQUAL -1)
         message(FATAL_ERROR
@@ -29,4 +29,3 @@ if(NOT retired_scope_position EQUAL -1)
 endif()
 
 message(STATUS "V1496 strict-Stereo gameplay eye-authority contract verified")
-

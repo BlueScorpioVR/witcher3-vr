@@ -5,7 +5,7 @@ endif()
 file(READ "${DXGI_PROXY_SOURCE}" source)
 
 foreach(required_fragment IN ITEMS
-        "build=V1509 base=V1508_aer_full_vr_scene_only_admission"
+        "build=V1511 base=V1509_witcher_sense_aligned_extent"
         "[FIX:TAAU-RECENT-EXACT-SUBMISSION-AUTHORITY V1503 1/4]"
         "[FIX:TAAU-RECENT-EXACT-SUBMISSION-AUTHORITY V1503 2/4]"
         "[FIX:TAAU-RECENT-EXACT-SUBMISSION-AUTHORITY V1503 3/4]"
@@ -14,7 +14,7 @@ foreach(required_fragment IN ITEMS
         "recent_exact_submission_matches("
         "strict_stereo_only=1"
         "manual_cinema_recenter=pre_V1497_detector_owner"
-        "dump_last_seconds(\"V1509\", 15)")
+        "dump_last_seconds(\"V1511\", 15)")
     string(FIND "${source}" "${required_fragment}" fragment_position)
     if(fragment_position EQUAL -1)
         message(FATAL_ERROR
@@ -41,4 +41,3 @@ if(detector_arm_position EQUAL -1)
 endif()
 
 message(STATUS "V1503 recent exact-submission authority contract verified")
-

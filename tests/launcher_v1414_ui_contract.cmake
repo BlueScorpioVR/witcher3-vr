@@ -54,7 +54,7 @@ foreach(required IN ITEMS
         "Witcher 3 VR Launcher v0.9.6"
         "ShowStartupWarnings();"
         "constexpr int kClientWidth = 1180;"
-        "constexpr int kClientHeight = 706;"
+    "constexpr int kClientHeight = 746;"
         "600, 18, 560, 178"
         "600, 462, 560, 120"
         "https://ko-fi.com/tig3rmast3r")
@@ -119,7 +119,7 @@ foreach(required IN ITEMS
 endforeach()
 
 foreach(required IN ITEMS
-        "config_version=16"
+    "config_version=17"
         "[renderdoc]"
         "streamline_device_bridge=0"
         "route_flight_recorder=0"

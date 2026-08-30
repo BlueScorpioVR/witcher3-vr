@@ -5,7 +5,7 @@ endif()
 file(READ "${DXGI_PROXY_SOURCE}" source)
 
 set(required_fragments
-    "build=V1509 base=V1508_aer_full_vr_scene_only_admission"
+    "build=V1511 base=V1509_witcher_sense_aligned_extent"
     "bool witcher_sense_history_suppression_route_active()"
     "native_asymmetric_transparent_center_route_active()"
     "constexpr UINT kWitcherSenseHistorySrvRoot = 1;"
@@ -79,4 +79,3 @@ foreach(retired_fragment
 endforeach()
 
 message(STATUS "V1499 bounded Witcher Senses history contract verified")
-
