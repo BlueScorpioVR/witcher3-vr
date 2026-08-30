@@ -1430,11 +1430,20 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         ICC_BAR_CLASSES | ICC_STANDARD_CLASSES | ICC_LINK_CLASS};
     InitCommonControlsEx(&controls);
     g_app.paths = w3vr::DiscoverPaths();
+    // [FIX:OFXR-ROOT-LAYOUT V1510 3/3] Remove the obsolete independent tray
+    // and subfolder package before loading or saving the root-owned settings.
+    std::wstring ofxr_cleanup_error;
+    if (!w3vr::RemoveRetiredOfxrPayload(
+            g_app.paths.launcher_directory, ofxr_cleanup_error)) {
+        MessageBoxW(nullptr, ofxr_cleanup_error.c_str(),
+            L"Witcher 3 VR Launcher", MB_OK | MB_ICONERROR);
+        return 3;
+    }
     const auto default_ini = LoadTextResource(IDR_VR_INI);
     if (!default_ini) {
         MessageBoxW(nullptr, L"The embedded witcher3vr.ini template is missing.",
             L"Witcher 3 VR Launcher", MB_OK | MB_ICONERROR);
-        return 3;
+        return 4;
     }
     bool created_ini{};
     std::wstring configuration_error;
@@ -1442,7 +1451,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
             g_app.paths, *default_ini, created_ini, configuration_error)) {
         MessageBoxW(nullptr, configuration_error.c_str(),
             L"Witcher 3 VR Launcher", MB_OK | MB_ICONERROR);
-        return 4;
+        return 5;
     }
 
     EnsureHudEditorReady(nullptr);

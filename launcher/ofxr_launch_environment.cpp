@@ -28,6 +28,34 @@ bool ManagedEntry(std::wstring_view entry) {
 
 } // namespace
 
+bool RemoveRetiredOfxrPayload(
+    const std::filesystem::path& launcher_directory,
+    std::wstring& error) {
+    // [FIX:OFXR-ROOT-LAYOUT V1510 2/3] The launcher is the only injector.
+    // Physically remove the retired tray executable and subfolder package so
+    // they cannot register or load a second copy of the API layer.
+    const auto legacy_directory = launcher_directory / L"ofxr";
+    const auto legacy_tray = launcher_directory / L"OFXRBridgeTray.exe";
+    std::error_code cleanup_error;
+    std::filesystem::remove_all(legacy_directory, cleanup_error);
+    if (cleanup_error) {
+        error = L"Could not remove the retired OFXR folder:\n" +
+            legacy_directory.wstring() + L"\n\nWindows error " +
+            std::to_wstring(cleanup_error.value()) + L". Close OFXR Bridge "
+            L"and try again.";
+        return false;
+    }
+    std::filesystem::remove(legacy_tray, cleanup_error);
+    if (cleanup_error) {
+        error = L"Could not remove the retired OFXR Bridge executable:\n" +
+            legacy_tray.wstring() + L"\n\nWindows error " +
+            std::to_wstring(cleanup_error.value()) + L". Close OFXR Bridge "
+            L"and try again.";
+        return false;
+    }
+    return true;
+}
+
 bool BuildEnabledOfxrLaunchEnvironment(
     const std::filesystem::path& launcher_directory,
     FrameGenerationBackend backend,
@@ -42,10 +70,14 @@ bool BuildEnabledOfxrLaunchEnvironment(
         return false;
     }
 
-    const auto layer_directory = launcher_directory / L"ofxr";
-    constexpr std::array<const wchar_t*, 2> required_files{
+    // [FIX:OFXR-ROOT-LAYOUT V1510 1/3] XRFG-V040 resolves its configuration
+    // beside the loaded API-layer DLL. Keep the manifest, DLL and INI beside
+    // the launcher so one root of the game owns both configuration and launch.
+    const auto layer_directory = launcher_directory;
+    constexpr std::array<const wchar_t*, 3> required_files{
         L"XR_APILAYER_XRFrameBridge_diagnostic.dll",
         L"XR_APILAYER_XRFrameBridge_diagnostic.json",
+        L"ofxr_bridge.ini",
     };
     for (const wchar_t* file : required_files) {
         const auto path = layer_directory / file;
@@ -54,7 +86,7 @@ bool BuildEnabledOfxrLaunchEnvironment(
             (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
             error = L"OFXR Bridge is selected, but this file is missing:\n" +
                 path.wstring() +
-                L"\n\nInstall the V012 bridge package in the ofxr folder, "
+                L"\n\nInstall the XRFG-V040 bridge files beside the launcher, "
                 L"or select Off.";
             return false;
         }
@@ -79,9 +111,9 @@ bool BuildEnabledOfxrLaunchEnvironment(
     entries.push_back(L"XR_API_LAYER_PATH=" + layer_directory.wstring());
     entries.emplace_back(
         L"XR_ENABLE_API_LAYERS=XR_APILAYER_XRFrameBridge_diagnostic");
-    entries.emplace_back(backend == FrameGenerationBackend::Nvidia
-        ? L"XRFG_FLOW_BACKEND=nvidia"
-        : L"XRFG_FLOW_BACKEND=fidelityfx");
+    // XRFG-V040 reads [ofxr] backend from the root ofxr_bridge.ini. The
+    // obsolete XRFG_FLOW_BACKEND variable is deliberately scrubbed from the
+    // inherited environment by ManagedEntry and is never recreated here.
     std::sort(entries.begin(), entries.end(),
         [](const std::wstring& left, const std::wstring& right) {
             return _wcsicmp(left.c_str(), right.c_str()) < 0;
@@ -101,4 +133,3 @@ bool BuildEnabledOfxrLaunchEnvironment(
 }
 
 } // namespace w3vr
-

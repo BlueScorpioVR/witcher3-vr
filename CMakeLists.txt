@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(witcher3vr VERSION 0.1509.0 LANGUAGES C CXX)
+project(witcher3vr VERSION 0.1510.0 LANGUAGES C CXX)
 
 include(CTest)
 
@@ -590,6 +590,17 @@ if(BUILD_TESTING)
             "-DOFXR_ENV_HEADER=${CMAKE_CURRENT_SOURCE_DIR}/launcher/ofxr_launch_environment.h"
             "-DLAUNCHER_CMAKE=${CMAKE_CURRENT_SOURCE_DIR}/launcher/CMakeLists.txt"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/launcher_v1498_ofxr_off_old_launch_contract.cmake"
+    )
+
+    add_test(
+        NAME launcher_v1510_ofxr_root_layout_contract
+        COMMAND "${CMAKE_COMMAND}"
+            "-DLAUNCHER_CONFIG_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/launcher/config.cpp"
+            "-DLAUNCHER_MAIN_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/launcher/main.cpp"
+            "-DOFXR_ENV_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/launcher/ofxr_launch_environment.cpp"
+            "-DOFXR_ENV_HEADER=${CMAKE_CURRENT_SOURCE_DIR}/launcher/ofxr_launch_environment.h"
+            "-DLAUNCHER_TEST_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/launcher/tests.cpp"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/launcher_v1510_ofxr_root_layout_contract.cmake"
     )
 
 endif()

@@ -8,6 +8,10 @@
 
 namespace w3vr {
 
+bool RemoveRetiredOfxrPayload(
+    const std::filesystem::path& launcher_directory,
+    std::wstring& error);
+
 bool BuildEnabledOfxrLaunchEnvironment(
     const std::filesystem::path& launcher_directory,
     FrameGenerationBackend backend,
@@ -15,4 +19,3 @@ bool BuildEnabledOfxrLaunchEnvironment(
     std::wstring& error);
 
 } // namespace w3vr
-

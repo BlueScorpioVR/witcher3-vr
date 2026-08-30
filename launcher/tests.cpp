@@ -1569,19 +1569,42 @@ void TestOfxrLaunchEnvironment(const fs::path& root) {
     std::vector<wchar_t> block;
     std::wstring error;
 
+    Write(launcher / "ofxr" / "nested" / "retired.dll", "retired");
+    Write(launcher / "OFXRBridgeTray.exe", "retired");
+    Write(launcher / "XR_APILAYER_XRFrameBridge_diagnostic.dll", "root-dll");
+    Write(launcher / "XR_APILAYER_XRFrameBridge_diagnostic.json", "root-json");
+    Write(launcher / "ofxr_bridge.ini", "[ofxr]\nbackend=off\n");
+    Require(w3vr::RemoveRetiredOfxrPayload(launcher, error),
+        "retired OFXR payload cleanup failed");
+    Require(!fs::exists(launcher / "ofxr") &&
+            !fs::exists(launcher / "OFXRBridgeTray.exe"),
+        "retired OFXR folder or tray executable survived cleanup");
+    Require(fs::exists(launcher / "XR_APILAYER_XRFrameBridge_diagnostic.dll") &&
+            fs::exists(launcher / "XR_APILAYER_XRFrameBridge_diagnostic.json") &&
+            fs::exists(launcher / "ofxr_bridge.ini"),
+        "retired OFXR cleanup removed a root-owned payload file");
+
     Require(!w3vr::BuildEnabledOfxrLaunchEnvironment(
             launcher, w3vr::FrameGenerationBackend::Off, block, error) &&
             block.empty() && !error.empty(),
         "OFXR environment builder must reject Off; legacy launch owns it");
 
+    fs::remove(launcher / "XR_APILAYER_XRFrameBridge_diagnostic.dll");
+    fs::remove(launcher / "XR_APILAYER_XRFrameBridge_diagnostic.json");
     Require(!w3vr::BuildEnabledOfxrLaunchEnvironment(
             launcher, w3vr::FrameGenerationBackend::Nvidia, block, error) &&
             error.find(L"missing") != std::wstring::npos,
         "OFXR selected backend must reject a missing bridge package");
 
-    const fs::path package = launcher / "ofxr";
-    Write(package / "XR_APILAYER_XRFrameBridge_diagnostic.dll", "fixture");
-    Write(package / "XR_APILAYER_XRFrameBridge_diagnostic.json", "fixture");
+    Write(launcher / "XR_APILAYER_XRFrameBridge_diagnostic.dll", "fixture");
+    Write(launcher / "XR_APILAYER_XRFrameBridge_diagnostic.json", "fixture");
+    fs::remove(launcher / "ofxr_bridge.ini");
+    Require(!w3vr::BuildEnabledOfxrLaunchEnvironment(
+            launcher, w3vr::FrameGenerationBackend::Nvidia, block, error) &&
+            error.find(L"ofxr_bridge.ini") != std::wstring::npos,
+        "OFXR root layout must reject a missing root INI");
+    Write(launcher / "ofxr_bridge.ini",
+        "[ofxr]\nbackend=nvidia\n[diagnostics]\nlogging_enabled=1\n");
     Require(SetEnvironmentVariableW(
             L"XRFG_FLOW_BACKEND", L"parent-sentinel") != FALSE,
         "test could not seed the parent OFXR backend variable");
@@ -1594,15 +1617,14 @@ void TestOfxrLaunchEnvironment(const fs::path& root) {
         "OFXR child environment must be double-NUL terminated");
     auto entries = ParseEnvironmentBlock(block);
     Require(HasEnvironmentEntry(entries,
-            L"XR_API_LAYER_PATH=" + package.wstring()) &&
+            L"XR_API_LAYER_PATH=" + launcher.wstring()) &&
             HasEnvironmentEntry(entries,
-                L"XR_ENABLE_API_LAYERS=XR_APILAYER_XRFrameBridge_diagnostic") &&
-            HasEnvironmentEntry(entries, L"XRFG_FLOW_BACKEND=nvidia"),
+                L"XR_ENABLE_API_LAYERS=XR_APILAYER_XRFrameBridge_diagnostic"),
         "NVIDIA OFXR child environment contains wrong values");
     Require(CountEnvironmentVariable(entries, L"XR_API_LAYER_PATH") == 1 &&
             CountEnvironmentVariable(entries, L"XR_ENABLE_API_LAYERS") == 1 &&
-            CountEnvironmentVariable(entries, L"XRFG_FLOW_BACKEND") == 1,
-        "OFXR managed child variables must occur exactly once");
+            CountEnvironmentVariable(entries, L"XRFG_FLOW_BACKEND") == 0,
+        "OFXR child environment must use the root INI without a backend override");
     wchar_t parent_backend[32]{};
     Require(GetEnvironmentVariableW(
             L"XRFG_FLOW_BACKEND", parent_backend,
@@ -1614,9 +1636,10 @@ void TestOfxrLaunchEnvironment(const fs::path& root) {
             launcher, w3vr::FrameGenerationBackend::FidelityFx, block, error),
         "FidelityFX OFXR child environment build failed");
     entries = ParseEnvironmentBlock(block);
-    Require(HasEnvironmentEntry(entries, L"XRFG_FLOW_BACKEND=fidelityfx") &&
-            !HasEnvironmentEntry(entries, L"XRFG_FLOW_BACKEND=nvidia"),
-        "FidelityFX OFXR child environment contains wrong backend");
+    Require(HasEnvironmentEntry(entries,
+            L"XR_API_LAYER_PATH=" + launcher.wstring()) &&
+            CountEnvironmentVariable(entries, L"XRFG_FLOW_BACKEND") == 0,
+        "FidelityFX OFXR launch must also defer backend selection to the root INI");
     SetEnvironmentVariableW(L"XRFG_FLOW_BACKEND", nullptr);
 }
 
