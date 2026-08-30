@@ -13,15 +13,23 @@ void require(bool condition, const char* message) {
 }
 
 int main() {
+    require(policy::native_temporal_proof_sufficient(false, 0x0u, 0x3u),
+        "No AA must not wait for a nonexistent temporal transaction");
+    require(!policy::native_temporal_proof_sufficient(true, 0x0u, 0x3u),
+        "a temporal backend must fail closed without either eye proof");
+    require(!policy::native_temporal_proof_sufficient(true, 0x1u, 0x3u),
+        "a temporal backend must reject a half-proven pair");
+    require(policy::native_temporal_proof_sufficient(true, 0x3u, 0x3u),
+        "a temporal backend must accept the complete temporal pair");
+    require(policy::native_temporal_proof_sufficient(true, 0x2u, 0x2u),
+        "per-eye admission must accept the exact temporal eye bit");
+
     require(!policy::reused_camera_fallback_uses_native_asymmetric_projection(
-            {false, false}),
+            {false}),
         "an unconfigured asymmetric route needs no fallback override");
     require(policy::reused_camera_fallback_uses_native_asymmetric_projection(
-            {true, false}),
-        "strict Stereo must complete a reused camera as native asymmetric");
-    require(!policy::reused_camera_fallback_uses_native_asymmetric_projection(
-            {true, true}),
-        "AER must retain its independent centered sequential fallback");
+            {true}),
+        "every Mode3 cadence must complete a reused camera as native asymmetric");
 
     policy::ReusedCameraEpisodeState episode{};
     require(!policy::admit_native_reused_camera_pair(
@@ -63,22 +71,43 @@ int main() {
         "a symmetric route keeps its established internal fallback proof");
 
     require(!policy::cinema_presentation_uses_native_asymmetric(
-            {false, true}),
-        "a sequential AER Cinema pair must retain symmetric presentation");
+            {false, true, false}),
+        "a symmetric sequential AER pair must remain symmetric");
     require(policy::cinema_presentation_uses_native_asymmetric(
-            {true, false}),
+            {false, true, true}),
+        "a native sequential AER pair must retain off-axis presentation");
+    require(policy::cinema_presentation_uses_native_asymmetric(
+            {true, false, false}),
         "the strict packed native pair must retain off-axis presentation");
+
+    require(policy::cinema_pair_admissible(
+            {false, false, false, 0x0u, 0x0u, 0x0u, false, false}),
+        "a symmetric bootstrap pair does not require a native ledger");
+    require(policy::cinema_pair_admissible(
+            {true, true, true, 0x3u, 0x0u, 0x0u, false, false}),
+        "No AA accepts a complete factory-proven native pair");
+    require(!policy::cinema_pair_admissible(
+            {true, true, false, 0x3u, 0x0u, 0x0u, false, false}),
+        "a native pair without both frozen views must fail closed");
+    require(!policy::cinema_pair_admissible(
+            {true, true, true, 0x3u, 0x1u, 0x0u, true, false}),
+        "TAAU requires complete temporal proof");
+    require(policy::cinema_pair_admissible(
+            {true, true, true, 0x3u, 0x3u, 0x0u, true, false}),
+        "TAAU accepts the complete temporal pair");
+    require(!policy::cinema_pair_admissible(
+            {true, true, true, 0x3u, 0x3u, 0x1u, true, true}),
+        "DLSS rejects an incomplete input pair");
+    require(policy::cinema_pair_admissible(
+            {true, true, true, 0x3u, 0x3u, 0x3u, true, true}),
+        "DLSS accepts the complete input pair");
 
     require(!policy::preflight_ready({false, false, false, true, false}),
         "invalid transport must fail closed");
     require(policy::preflight_ready({true, false, false, true, false}),
         "gameplay keeps the established preflight route");
-    require(policy::preflight_ready({true, false, false, true, false, true}),
-        "AER gameplay may bootstrap native asymmetric transport");
     require(policy::preflight_ready({true, true, true, true, false}),
-        "strict Stereo Full VR may bootstrap asymmetric transport");
-    require(!policy::preflight_ready({true, true, true, true, false, true}),
-        "AER Full VR must retain V1242 symmetric Cinema preflight");
+        "Stereo and AER Full VR share asymmetric transport preflight");
     require(!policy::preflight_ready({true, true, false, true, false}),
         "Cinema without active Full VR camera must remain excluded");
     require(!policy::preflight_ready({true, true, true, false, false}),

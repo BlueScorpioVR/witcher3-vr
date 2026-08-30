@@ -301,6 +301,17 @@ constexpr bool late_hud_composite_source_ready(
         scene_only_pair_ready;
 }
 
+// Automatic AER Full VR owns a sequential Cinema pair. Its baked HUD may be
+// removed only after both that exact source family and the retained eye-local
+// HUD have complete pairs. Other routes keep their established admission.
+constexpr bool aer_full_vr_scene_only_admission_ready(
+    bool aer_full_vr_route,
+    bool sequential_cinema_pair_ready,
+    bool retained_hud_pair_ready) noexcept {
+    return !aer_full_vr_route ||
+        (sequential_cinema_pair_ready && retained_hud_pair_ready);
+}
+
 // Strict Stereo gameplay already owns a native eye-local HUD draw. Its
 // retained scene-only replacement is useful only after automatic/manual Cinema
 // lifecycle begins; AER has an independent post-AFW route and does not consume
@@ -357,21 +368,21 @@ constexpr bool strict_stereo_retained_hud_pair_fresh(
         accepted_pair >= target_pair;
 }
 
-// The submitted-order fallback repairs a D3D12 command-list topology, not an
-// AFW or DLSS algorithm. AER enters it only when its validated AFW retained-HUD
-// route is configured. Strict Stereo can use the same queue/generation/window
-// contract for either temporal backend; No AA keeps its existing pointer-exact
-// path until an affected scheduler proves that broader route necessary.
+// The submitted-order fallback repairs D3D12 command-list topology, not an AFW
+// or DLSS algorithm. AER enters it whenever a retained-HUD transport is
+// configured, including its exact sequential Full-VR pair. Strict Stereo uses
+// the same queue/generation/window contract for either temporal backend; its
+// No-AA pointer-exact path remains unchanged.
 constexpr bool submitted_hud_join_route_active(
     bool mode3_transport,
     bool aer_presentation,
-    bool aer_afw_common_transport,
+    bool aer_retained_hud_transport,
     TemporalAdapter backend) noexcept {
     if (!mode3_transport) {
         return false;
     }
     if (aer_presentation) {
-        return aer_afw_common_transport;
+        return aer_retained_hud_transport;
     }
     return backend == TemporalAdapter::Dlss ||
         backend == TemporalAdapter::Taau;

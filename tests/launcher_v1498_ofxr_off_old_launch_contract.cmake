@@ -82,3 +82,4 @@ foreach(retired_fragment IN ITEMS
 endforeach()
 
 message(STATUS "V1498 physical OFXR-Off old-launch contract verified")
+

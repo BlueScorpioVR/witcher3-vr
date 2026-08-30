@@ -5,7 +5,7 @@ endif()
 file(READ "${DXGI_PROXY_SOURCE}" source)
 
 foreach(required_fragment IN ITEMS
-        "build=V1501 base=V1499_witcher_sense_expanded_partition_cache"
+        "build=V1509 base=V1508_aer_full_vr_scene_only_admission"
         "[FIX:FULL-VR-TRANSPARENT-FIX-ADMISSION V1484 1/3]"
         "[FIX:FULL-VR-TRANSPARENT-FIX-ADMISSION V1484 2/3]"
         "[FIX:FULL-VR-TRANSPARENT-FIX-ADMISSION V1484 3/3]"
@@ -15,7 +15,7 @@ foreach(required_fragment IN ITEMS
         "V1484 full_vr_transparent_fix=exact_native_asymmetric_source_only"
         "centered_fallback=excluded cinema_panel=excluded"
         "tiled_light=unchanged base=V1483"
-        "dump_last_seconds(\"V1501\", 15)")
+        "dump_last_seconds(\"V1509\", 15)")
     string(FIND "${source}" "${required_fragment}" fragment_position)
     if(fragment_position EQUAL -1)
         message(FATAL_ERROR
@@ -24,3 +24,4 @@ foreach(required_fragment IN ITEMS
 endforeach()
 
 message(STATUS "V1484 Full-VR transparent-fix admission contract verified")
+

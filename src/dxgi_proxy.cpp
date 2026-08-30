@@ -38,15 +38,39 @@
 #include "smoke_eye_authority_policy.h"
 #include "taau_submission_policy.h"
 
+// V1509 starts physically from V1508. Runtime diagnostics proved that exact
+// AER HUD tag/capture publication succeeded but every pre-Execute snapshot had
+// draw=0: the old AFW-gameplay scene-pair gate prevented the scene-only HUD PSO
+// inside automatic AER Full VR. That route now admits removal only from its own
+// complete sequential-Cinema pair plus its complete retained-HUD pair.
+// [FIX:AER-FULL-VR-SCENE-ONLY-ADMISSION V1509 1/3]
+// V1508 starts physically from runtime-validated V1507 scene geometry. AER
+// automatic Full VR now uses Stereo's retained-HUD ownership: capture exact
+// eye-local t1, remove the baked HUD only after a complete scene-only pair,
+// then composite that exact pair into the already-ASym OpenXR submission.
+// Gameplay, panels, camera, scene pixels and projection authority are unchanged.
+// [FIX:AER-FULL-VR-RETAINED-HUD V1508 1/6]
+// V1507 starts physically from validated V1506. AER automatic Full VR now
+// carries the same native-ASym producer contract as Stereo through its exact
+// alternating-eye pair: reused-camera admission, factory/backend proof, frozen
+// per-eye FOV, transparent-effect lifetime and final OpenXR projection class.
+// Only AER's sequential presentation cadence remains distinct.
+// [FIX:AER-CINEMA-NATIVE-ASYM-PAIR-AUTHORITY V1507 1/6]
+// V1506 starts physically from V1503. Native reused-camera No-AA frames already
+// carry a complete off-axis factory pair, but V1136 waits for temporal proof
+// that only TAAU/DLSS can produce. No AA now accepts the same native camera,
+// pair cache and final presentation using exact factory proof alone; temporal
+// modes retain their complete temporal and DLSS-input gates.
+// [FIX:NOAA-FACTORY-PROVEN-ASYM-FALLBACK V1506 1/3]
+// V1503 starts physically from V1501's validated Witcher Senses cache, removes
+// the rejected V1497 manual-Cinema recenter ownership change, and retains two
+// exact forward submitted TAAU identities per eye. A captured pair may use the
+// immediately preceding identity only when the newest identity is exactly one
+// pair newer; both identities still come from ExecuteCommandLists.
+// [FIX:TAAU-RECENT-EXACT-SUBMISSION-AUTHORITY V1503 1/4]
 // V1501 keeps V1499's recovered release performance, expands the recyclable
 // cache to 16,384 sets and gives every set two History plus four signature
 // ways. Cached compositor draws search only the protected History partition.
-// V1497 removes the duplicate packed-lock recenter transaction on manual F10
-// Cinema entry. The F10 edge already arms the recenter immediately; the
-// detector transition must arm it only for automatic Cinema entry. Re-arming
-// the manual transition after the first accepted pair caused a second recenter
-// and left Stereo TAAU's eyes in different submitted-pair epochs.
-// [FIX:MANUAL-CINEMA-SINGLE-RECENTER V1497 1/3]
 // V1496 closes the release-only gap exposed by V1495. V1495 enabled the
 // retained HUD in strict-Stereo gameplay, but V1494's submitted fallback still
 // recorded the PSO-selected eye only for automatic Full VR. Diagnostic logging
@@ -722,6 +746,8 @@ bool retained_hud_runtime_audit_active() {
 bool mode3_aer_afw_post_hud_gameplay_active();
 bool mode3_aer_afw_baked_hud_cinema_active();
 bool mode3_aer_cinema_sequential_present_source_active();
+bool mode3_aer_sequential_full_vr_retained_hud_active();
+extern std::atomic<bool> g_automatic_full_vr_camera_active;
 bool stereo_icon_policy_transport_active();
 bool mode3_aer_presentation_active();
 
@@ -773,6 +799,14 @@ bool mode3_stereo_transport_active() {
 bool mode3_aer_presentation_active() {
     return mode3_stereo_transport_active() &&
         g_config.mode3_aer_presentation;
+}
+
+bool mode3_aer_sequential_retained_hud_configured() {
+    const bool supported_backend =
+        g_config.temporal_backend == TemporalBackend::None ||
+        g_config.temporal_backend == TemporalBackend::Taau ||
+        g_config.temporal_backend == TemporalBackend::Dlss;
+    return mode3_aer_presentation_active() && supported_backend;
 }
 
 bool puredark_afw_mode3_aer_taau_route_configured() {
@@ -889,13 +923,15 @@ bool retained_hud_projection_route_active() {
     return (mode3_stereo_transport_active() &&
             !mode3_aer_final_present_source_active() &&
             !mode3_aer_afw_baked_hud_cinema_active()) ||
-        mode3_aer_afw_post_hud_gameplay_active();
+        mode3_aer_afw_post_hud_gameplay_active() ||
+        mode3_aer_sequential_full_vr_retained_hud_active();
 }
 
 bool retained_hud_projection_route_configured() {
     return (mode3_stereo_transport_active() &&
             !mode3_aer_final_present_source_active()) ||
-        puredark_afw_mode3_aer_common_transport_configured();
+        puredark_afw_mode3_aer_common_transport_configured() ||
+        mode3_aer_sequential_retained_hud_configured();
 }
 
 bool mode3_submitted_hud_join_route_configured() {
@@ -907,7 +943,8 @@ bool mode3_submitted_hud_join_route_configured() {
     return w3vr::mode3_transport::submitted_hud_join_route_active(
         mode3_stereo_transport_active(),
         mode3_aer_presentation_active(),
-        puredark_afw_mode3_aer_common_transport_configured(),
+        puredark_afw_mode3_aer_common_transport_configured() ||
+            mode3_aer_sequential_retained_hud_configured(),
         backend);
 }
 
@@ -915,6 +952,12 @@ bool mode3_strict_stereo_submitted_hud_join_active() {
     return mode3_submitted_hud_join_route_configured() &&
         !mode3_aer_presentation_active() &&
         retained_hud_projection_route_active();
+}
+
+bool mode3_aer_submitted_hud_join_active() {
+    return mode3_aer_presentation_active() &&
+        (mode3_aer_afw_post_hud_gameplay_active() ||
+            mode3_aer_sequential_full_vr_retained_hud_active());
 }
 
 bool mode3_taau_afw_final_source_active() {
@@ -1553,6 +1596,9 @@ XrView g_sequential_cinema_pending_views[2]{{XR_TYPE_VIEW}, {XR_TYPE_VIEW}};
 bool g_sequential_cinema_pending_view_valid[2]{};
 bool g_sequential_cinema_present_cache_initialized{};
 bool g_sequential_cinema_pair_valid{};
+// [FIX:AER-CINEMA-NATIVE-ASYM-PAIR-AUTHORITY V1507 6/6] Projection class is
+// invalidated atomically with the accepted sequential pair at every boundary.
+bool g_sequential_cinema_pair_native_asymmetric{};
 uint64_t g_sequential_cinema_accepted_pair_id{};
 uint32_t g_sequential_cinema_accepted_generation{};
 uint64_t g_sequential_cinema_entry_pair_floor{};
@@ -1564,6 +1610,7 @@ void reset_sequential_cinema_pair_authority(
     uint64_t pair_floor,
     bool resources_recreated) {
     g_sequential_cinema_pair_valid = false;
+    g_sequential_cinema_pair_native_asymmetric = false;
     g_sequential_cinema_accepted_pair_id = 0;
     g_sequential_cinema_accepted_generation = 0;
     g_sequential_cinema_entry_pair_floor = pair_floor;
@@ -2594,6 +2641,24 @@ bool mode3_aer_cinema_sequential_present_source_active() {
         g_engine_menu_state.load(std::memory_order_relaxed) == 0;
 }
 
+// [FIX:AER-FULL-VR-RETAINED-HUD V1508 2/6] Automatic Full VR presents an
+// immutable sequential pair in AER. Give that pair the same single HUD owner
+// as Stereo, independently from PureDark/AFW availability. Normal/manual
+// Cinema panels, menus and loading keep their established baked-HUD routes.
+bool mode3_aer_sequential_full_vr_retained_hud_active() {
+    const bool automatic_full_vr =
+        !g_force_mono_cinema.load(std::memory_order_relaxed) &&
+        g_config.cinema_full_vr &&
+        (g_cinema_mode_active.load(std::memory_order_relaxed) ||
+            g_automatic_full_vr_camera_active.load(
+                std::memory_order_acquire));
+    return mode3_aer_sequential_retained_hud_configured() &&
+        automatic_full_vr &&
+        !g_engine_loading_screen_video_active.load(
+            std::memory_order_acquire) &&
+        g_engine_menu_state.load(std::memory_order_relaxed) == 0;
+}
+
 // [FIX:AER-AFW-POST-HUD V1189 1/9] PureDark must see scene color only.
 // Activate the retained-HUD path for Mode-3 AER gameplay and automatic
 // Full-VR cutscenes, while preserving the already validated manual/normal
@@ -3112,25 +3177,25 @@ std::array<std::atomic<uint64_t>, 2> g_full_vr_frame_camera_last_pair{};
 std::atomic<uint64_t> g_full_vr_factory_camera_last_present{UINT64_MAX};
 std::atomic<uint64_t>
     g_full_vr_native_reused_camera_last_present{UINT64_MAX};
-std::mutex g_strict_stereo_reused_camera_episode_mutex{};
+std::mutex g_mode3_reused_camera_episode_mutex{};
 w3vr::native_asymmetric_transport_policy::ReusedCameraEpisodeState
-    g_strict_stereo_reused_camera_episode{};
+    g_mode3_reused_camera_episode{};
 
-void reset_strict_stereo_reused_camera_episode(uint32_t generation) {
-    std::scoped_lock lock{g_strict_stereo_reused_camera_episode_mutex};
+void reset_mode3_reused_camera_episode(uint32_t generation) {
+    std::scoped_lock lock{g_mode3_reused_camera_episode_mutex};
     w3vr::native_asymmetric_transport_policy::reset_reused_camera_episode(
-        g_strict_stereo_reused_camera_episode, generation);
+        g_mode3_reused_camera_episode, generation);
 }
 
-bool strict_stereo_native_reused_camera_pair_admitted(
+bool mode3_native_reused_camera_pair_admitted(
     uint32_t generation,
     uint64_t present,
     uint64_t pair_id,
     uint32_t eye) {
-    std::scoped_lock lock{g_strict_stereo_reused_camera_episode_mutex};
+    std::scoped_lock lock{g_mode3_reused_camera_episode_mutex};
     return w3vr::native_asymmetric_transport_policy::
         admit_native_reused_camera_pair(
-            g_strict_stereo_reused_camera_episode,
+            g_mode3_reused_camera_episode,
             generation, present, pair_id, eye);
 }
 
@@ -3434,8 +3499,10 @@ bool native_asymmetric_full_vr_effect_source_active() {
         ? present - last_native_reused_camera : UINT64_MAX;
     const bool native_factory_source =
         ordered_factory_lifetime && factory_age <= 2;
+    // [FIX:AER-CINEMA-NATIVE-ASYM-PAIR-AUTHORITY V1507 2/6] Reused-camera
+    // native pixels have the same effect-correction lifetime in Stereo and
+    // AER. Presentation cadence cannot revoke the producer's projection.
     const bool native_reused_source =
-        !mode3_aer_presentation_active() &&
         ordered_native_reused_lifetime && native_reused_age <= 2;
     const bool native_source = native_factory_source || native_reused_source;
 
@@ -5751,7 +5818,12 @@ struct TaauRecordedResolveIdentity {
 std::mutex g_taau_recorded_resolve_mutex{};
 std::unordered_map<ID3D12CommandList*, TaauRecordedResolveIdentity>
     g_taau_recorded_resolves{};
+// [FIX:TAAU-RECENT-EXACT-SUBMISSION-AUTHORITY V1503 2/4] Stale replays change
+// neither entry. A normal forward submission shifts latest into previous;
+// anomalous non-forward submissions replace latest and revoke previous.
 std::array<std::atomic<uint64_t>, 2> g_taau_last_submitted_pair{};
+std::array<std::atomic<uint64_t>, 2>
+    g_taau_previous_forward_submitted_pair{};
 std::atomic<uint64_t> g_taau_submitted_resolve_count{};
 
 struct CameraCbvWatch {
@@ -12018,44 +12090,43 @@ void reset_aer_cinema_exact_eye_contract() {
     g_aer_cinema_command_list_render_tags.clear();
 }
 
-// [FIX:AER-AFW-POST-HUD V1189 3/9] Freeze the identity of REDengine's final
-// HUD writer without joining it to AFW scene cadence. DLSS can expose an exact
-// command-list producer tag; TAAU and deferred HUD lists fall back to the most
-// recently accepted natural gameplay ordinal, adjusted only to the HUD eye
-// already selected by REDengine when that authority exists.
-// [DIAG:AER-AFW-FORCE-PREEXECUTE-HUD-SNAPSHOT V1283 1/2] Disable only the
-// pointer-exact PRESENT join so this isolated build must exercise V1282's
-// pre-Execute snapshot and submitted join. Recording metadata,
-// AFW transport and the configured DLSS callback route remain unchanged.
-constexpr bool kForceMode3AerAfwSubmittedHudJoinBuild = true;
+// Freeze the identity of REDengine's final HUD writer without joining it to
+// scene cadence. Automatic Full VR requires the exact sequential task tag;
+// AFW gameplay retains its established temporal producer fallback.
 
-void record_mode3_aer_afw_final_hud_tag(
+void record_mode3_aer_retained_hud_tag(
     ID3D12GraphicsCommandList* command_list,
     int hud_eye,
-    uint64_t /*hud_pair_id*/ = 0) {
-    const bool aer_afw_route =
-        mode3_aer_presentation_active() &&
-        mode3_aer_afw_post_hud_gameplay_active();
-    if (!aer_afw_route || command_list == nullptr) {
+    uint64_t hud_pair_id = 0) {
+    const bool sequential_full_vr =
+        mode3_aer_sequential_full_vr_retained_hud_active();
+    if (!mode3_aer_submitted_hud_join_active() ||
+        command_list == nullptr) {
         return;
     }
 
     const uint32_t generation =
         g_streamline_capture_generation.load(std::memory_order_acquire);
     EngineFrameTag tag{};
-    bool exact_tag =
-        lookup_dlss_recording_producer(command_list, tag) ||
-        // [FIX:AER-TAAU-FULL-VR-HUD-COMMAND-TAG V1302 3/5] Keep the retained
-        // t1 label on the same exact TAAU command-list identity used to choose
-        // its HUD PSO. The natural AER ordinal remains fallback-only.
-        lookup_taau_recording_producer(command_list, tag) ||
-        lookup_streamline_command_list_route(command_list, tag);
+    // [FIX:AER-FULL-VR-RETAINED-HUD V1508 4/6] Full VR accepts only the exact
+    // task tag already shared by its HUD PSO and final-backbuffer capture.
+    // AFW gameplay preserves its established recording-producer chain and
+    // natural-ordinal fallback.
+    bool exact_tag = sequential_full_vr
+        ? resolve_aer_cinema_command_list_tag(command_list, tag)
+        : (lookup_dlss_recording_producer(command_list, tag) ||
+            lookup_taau_recording_producer(command_list, tag) ||
+            lookup_streamline_command_list_route(command_list, tag));
     exact_tag = exact_tag && tag.eye <= 1 && tag.pair_id != 0 &&
         tag.pair_id != UINT64_MAX && tag.generation == generation &&
+        (hud_pair_id == 0 || tag.pair_id == hud_pair_id) &&
         (hud_eye < 0 || hud_eye > 1 ||
             tag.eye == static_cast<uint32_t>(hud_eye));
 
     if (!exact_tag) {
+        if (sequential_full_vr) {
+            return;
+        }
         const uint64_t next_ordinal =
             g_mode3_afw_natural_render_ordinal.load(
                 std::memory_order_acquire);
@@ -12089,34 +12160,6 @@ void record_mode3_aer_afw_final_hud_tag(
     std::scoped_lock lock{g_mode3_aer_afw_hud_mutex};
     g_mode3_aer_afw_pending_hud_tags[command_list] = {
         tag, g_present_count.load(std::memory_order_relaxed)};
-}
-
-bool peek_mode3_aer_afw_final_hud_tag(
-    ID3D12GraphicsCommandList* command_list,
-    EngineFrameTag& tag) {
-    if (command_list == nullptr) {
-        return false;
-    }
-    std::scoped_lock lock{g_mode3_aer_afw_hud_mutex};
-    const auto found =
-        g_mode3_aer_afw_pending_hud_tags.find(command_list);
-    if (found == g_mode3_aer_afw_pending_hud_tags.end()) {
-        return false;
-    }
-    tag = found->second.tag;
-    return tag.task_provenance_valid && tag.eye <= 1 &&
-        tag.pair_id != 0 && tag.pair_id != UINT64_MAX &&
-        tag.generation == g_streamline_capture_generation.load(
-            std::memory_order_acquire);
-}
-
-void consume_mode3_aer_afw_final_hud_tag(
-    ID3D12GraphicsCommandList* command_list) {
-    if (command_list == nullptr) {
-        return;
-    }
-    std::scoped_lock lock{g_mode3_aer_afw_hud_mutex};
-    g_mode3_aer_afw_pending_hud_tags.erase(command_list);
 }
 
 void queue_mode3_aer_afw_hud_present_boundary(
@@ -20632,8 +20675,10 @@ void STDMETHODCALLTYPE hook_execute_command_lists(
             if (!found || submitted.eye < 0 || submitted.eye > 1) {
                 continue;
             }
-            auto& last = g_taau_last_submitted_pair[
-                static_cast<size_t>(submitted.eye)];
+            const auto eye_index = static_cast<size_t>(submitted.eye);
+            auto& last = g_taau_last_submitted_pair[eye_index];
+            auto& previous_forward =
+                g_taau_previous_forward_submitted_pair[eye_index];
             const uint64_t observed_previous = last.load(
                 std::memory_order_acquire);
             const auto authority =
@@ -20642,6 +20687,16 @@ void STDMETHODCALLTYPE hook_execute_command_lists(
                     submitted.replayed_as_stale);
             uint64_t previous = observed_previous;
             if (!authority.preserve_previous) {
+                // [FIX:TAAU-RECENT-EXACT-SUBMISSION-AUTHORITY V1503 3/4]
+                // Publish the predecessor before latest. A concurrent reader
+                // may temporarily reject a pair, but can never accept one
+                // without its exact submitted identity.
+                previous_forward.store(
+                    observed_previous != 0 &&
+                            submitted.pair_id > observed_previous
+                        ? observed_previous
+                        : 0,
+                    std::memory_order_release);
                 previous = last.exchange(
                     submitted.pair_id, std::memory_order_acq_rel);
             }
@@ -22643,28 +22698,24 @@ void STDMETHODCALLTYPE hook_set_pipeline_state(
                     hud_eye_authority = "exact_tag_missing";
                 }
             }
-            // [FIX:AER-TAAU-FULL-VR-HUD-COMMAND-TAG V1302 4/5] TAAU's old
-            // same-Present completed task is the render immediately preceding
-            // this HUD command list. It therefore selected eye 0 while the
-            // immutable t1 capture on that list belonged to eye 1 (and vice
-            // versa). Resolve TAAU from the exact pending command-list tag,
-            // matching DLSS. Missing identity fails open on the original PSO;
-            // it is never replaced by the preceding eye.
+            // [FIX:AER-FULL-VR-RETAINED-HUD V1508 3/6] Every AER backend
+            // selects the Full-VR HUD PSO from the same exact REDengine task
+            // later used by the sequential scene pair. Never infer this eye
+            // from Present parity or from the previously completed task.
             if (automatic_full_vr_hud &&
-                mode3_aer_presentation_active() &&
-                temporal_backend_is_taau()) {
-                EngineFrameTag exact_taau_hud_tag{};
+                mode3_aer_sequential_full_vr_retained_hud_active()) {
+                EngineFrameTag exact_full_vr_hud_tag{};
                 if (resolve_aer_cinema_command_list_tag(
-                        command_list, exact_taau_hud_tag)) {
+                        command_list, exact_full_vr_hud_tag)) {
                     hud_eye = static_cast<int>(
-                        exact_taau_hud_tag.eye);
-                    hud_pair_id = exact_taau_hud_tag.pair_id;
+                        exact_full_vr_hud_tag.eye);
+                    hud_pair_id = exact_full_vr_hud_tag.pair_id;
                     hud_eye_authority =
-                        "taau_exact_command_list";
+                        "aer_full_vr_exact_command_list";
                 } else {
                     hud_eye = -1;
                     hud_pair_id = 0;
-                    hud_eye_authority = "taau_exact_tag_missing";
+                    hud_eye_authority = "aer_full_vr_exact_tag_missing";
                 }
             }
             // [FIX:STRICT-STEREO-HUD-ACCEPTED-PREDECESSOR-JOIN V1494 3/7]
@@ -22675,7 +22726,7 @@ void STDMETHODCALLTYPE hook_set_pipeline_state(
             // whenever the pointer-exact join missed at release timing.
             record_mode3_strict_hud_command_list_eye(
                 command_list, hud_eye);
-            record_mode3_aer_afw_final_hud_tag(
+            record_mode3_aer_retained_hud_tag(
                 command_list, hud_eye, hud_pair_id);
             if (hud_eye == 0) {
                 if (automatic_stereo_cinema_hud) {
@@ -22744,6 +22795,20 @@ void STDMETHODCALLTYPE hook_set_pipeline_state(
             // baked eye PSO above remains a visible fail-open bootstrap.
             const bool retained_hud_pair_ready =
                 mode3_retained_hud_pair_ready_for_active_route();
+            const bool aer_full_vr_retained_hud_route =
+                automatic_full_vr_hud &&
+                mode3_aer_sequential_full_vr_retained_hud_active();
+            // [FIX:AER-FULL-VR-SCENE-ONLY-ADMISSION V1509 2/3] Automatic AER
+            // Full VR is a sequential-Cinema source, not AFW gameplay. Require
+            // the complete scene pair that OpenXR will actually submit and the
+            // complete retained HUD pair. The first incomplete pair remains on
+            // REDengine's baked fail-open HUD; no pair is mixed.
+            const bool aer_full_vr_scene_only_ready =
+                w3vr::mode3_transport::
+                    aer_full_vr_scene_only_admission_ready(
+                        aer_full_vr_retained_hud_route,
+                        sequential_cinema_pair_available(),
+                        mode3_early_hud_pair_ready());
             // [FIX:AER-FINAL-SOURCE-HUD-FAIL-OPEN V1180 1/2] TAAU's final
             // source is the sequential AFW pair, not the packed scene cache.
             // Do not remove the native HUD until that pair (or the strict
@@ -22752,6 +22817,7 @@ void STDMETHODCALLTYPE hook_set_pipeline_state(
             // the late compositor still rejected the absent packed scene;
             // the result was a permanently HUD-less AER TAAU projection.
             const bool aer_taau_final_hud_pair_ready =
+                aer_full_vr_retained_hud_route ||
                 !mode3_taau_afw_final_source_active() ||
                 (g_cinema_mode_active.load(std::memory_order_relaxed)
                     ? sequential_cinema_pair_available()
@@ -22762,6 +22828,7 @@ void STDMETHODCALLTYPE hook_set_pipeline_state(
             // visible until both HUD eyes are actually publishable; otherwise
             // scene-only removal can race ahead of the late HUD compositor.
             const bool aer_taau_retained_hud_pair_ready =
+                aer_full_vr_retained_hud_route ||
                 !mode3_taau_afw_final_source_active() ||
                 mode3_early_hud_pair_ready();
             // [FIX:AER-AFW-POST-HUD V1189 6/9] Native DLSS now joins TAAU's
@@ -22769,12 +22836,15 @@ void STDMETHODCALLTYPE hook_set_pipeline_state(
             // only after both the immutable AFW scene pair and independently
             // captured HUD pair can be composited on this same XR frame.
             const bool aer_afw_post_hud_scene_pair_ready =
+                aer_full_vr_retained_hud_route ||
                 !mode3_aer_afw_post_hud_gameplay_active() ||
                 mode3_afw_sequenced_pair_available();
             const bool aer_afw_post_hud_pair_ready =
+                aer_full_vr_retained_hud_route ||
                 !mode3_aer_afw_post_hud_gameplay_active() ||
                 mode3_early_hud_pair_ready();
             if (retained_hud_projection_route_active() &&
+                aer_full_vr_scene_only_ready &&
                 aer_taau_final_hud_pair_ready &&
                 aer_taau_retained_hud_pair_ready &&
                 aer_afw_post_hud_scene_pair_ready &&
@@ -23879,6 +23949,10 @@ void arm_post_loading_taau_history_reset(uint64_t present) {
     g_loading_taau_history_reset_mask.store(0x3, std::memory_order_release);
     g_taau_last_submitted_pair[0].store(0, std::memory_order_release);
     g_taau_last_submitted_pair[1].store(0, std::memory_order_release);
+    g_taau_previous_forward_submitted_pair[0].store(
+        0, std::memory_order_release);
+    g_taau_previous_forward_submitted_pair[1].store(
+        0, std::memory_order_release);
     {
         std::scoped_lock lock{g_taau_recorded_resolve_mutex};
         g_taau_recorded_resolves.clear();
@@ -24090,7 +24164,7 @@ bool capture_mode3_early_hud(
     Mode3EarlyHudPending pending{
         slot_index, generation, slot.capture_serial,
         g_present_count.load(std::memory_order_relaxed),
-        mode3_aer_afw_post_hud_gameplay_active() ||
+        mode3_aer_submitted_hud_join_active() ||
             mode3_strict_stereo_submitted_hud_join_active(),
         destination_was_shader_read};
     const auto strict_eye =
@@ -24838,7 +24912,7 @@ void STDMETHODCALLTYPE hook_draw_instanced(
         record_aer_cinema_hud_draw_proof(command_list);
         const uint32_t routed_hud_eye =
             lookup_streamline_command_list_last_eye(command_list);
-        record_mode3_aer_afw_final_hud_tag(
+        record_mode3_aer_retained_hud_tag(
             command_list,
             routed_hud_eye <= 1
                 ? static_cast<int>(routed_hud_eye) : -1);
@@ -28562,10 +28636,7 @@ void STDMETHODCALLTYPE hook_resource_barrier(
                         label_mode3_early_hud_at_present(
                         command_list, packed_engine_route_tag);
                     if (mode3_strict_stereo_submitted_hud_join_active()) {
-                        if (hud_labeled) {
-                            consume_mode3_aer_afw_final_hud_tag(
-                                command_list);
-                        } else {
+                        if (!hud_labeled) {
                             // [FIX:MODE3-SUBMITTED-HUD-STEREO V1293 2/6]
                             // The packed tag is exact, but its PRESENT list may
                             // differ from the HUD writer and t1 copy lists.
@@ -28640,12 +28711,12 @@ void STDMETHODCALLTYPE hook_resource_barrier(
             }
         }
     }
-    // [FIX:AER-AFW-POST-HUD V1189 7/9] Final-source AER deliberately skips
-    // the packed PRESENT block above. Label its independently captured HUD at
-    // the pointer-exact game backbuffer boundary instead, using the identity
-    // frozen when REDengine selected the final HUD writer. This metadata join
-    // does not change AFW scene cadence or consume its producer tag.
-    if (mode3_aer_afw_post_hud_gameplay_active() &&
+    // [FIX:AER-FULL-VR-RETAINED-HUD V1508 5/6] Final-source AER deliberately
+    // skips the packed PRESENT block above. Label its independently captured
+    // HUD at the exact game-backbuffer boundary for both AFW gameplay and the
+    // sequential Full-VR pair. This metadata join changes neither scene
+    // cadence nor producer pixels.
+    if (mode3_aer_submitted_hud_join_active() &&
         !g_packed_capture_internal && barriers != nullptr) {
         for (UINT index = 0; index < num_barriers; ++index) {
             const auto& barrier = barriers[index];
@@ -28657,43 +28728,22 @@ void STDMETHODCALLTYPE hook_resource_barrier(
                     barrier.Transition.pResource)) {
                 continue;
             }
-            EngineFrameTag hud_tag{};
             const uint64_t hud_present =
                 g_present_count.load(std::memory_order_relaxed);
-            // [DIAG:AER-AFW-FORCE-PREEXECUTE-HUD-SNAPSHOT V1283 2/2]
-            // Preserve all metadata while making the fast path miss.
-            const bool force_submitted_join =
-                kForceMode3AerAfwSubmittedHudJoinBuild;
-            const bool tag_found = !force_submitted_join &&
-                peek_mode3_aer_afw_final_hud_tag(command_list, hud_tag);
-            const bool labeled = tag_found &&
-                label_mode3_early_hud_at_present(
-                    command_list, hud_tag);
-            if (labeled) {
-                consume_mode3_aer_afw_final_hud_tag(command_list);
-            } else {
-                // [FIX:AER-AFW-SUBMITTED-HUD-JOIN V1280 3/8] Preserve the
-                // pointer-exact fast path, but defer a miss until this command
-                // list's real queue submission can join preceding HUD lists.
-                queue_mode3_aer_afw_hud_present_boundary(
-                    command_list, hud_present);
-            }
+            // The submitted-order join is the sole AER owner. It snapshots
+            // metadata before ExecuteCommandLists and therefore remains valid
+            // when REDengine records t1, the HUD draw and PRESENT on separate
+            // command lists or immediately recycles those lists.
+            queue_mode3_aer_afw_hud_present_boundary(
+                command_list, hud_present);
             if (g_config.runtime_diagnostics) {
                 static std::atomic<uint32_t>
                     mode3_aer_afw_hud_label_logs{};
                 if (take_bounded_log_slot(
                         mode3_aer_afw_hud_label_logs, 32)) {
                     log_line(
-                        "V1189 AER AFW retained HUD label eye=%u pair=%llu "
-                        "generation=%u tag=%d labeled=%d deferred=%d "
-                        "forced_submitted=%d "
-                        "command_list=%p present=%llu",
-                        hud_tag.eye,
-                        static_cast<unsigned long long>(hud_tag.pair_id),
-                        hud_tag.generation,
-                        tag_found ? 1 : 0, labeled ? 1 : 0,
-                        labeled ? 0 : 1,
-                        force_submitted_join ? 1 : 0,
+                        "V1508 AER retained HUD boundary deferred=1 "
+                        "submitted_join=1 command_list=%p present=%llu",
                         command_list,
                         static_cast<unsigned long long>(hud_present));
                 }
@@ -30580,18 +30630,17 @@ void __fastcall hook_engine_frame_builder(void* render_context, void* frame_data
         last_full_vr_factory != UINT64_MAX &&
         present >= last_full_vr_factory &&
         present - last_full_vr_factory <= 2;
-    const bool strict_stereo_native_reused_camera_configured =
+    const bool mode3_native_reused_camera_configured =
         w3vr::native_asymmetric_transport_policy::
             reused_camera_fallback_uses_native_asymmetric_projection({
-                native_asymmetric_noaa_route_active(),
-                mode3_aer_presentation_active()});
+                native_asymmetric_noaa_route_active()});
     if (automatic_full_vr_active &&
-        strict_stereo_native_reused_camera_configured &&
+        mode3_native_reused_camera_configured &&
         full_vr_factory_recent) {
-        // [FIX:STRICT-STEREO-PERSISTENT-REUSED-CAMERA V1488 2/4] A normal
+        // A normal
         // factory camera is a physical source-owner boundary. Any later reuse
         // must prove a new complete fallback pair before native admission.
-        reset_strict_stereo_reused_camera_episode(
+        reset_mode3_reused_camera_episode(
             g_streamline_capture_generation.load(
                 std::memory_order_acquire));
     }
@@ -30924,7 +30973,7 @@ void __fastcall hook_engine_frame_builder(void* render_context, void* frame_data
         if (sample < 64) {
             auto* reused_slot = native_asymmetric_pair_slot(correction_pair);
             log_line(
-                "V1488 strict Stereo persistent native reused-camera sample=%u "
+                "V1507 Mode3 persistent native reused-camera sample=%u "
                 "present=%llu pair=%llu eye=%d factory_mask=0x%X "
                 "temporal_mask=0x%X dlss_input_mask=0x%X",
                 sample,
@@ -33218,19 +33267,18 @@ bool prepare_full_vr_frame_camera(
     float centered_reused_fallback_vertical_fov{};
     NativeAsymmetricPairSlot* native_asymmetric_full_vr_slot{};
     uint8_t native_asymmetric_full_vr_eye_bit{};
-    const bool strict_stereo_native_reused_camera_configured =
+    const bool mode3_native_reused_camera_configured =
         w3vr::native_asymmetric_transport_policy::
             reused_camera_fallback_uses_native_asymmetric_projection({
-                native_asymmetric_noaa_route_active(),
-                mode3_aer_presentation_active()});
+                native_asymmetric_noaa_route_active()});
     const uint32_t generation =
         g_streamline_capture_generation.load(std::memory_order_acquire);
     // [FIX:STRICT-STEREO-PERSISTENT-REUSED-CAMERA V1488 3/4] Freeze the
     // projection owner for the whole pair. The proof pair remains centered;
     // only a subsequent contiguous pair may publish native ASYM metadata.
     const bool native_asymmetric_reused_camera_fallback =
-        strict_stereo_native_reused_camera_configured &&
-        strict_stereo_native_reused_camera_pair_admitted(
+        mode3_native_reused_camera_configured &&
+        mode3_native_reused_camera_pair_admitted(
             generation, present, pair_id, static_cast<uint32_t>(eye));
     const bool centered_reused_camera_fallback =
         native_asymmetric_noaa_route_active() &&
@@ -33514,11 +33562,10 @@ bool prepare_full_vr_frame_camera(
             frame_camera, corrected.data(), sizeof(corrected))) {
         return false;
     }
-    // [FIX:OPENING-CUTSCENE-ASYM-FALLBACK-FOV V1418 2/2] AER's sequential
-    // fallback and strict Stereo's V1488 proof pair are deliberately centered.
-    // Publish their exact content FOV only after the corrected camera write;
-    // an admitted strict-Stereo pair publishes raw FOV through the native
-    // ledger instead.
+    // The first complete fallback pair is deliberately centered proof in both
+    // Stereo and AER. Publish its exact content FOV only after the corrected
+    // camera write; every subsequently admitted pair publishes raw FOV through
+    // the native ledger instead.
     if (centered_reused_camera_fallback &&
         !native_asymmetric_full_vr_projection_applied &&
         centered_reused_fallback_fov_ready) {
@@ -39730,7 +39777,7 @@ void apply_engine_dual_render_transition(
         UINT64_MAX, std::memory_order_release);
     g_full_vr_native_reused_camera_last_present.store(
         UINT64_MAX, std::memory_order_release);
-    reset_strict_stereo_reused_camera_episode(generation);
+    reset_mode3_reused_camera_episode(generation);
     g_engine_completed_eye.store(-1);
     g_engine_completed_generation.store(0);
     g_engine_completed_pair_id.store(0);
@@ -43247,15 +43294,15 @@ void ensure_initialized() {
                 "native_presentation_size=universal_final_openxr_subimage_fov_pair "
                 "aer_final_source_cinema=strict_sequential_pair "
                 "aer_cinema_eye_phase=final_backbuffer_opposite_command_list "
-                "aer_cinema_hud_phase=dlss_taau_exact_command_list "
+                "aer_cinema_hud_phase=all_backends_exact_command_list "
                 "focus_fire_b1=stereo_and_aer_centered_draw_proven "
                 "aer_taau_hud=scene_and_retained_pair_fail_open");
             log_line(
-                "witcher3vr dxgi proxy initialized build=V1501 base=V1499_witcher_sense_expanded_partition_cache "
+                "witcher3vr dxgi proxy initialized build=V1509 base=V1508_aer_full_vr_scene_only_admission "
                 "anchor_smoothing_ini=%d anchor_smoothing_seconds=%.4f "
                 "first_person_strafe_ini=%d mode3_aer_presentation=%d raytracing_enabled=%d raytracing_history_buffers=%d "
                 "aer_afw_enabled=%d persistent_registry=%d optiscaler_enabled=%d "
-                "force_aer_afw_submitted_hud_join=%d",
+                "aer_submitted_hud_join=sole_owner",
                 g_config.engine_first_person_anchor_smoothing ? 1 : 0,
                 g_config.engine_first_person_anchor_smoothing_seconds,
                 g_config.engine_first_person_strafe ? 1 : 0,
@@ -43264,8 +43311,7 @@ void ensure_initialized() {
                 g_config.raytracing_history_buffers,
                 g_config.puredark_afw_enabled ? 1 : 0,
                 focus_projection_shader_registry_enabled() ? 1 : 0,
-                g_config.optiscaler_enabled ? 1 : 0,
-                kForceMode3AerAfwSubmittedHudJoinBuild ? 1 : 0);
+                g_config.optiscaler_enabled ? 1 : 0);
             log_line("V1234 AFW common_transport=dlss_and_taau projection_transport=symmetric_asymmetric_identical final_color=exact_submitted_temporal queue_admission=exact_command_list_any_hooked_queue taau_motion=normalized_rg16f_previous_minus_current afw_projection=packet_owned_camera_fov mode3_afw_bundle_fifo=exact_submitted_temporal mode3_afw_order=temporal_bundle_then_shared_xr_evaluate_copy_draw strict_dlss_smoke_eye=exact_deferred_command_tag aer_presentation_size=final_openxr_scaled_fov_source_extent rt_identity=order_independent_open_transactions rt_ingress_packet=removed rt_flight=removed rt_gpu_history=exact_previous_pair_configurable_4_to_16_default_8 afw_visual_debug=F6 camera_follow=launcher_script_dynamic static_hud=launcher_script_dynamic");
             log_line(
                 "V1271 RenderDoc integration=optional_default_off capture=F3 d3d12_create_device=streamline_raw_export_bridge system_dxgi_exports=pre_resolved api=1.6.0");
@@ -43337,19 +43383,25 @@ void ensure_initialized() {
             log_line(
                 "V1496 strict_stereo_gameplay_hud_eye=exact_pso_selected submitted_fallback=gameplay_full_vr_cinema diagnostic_logging_required=0 pointer_exact=unchanged aer=unchanged base=V1495");
             log_line(
-                "V1497 manual_cinema_recenter=single_f10_owner automatic_cinema_recenter=detector_owner taau_submitted_pair_gate=unchanged base=V1496");
+                "V1503 taau_submission_authority=latest_plus_immediate_exact_forward_predecessor max_lag_pairs=1 stale_replays=preserve_both nonforward=clear_predecessor strict_stereo_only=1 manual_cinema_recenter=pre_V1497_detector_owner base=V1501");
+            // [FIX:NOAA-FACTORY-PROVEN-ASYM-FALLBACK V1506 3/3]
+            log_line(
+                "V1506 noaa_native_pair_proof=factory_0x3_plus_exact_render_views temporal_mask=not_applicable taau_dlss_temporal_proof=unchanged dlss_input_proof=unchanged reused_camera_projection=native_asymmetric base=V1503");
+            // [FIX:AER-CINEMA-NATIVE-ASYM-PAIR-AUTHORITY V1507 5/6]
+            log_line(
+                "V1507 aer_full_vr_projection=stereo_native_asym_contract cadence=sequential_exact_pair camera_fallback=shared pair_proof=factory_plus_backend frozen_fov=pair_owned effects=native_source_lifetime final_submit=pair_projection_class noaa_temporal_proof=not_applicable base=V1506");
+            // [FIX:AER-FULL-VR-RETAINED-HUD V1508 6/6]
+            log_line(
+                "V1508 aer_full_vr_hud=stereo_retained_single_owner exact_eye_local_t1=1 baked_hud=scene_only_after_complete_pair late_composite=exact_sequential_pair submitted_join=all_backends gameplay=unchanged panels=unchanged scene_projection=V1507_unchanged base=V1507");
+            // [FIX:AER-FULL-VR-SCENE-ONLY-ADMISSION V1509 3/3]
+            log_line(
+                "V1509 aer_full_vr_scene_only=sequential_cinema_pair_plus_retained_hud_pair backends=noaa_taau_dlss afw_gameplay_pair_gate=bypassed_only_for_full_vr first_incomplete_pair=baked_fail_open exact_draw_proof=required late_composite=V1508_unchanged scene_projection=V1507_unchanged base=V1508");
             // [FIX:FULL-VR-TRANSPARENT-FIX-ADMISSION V1484 3/3]
             log_line(
                 "V1484 full_vr_transparent_fix=exact_native_asymmetric_source_only centered_fallback=excluded cinema_panel=excluded tiled_light=unchanged base=V1483");
             // [FIX:FULL-VR-FACTORY-LIFETIME-AUTHORITY V1486 3/3]
             log_line(
                 "V1486 full_vr_transparent_authority=factory_lifetime same_boundary=V1255 current_or_previous_two_presents=1 centered_fallback=excluded backend_independent=1 base=V1485");
-            // [FIX:STRICT-STEREO-NATIVE-REUSED-CAMERA-FALLBACK V1487 3/3]
-            log_line(
-                "V1487 strict_stereo_reused_camera=native_asymmetric_complete_pair factory_gate=current_or_previous_two_presents temporal_proof=verified_frame_writer transparent_authority=separate_native_reused_lifetime aer=centered_sequential_unchanged hud_change=none base=V1486");
-            // [FIX:STRICT-STEREO-PERSISTENT-REUSED-CAMERA V1488 4/4]
-            log_line(
-                "V1488 strict_stereo_reused_camera_admission=complete_centered_proof_pair_then_native_next_pair isolated_eye=centered present_gap=revokes generation_change=revokes factory_return=revokes pair_decision=frozen aer=unchanged hud_change=none base=V1487");
             // [FIX:STRICT-STEREO-HUD-ACCEPTED-PREDECESSOR-JOIN V1494 6/7]
             log_line(
                 "V1494 strict_stereo_full_vr_hud=accepted_predecessor_pair_plus_pso_selected_eye current_accepted_scene=validation_only capture_and_draw_same_submission=required one_copy_per_eye=1 reset=revokes generation_reset=revokes missing_pair_or_eye=fail_open no_present_parity=1 aer=unchanged camera=V1493_unchanged base=V1493");
@@ -46018,13 +46070,79 @@ bool promote_sequential_cinema_pair(
     const uint32_t generation =
         g_streamline_capture_generation.load(std::memory_order_acquire);
     const uint64_t pair_id = g_sequential_cinema_pending_pair_id[0];
+    const bool sequential_views_complete =
+        g_sequential_cinema_pending_view_valid[0] &&
+        g_sequential_cinema_pending_view_valid[1];
     if (pair_id == 0 ||
         pair_id != g_sequential_cinema_pending_pair_id[1] ||
         g_sequential_cinema_pending_generation[0] != generation ||
         g_sequential_cinema_pending_generation[1] != generation ||
+        !sequential_views_complete ||
         pair_id < g_sequential_cinema_entry_pair_floor ||
         (g_sequential_cinema_accepted_generation == generation &&
             pair_id <= g_sequential_cinema_accepted_pair_id)) {
+        return false;
+    }
+
+    // [FIX:AER-CINEMA-NATIVE-ASYM-PAIR-AUTHORITY V1507 3/6] The sequential
+    // cache is AER's immutable equivalent of Stereo's packed pair. Carry the
+    // exact producer projection only when both eyes own the same live ledger
+    // generation and every proof required by the selected backend is complete.
+    // One centered pair may bootstrap transport before the native ledger is
+    // armed; an existing native slot can never be reinterpreted as symmetric.
+    auto* native_pair = native_asymmetric_pair_slot(pair_id);
+    const bool native_asymmetric_scene =
+        native_asymmetric_noaa_route_active() &&
+        native_asymmetric_full_vr_scene_active();
+    const bool native_asymmetric_required = native_asymmetric_scene &&
+        (g_native_asymmetric_transport_ready.load(
+             std::memory_order_acquire) ||
+            native_pair != nullptr);
+    const uint32_t native_generation = native_pair != nullptr
+        ? native_pair->generation.load(std::memory_order_acquire)
+        : UINT32_MAX;
+    const uint8_t native_factory_mask = native_pair != nullptr
+        ? native_pair->factory_mask.load(std::memory_order_acquire)
+        : 0;
+    const uint8_t native_temporal_mask = native_pair != nullptr
+        ? native_pair->temporal_mask.load(std::memory_order_acquire)
+        : 0;
+    const uint8_t native_dlss_input_mask = native_pair != nullptr
+        ? native_pair->dlss_input_mask.load(std::memory_order_acquire)
+        : 0;
+    const bool native_slot_matches = native_pair != nullptr &&
+        native_generation == generation &&
+        native_pair->pair_id.load(std::memory_order_acquire) == pair_id;
+    const bool temporal_backend_active =
+        g_config.temporal_backend != TemporalBackend::None;
+    const bool native_dlss_input_required =
+        native_asymmetric_required &&
+        g_config.temporal_backend == TemporalBackend::Dlss;
+    if (!w3vr::native_asymmetric_transport_policy::cinema_pair_admissible({
+            native_asymmetric_required,
+            native_slot_matches,
+            sequential_views_complete,
+            native_factory_mask,
+            native_temporal_mask,
+            native_dlss_input_mask,
+            temporal_backend_active,
+            native_dlss_input_required})) {
+        const uint32_t log_index =
+            g_native_asymmetric_rejected_pair_logs.fetch_add(
+                1, std::memory_order_relaxed);
+        if (g_config.runtime_diagnostics && log_index < 32) {
+            log_line(
+                "V1507 AER cinema native pair held sample=%u pair=%llu "
+                "generation=%u/%u slot=%u views=%u factory_mask=0x%X "
+                "temporal_mask=0x%X dlss_input_mask=0x%X backend=%s",
+                log_index,
+                static_cast<unsigned long long>(pair_id),
+                native_generation, generation,
+                native_slot_matches ? 1u : 0u,
+                sequential_views_complete ? 1u : 0u,
+                native_factory_mask, native_temporal_mask,
+                native_dlss_input_mask, temporal_backend_name());
+        }
         return false;
     }
 
@@ -46068,6 +46186,8 @@ bool promote_sequential_cinema_pair(
     const bool had_previous_pair = g_sequential_cinema_pair_valid;
     g_sequential_cinema_present_cache_initialized = true;
     g_sequential_cinema_pair_valid = true;
+    g_sequential_cinema_pair_native_asymmetric =
+        native_asymmetric_required;
     g_sequential_cinema_accepted_pair_id = pair_id;
     g_sequential_cinema_accepted_generation = generation;
 
@@ -46076,7 +46196,8 @@ bool promote_sequential_cinema_pair(
     if (diagnostic_index < 64) {
         log_taau_trace_line(
             "AER cinema pair promoted sample=%u present=%llu pair=%llu "
-            "generation=%u floor=%llu had_previous=%d views=%d,%d",
+            "generation=%u floor=%llu had_previous=%d views=%d,%d "
+            "native_asymmetric=%d",
             diagnostic_index,
             static_cast<unsigned long long>(
                 g_present_count.load(std::memory_order_relaxed)),
@@ -46085,7 +46206,8 @@ bool promote_sequential_cinema_pair(
                 g_sequential_cinema_entry_pair_floor),
             had_previous_pair ? 1 : 0,
             g_packed_present_cache_view_valid[0] ? 1 : 0,
-            g_packed_present_cache_view_valid[1] ? 1 : 0);
+            g_packed_present_cache_view_valid[1] ? 1 : 0,
+            g_sequential_cinema_pair_native_asymmetric ? 1 : 0);
     }
     return true;
 }
@@ -46790,13 +46912,21 @@ bool update_mode3_aer_eye_cache() {
         if (slot.native_asymmetric_projection) {
             auto* native_pair = native_asymmetric_pair_slot(slot.pair_id);
             const uint8_t eye_bit = static_cast<uint8_t>(1u << eye);
+            const bool temporal_proof_sufficient =
+                w3vr::native_asymmetric_transport_policy::
+                    native_temporal_proof_sufficient(
+                        g_config.temporal_backend != TemporalBackend::None,
+                        native_pair != nullptr
+                            ? native_pair->temporal_mask.load(
+                                std::memory_order_acquire)
+                            : 0u,
+                        eye_bit);
             if (!slot.render_view_valid || native_pair == nullptr ||
                 native_pair->pair_id.load(std::memory_order_acquire) !=
                     slot.pair_id ||
                 (native_pair->factory_mask.load(std::memory_order_acquire) &
                     eye_bit) == 0 ||
-                (native_pair->temporal_mask.load(std::memory_order_acquire) &
-                    eye_bit) == 0) {
+                !temporal_proof_sufficient) {
                 continue;
             }
         }
@@ -47063,11 +47193,20 @@ bool update_packed_eye_cache() {
     // actually reached ExecuteCommandLists. V12048 caught 12 promotions where
     // one submitted eye was still older; those frames are visible only under
     // HMD motion because their stale temporal image otherwise looks static.
+    // [FIX:TAAU-RECENT-EXACT-SUBMISSION-AUTHORITY V1503 4/4] Preserve exact
+    // per-eye submission proof while allowing only the observed one-pair phase
+    // shift. AER retains its existing current-only authority gate.
     if (mode3_stereo_transport_active() && temporal_backend_is_taau() &&
-        (g_taau_last_submitted_pair[0].load(std::memory_order_acquire) !=
-                left.pair_id ||
-            g_taau_last_submitted_pair[1].load(std::memory_order_acquire) !=
-                left.pair_id)) {
+        (!w3vr::taau_submission::recent_exact_submission_matches(
+             g_taau_last_submitted_pair[0].load(std::memory_order_acquire),
+             g_taau_previous_forward_submitted_pair[0].load(
+                 std::memory_order_acquire),
+             left.pair_id) ||
+         !w3vr::taau_submission::recent_exact_submission_matches(
+             g_taau_last_submitted_pair[1].load(std::memory_order_acquire),
+             g_taau_previous_forward_submitted_pair[1].load(
+                 std::memory_order_acquire),
+             left.pair_id))) {
         return false;
     }
     const bool had_accepted_pair = g_packed_present_cache_valid;
@@ -47160,12 +47299,21 @@ bool update_packed_eye_cache() {
         !native_dlss_input_required ||
         (native_dlss_input_mask == 0x3u &&
             native_pair_generation == generation);
+    // [FIX:NOAA-FACTORY-PROVEN-ASYM-FALLBACK V1506 2/3] The final No-AA
+    // texture is the factory raster itself. TAAU/DLSS must still prove their
+    // separate temporal output, but requiring that nonexistent transaction in
+    // No AA held a valid native pair forever at factory=0x3/temporal=0x0.
+    const bool native_temporal_proof_complete =
+        w3vr::native_asymmetric_transport_policy::
+            native_temporal_proof_sufficient(
+                g_config.temporal_backend != TemporalBackend::None,
+                native_temporal_mask, 0x3u);
     const bool native_pair_complete =
         captured_native_eye0 && captured_native_eye1 &&
         accepted_slots[0]->render_view_valid &&
         accepted_slots[1]->render_view_valid &&
         native_pair != nullptr && native_factory_mask == 0x3u &&
-        native_temporal_mask == 0x3u && native_dlss_input_complete &&
+        native_temporal_proof_complete && native_dlss_input_complete &&
         native_pair->pair_id.load(std::memory_order_acquire) == accepted_pair;
     if (native_pair != nullptr || captured_native_source) {
         if (!native_pair_complete) {
@@ -47872,14 +48020,8 @@ void render_openxr_test_frame(
                 UINT64_MAX, std::memory_order_release);
         }
         if (cinema_mode) {
-            // [FIX:MANUAL-CINEMA-SINGLE-RECENTER V1497 2/3] The F10 handler
-            // owns the immediate manual-entry arm. Only an automatic Cinema
-            // transition may arm here, otherwise the detector re-arms after
-            // the first packed pair and causes a second recenter.
-            if (!g_force_mono_cinema.load(std::memory_order_relaxed)) {
-                g_auto_recenter_on_packed_lock_armed.store(
-                    true, std::memory_order_release);
-            }
+            g_auto_recenter_on_packed_lock_armed.store(
+                true, std::memory_order_release);
             if (clean_mono_transport_active()) {
                 {
                     std::scoped_lock view_lock{
@@ -49610,9 +49752,9 @@ void render_openxr_test_frame(
                 // already-armed automatic Full-VR fallback as a second preflight
                 // owner. Manual/normal Cinema panels remain rejected, and the
                 // fallback must still write and publish each exact factory bit
-                // before an asymmetric pair can be accepted. V1251 confines
-                // this native bootstrap to strict Stereo; AER repairs only
-                // the reused-camera frame itself with symmetric geometry.
+                // before an asymmetric pair can be accepted. Stereo and AER
+                // share this producer preflight; cadence diverges only after
+                // an immutable pair has been accepted.
                 const bool native_asymmetric_transport_preflight =
                     w3vr::native_asymmetric_transport_policy::preflight_ready({
                         native_asymmetric_transport_capable,
@@ -49621,8 +49763,7 @@ void render_openxr_test_frame(
                             std::memory_order_acquire),
                         g_config.cinema_full_vr,
                         g_force_mono_cinema.load(
-                            std::memory_order_relaxed),
-                        mode3_aer_presentation_active()});
+                            std::memory_order_relaxed)});
                 if (native_asymmetric_noaa_route_active()) {
                     g_native_asymmetric_transport_ready.store(
                         native_asymmetric_transport_preflight,
@@ -49633,7 +49774,8 @@ void render_openxr_test_frame(
                         cinema_presentation_uses_native_asymmetric({
                             g_packed_present_cache_valid &&
                                 g_packed_present_cache_native_asymmetric,
-                            sequential_cinema_pair_available()});
+                            sequential_cinema_pair_available(),
+                            g_sequential_cinema_pair_native_asymmetric});
                 native_asymmetric_projection =
                     native_pair_fully_built && !spatial_panel_active;
                 native_asymmetric_black_frame =
@@ -49944,16 +50086,19 @@ void render_openxr_test_frame(
                                 g_mode3_afw_sequenced_native_asymmetric;
                         } else if (packed_stereo_available) {
                             if (mode3_final_source_cinema_pair_available) {
-                                // V1248 deliberately publishes AER Cinema's
-                                // repaired centered pair through the packed
-                                // cache even when an upstream ledger was
-                                // native. Preserve that source geometry.
+                                // [FIX:AER-CINEMA-NATIVE-ASYM-PAIR-AUTHORITY
+                                // V1507 4/6] The immutable AER pair carries the
+                                // exact projection class of its pixels. Never
+                                // reinterpret a native pair as symmetric at
+                                // final submission.
                                 mode3_source_projection_ready =
                                     g_sequential_cinema_accepted_generation ==
                                         projection_generation &&
                                     g_packed_present_cache_view_valid[0] &&
                                     g_packed_present_cache_view_valid[1];
-                                mode3_source_native_asymmetric = false;
+                                mode3_source_native_asymmetric =
+                                    mode3_source_projection_ready &&
+                                    g_sequential_cinema_pair_native_asymmetric;
                             } else {
                                 const auto packed_projection =
                                     w3vr::mode3_transport::
@@ -51587,7 +51732,7 @@ void handle_f3_capture_hotkey(IDXGISwapChain* swapchain) {
         w3vr::pipeline_flight::dump_last_ten_seconds();
     }
     // [FIX:STRICT-STEREO-HUD-ACCEPTED-PREDECESSOR-JOIN V1494 7/7]
-    w3vr::route_flight::dump_last_seconds("V1501", 15);
+    w3vr::route_flight::dump_last_seconds("V1509", 15);
     trigger_renderdoc_capture(
         g_game_swapchain != nullptr ? g_game_swapchain : swapchain);
 }
@@ -52053,10 +52198,6 @@ HRESULT STDMETHODCALLTYPE hook_present(IDXGISwapChain* swapchain, UINT sync_inte
         }
         if (forced) {
             g_engine_hmd_forward_valid.store(false, std::memory_order_release);
-            // [FIX:MANUAL-CINEMA-SINGLE-RECENTER V1497 3/3] This exact F10
-            // edge is the sole owner of the manual Cinema recenter arm.
-            g_auto_recenter_on_packed_lock_armed.store(
-                true, std::memory_order_release);
             // Rearm the bounded source/camera checks even when F10 changes an
             // already-active automatic cutscene into an anchored cinema panel.
             // In that case g_cinema_mode_active does not transition, so the

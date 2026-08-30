@@ -5,7 +5,7 @@ endif()
 file(READ "${DXGI_PROXY_SOURCE}" source)
 
 foreach(required_fragment IN ITEMS
-        "build=V1501 base=V1499_witcher_sense_expanded_partition_cache"
+        "build=V1509 base=V1508_aer_full_vr_scene_only_admission"
         "[FIX:FULL-VR-FACTORY-LIFETIME-AUTHORITY V1486 1/3]"
         "[FIX:FULL-VR-FACTORY-LIFETIME-AUTHORITY V1486 2/3]"
         "[FIX:FULL-VR-FACTORY-LIFETIME-AUTHORITY V1486 3/3]"
@@ -16,12 +16,12 @@ foreach(required_fragment IN ITEMS
         "const bool native_source = native_factory_source || native_reused_source;"
         "g_full_vr_native_reused_camera_last_present.store("
         "authority=native_source_lifetime"
-        "transparent_authority=separate_native_reused_lifetime"
-        "dump_last_seconds(\"V1501\", 15)")
+        "effects=native_source_lifetime"
+        "dump_last_seconds(\"V1509\", 15)")
     string(FIND "${source}" "${required_fragment}" fragment_index)
     if(fragment_index EQUAL -1)
         message(FATAL_ERROR
-            "Missing V1487 Full-VR native-source lifetime contract: ${required_fragment}")
+            "Missing V1507 Full-VR native-source lifetime contract: ${required_fragment}")
     endif()
 endforeach()
 
@@ -36,4 +36,5 @@ foreach(forbidden_fragment IN ITEMS
     endif()
 endforeach()
 
-message(STATUS "V1487 Full-VR native-source lifetime authority contract verified")
+message(STATUS "V1507 Full-VR native-source lifetime authority contract verified")
+

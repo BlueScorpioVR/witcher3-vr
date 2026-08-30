@@ -5,7 +5,7 @@ endif()
 file(READ "${DXGI_PROXY_SOURCE}" source)
 
 set(required_fragments
-    "build=V1501 base=V1499_witcher_sense_expanded_partition_cache"
+    "build=V1509 base=V1508_aer_full_vr_scene_only_admission"
     "PERF:NOAA-TILED-TLS V1442"
     "return asymmetric_tiled_culling_fix_needed() ||"
     "snapshot.compute_tables = state->compute_tables"

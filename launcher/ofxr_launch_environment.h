@@ -15,3 +15,4 @@ bool BuildEnabledOfxrLaunchEnvironment(
     std::wstring& error);
 
 } // namespace w3vr
+

@@ -9,6 +9,7 @@ int main() {
     using w3vr::taau_submission::decide_authority;
     using w3vr::taau_submission::decide_cb10_producer_identity;
     using w3vr::taau_submission::decide_strict_raw_camera_fifo_action;
+    using w3vr::taau_submission::recent_exact_submission_matches;
     using w3vr::taau_submission::StrictRawCameraFifoAction;
     using w3vr::taau_submission::strict_raw_camera_fifo_entry_matches;
 
@@ -36,6 +37,18 @@ int main() {
     const auto stale_without_authority = decide_authority(0, 1604, true);
     assert(stale_without_authority.preserve_previous);
     assert(stale_without_authority.effective_pair == 0);
+
+    // V1503 retains exact ExecuteCommandLists authority for the current pair
+    // and for only the immediately preceding exact forward submission.
+    assert(recent_exact_submission_matches(176, 174, 176));
+    assert(recent_exact_submission_matches(176, 175, 175));
+    assert(!recent_exact_submission_matches(176, 174, 175));
+    assert(!recent_exact_submission_matches(176, 175, 174));
+    assert(!recent_exact_submission_matches(176, 0, 175));
+    assert(!recent_exact_submission_matches(0, 0, 175));
+    assert(!recent_exact_submission_matches(176, 175, 0));
+    assert(recent_exact_submission_matches(UINT64_MAX, UINT64_MAX - 1,
+                                           UINT64_MAX));
 
     // The exact CB10 producer owns the current pair before engine_task_end.
     // There is intentionally no history-pair argument and therefore no path

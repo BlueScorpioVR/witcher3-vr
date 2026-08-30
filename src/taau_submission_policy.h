@@ -51,6 +51,26 @@ constexpr AuthorityDecision decide_authority(
         : AuthorityDecision{incoming_pair, false};
 }
 
+// A captured pair remains publishable when it is either the newest exact
+// resolve submitted for this eye, or the immediately preceding exact forward
+// submission and the newest submission is exactly one pair newer. This keeps
+// the V12049 ExecuteCommandLists proof while tolerating the one-eye, one-pair
+// phase shift observed after a Stereo TAAU Cinema recenter.
+constexpr bool recent_exact_submission_matches(
+    uint64_t latest_pair,
+    uint64_t previous_forward_pair,
+    uint64_t candidate_pair) noexcept {
+    if (candidate_pair == 0 || latest_pair == 0) {
+        return false;
+    }
+    if (latest_pair == candidate_pair) {
+        return true;
+    }
+    return candidate_pair != UINT64_MAX &&
+        latest_pair == candidate_pair + 1 &&
+        previous_forward_pair == candidate_pair;
+}
+
 // AFW TAAU camera payloads and native resolves are two views of the same
 // ordered alternating producer stream. The front payload is usable only when
 // generation, routed eye and the resolve-matrix validation all agree. A later

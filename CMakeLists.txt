@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(witcher3vr VERSION 0.1487.0 LANGUAGES C CXX)
+project(witcher3vr VERSION 0.1509.0 LANGUAGES C CXX)
 
 include(CTest)
 
@@ -442,10 +442,10 @@ if(BUILD_TESTING)
     )
 
     add_test(
-        NAME renderer_strict_stereo_native_reused_camera_fallback_contract
+        NAME renderer_mode3_native_reused_camera_fallback_contract
         COMMAND "${CMAKE_COMMAND}"
             "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
-            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/strict_stereo_native_reused_camera_fallback_contract.cmake"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/mode3_native_reused_camera_fallback_contract.cmake"
     )
 
     add_test(
@@ -507,6 +507,20 @@ if(BUILD_TESTING)
     )
 
     add_test(
+        NAME renderer_aer_full_vr_retained_hud_contract
+        COMMAND "${CMAKE_COMMAND}"
+            "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/aer_full_vr_retained_hud_contract.cmake"
+    )
+
+    add_test(
+        NAME renderer_aer_full_vr_scene_only_admission_contract
+        COMMAND "${CMAKE_COMMAND}"
+            "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/aer_full_vr_scene_only_admission_contract.cmake"
+    )
+
+    add_test(
         NAME renderer_strict_stereo_gameplay_retained_hud_contract
         COMMAND "${CMAKE_COMMAND}"
             "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
@@ -521,10 +535,10 @@ if(BUILD_TESTING)
     )
 
     add_test(
-        NAME renderer_manual_cinema_single_recenter_contract
+        NAME renderer_taau_recent_exact_submission_authority_contract
         COMMAND "${CMAKE_COMMAND}"
             "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
-            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/manual_cinema_single_recenter_contract.cmake"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/taau_recent_exact_submission_authority_contract.cmake"
     )
 
     add_test(

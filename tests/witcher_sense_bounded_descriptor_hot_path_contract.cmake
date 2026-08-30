@@ -87,3 +87,4 @@ foreach(forbidden_resolver_fragment
 endforeach()
 
 message(STATUS "V1501 Witcher Senses bounded descriptor hot path verified")
+

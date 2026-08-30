@@ -23,6 +23,7 @@ int main() {
     using w3vr::mode3_transport::final_color_submission_backend;
     using w3vr::mode3_transport::immutable_pair_view_ready;
     using w3vr::mode3_transport::late_hud_composite_source_ready;
+    using w3vr::mode3_transport::aer_full_vr_scene_only_admission_ready;
     using w3vr::mode3_transport::retained_hud_scene_lifecycle_active;
     using w3vr::mode3_transport::native_hud_source_bootstrap_active;
     using w3vr::mode3_transport::real_smoke_variant_bootstrap_allowed;
@@ -246,6 +247,15 @@ int main() {
     assert(late_hud_composite_source_ready(
         HudProjectionRoute::Cinema, true));
 
+    // AER automatic Full VR may never inherit AFW gameplay readiness. It
+    // removes the baked HUD only when both its sequential scene and retained
+    // HUD pairs are complete; unrelated routes are unaffected.
+    assert(!aer_full_vr_scene_only_admission_ready(true, false, false));
+    assert(!aer_full_vr_scene_only_admission_ready(true, true, false));
+    assert(!aer_full_vr_scene_only_admission_ready(true, false, true));
+    assert(aer_full_vr_scene_only_admission_ready(true, true, true));
+    assert(aer_full_vr_scene_only_admission_ready(false, false, false));
+
     // Strict Stereo gameplay keeps the native baked HUD. Retained removal may
     // start on the early Full-VR camera flag or the later Cinema detector.
     assert(!retained_hud_scene_lifecycle_active(false, false));
@@ -282,12 +292,15 @@ int main() {
     assert(strict_stereo_retained_hud_pair_fresh(7, 7, 100, 7, 100));
     assert(strict_stereo_retained_hud_pair_fresh(7, 7, 100, 7, 101));
 
-    // AER retains its AFW-scoped contract. Strict Stereo uses the same
-    // submitted-order safety net for both temporal backends, but not No AA.
+    // AER uses the submitted-order safety net whenever its retained-HUD route
+    // is configured, including sequential Full VR with No AA. Strict Stereo
+    // keeps the same fallback for temporal backends, but not No AA.
     assert(submitted_hud_join_route_active(
         true, true, true, TemporalAdapter::Dlss));
     assert(submitted_hud_join_route_active(
         true, true, true, TemporalAdapter::Taau));
+    assert(submitted_hud_join_route_active(
+        true, true, true, TemporalAdapter::None));
     assert(!submitted_hud_join_route_active(
         true, true, false, TemporalAdapter::Dlss));
     assert(submitted_hud_join_route_active(

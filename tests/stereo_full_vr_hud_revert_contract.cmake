@@ -5,7 +5,7 @@ endif()
 file(READ "${DXGI_PROXY_SOURCE}" source)
 
 foreach(required_fragment IN ITEMS
-        "build=V1501 base=V1499_witcher_sense_expanded_partition_cache"
+        "build=V1509 base=V1508_aer_full_vr_scene_only_admission"
         "V1479 stereo_full_vr_hud=V1476_strict_predecessor_freshness"
         "bool mode3_retained_hud_pair_ready_for_active_route()"
         "if (!mode3_strict_stereo_submitted_hud_join_active()) {"
@@ -32,3 +32,4 @@ foreach(retired_fragment IN ITEMS
 endforeach()
 
 message(STATUS "V1479 V1476 HUD freshness restoration verified")
+

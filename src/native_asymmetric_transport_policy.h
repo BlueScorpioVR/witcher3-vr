@@ -4,18 +4,27 @@
 
 namespace w3vr::native_asymmetric_transport_policy {
 
+// A native off-axis raster always needs the exact factory proof. Temporal
+// descriptors are additional ownership only when a temporal backend exists;
+// No AA has no history transaction to certify.
+constexpr bool native_temporal_proof_sufficient(
+    bool temporal_backend_active,
+    uint8_t temporal_mask,
+    uint8_t required_mask) noexcept {
+    return !temporal_backend_active ||
+        (temporal_mask & required_mask) == required_mask;
+}
+
 struct ReusedCameraProjectionInput {
     bool native_asymmetric_route{};
-    bool aer_presentation{};
 };
 
-// A strict-Stereo reused-camera frame now enters the same complete native
-// off-axis ledger as an ordinary factory-built pair. AER retains its separate
-// sequential centered producer until that route has an equivalent complete
-// pair/presentation contract.
+// A reused-camera frame enters the same complete native off-axis ledger as an
+// ordinary factory-built pair. Stereo and AER differ only in presentation
+// cadence; neither may reinterpret an admitted off-axis frame as symmetric.
 constexpr bool reused_camera_fallback_uses_native_asymmetric_projection(
     const ReusedCameraProjectionInput& input) noexcept {
-    return input.native_asymmetric_route && !input.aer_presentation;
+    return input.native_asymmetric_route;
 }
 
 struct ReusedCameraEpisodeState {
@@ -91,14 +100,43 @@ constexpr bool stereo_frame_fallback_admissible(
 struct CinemaPresentationInput {
     bool packed_pair_native_asymmetric{};
     bool sequential_aer_pair_available{};
+    bool sequential_aer_pair_native_asymmetric{};
 };
 
-// The strict packed cache owns native off-axis presentation. The independent
-// sequential AER Cinema cache is intentionally symmetric, even when a complete
-// pair is available; promoting it was the V1248 regression.
+struct CinemaPairInput {
+    bool native_asymmetric_required{};
+    bool slot_matches_pair_and_generation{};
+    bool views_complete{};
+    uint8_t factory_mask{};
+    uint8_t temporal_mask{};
+    uint8_t dlss_input_mask{};
+    bool temporal_backend_active{};
+    bool dlss_input_required{};
+};
+
+// Automatic Full VR may publish off-axis pixels only after both exact eyes,
+// views and every backend-specific producer proof belong to one pair.
+constexpr bool cinema_pair_admissible(
+    const CinemaPairInput& input) noexcept {
+    if (!input.native_asymmetric_required) {
+        return true;
+    }
+    return input.slot_matches_pair_and_generation &&
+        input.views_complete &&
+        input.factory_mask == 0x3u &&
+        native_temporal_proof_sufficient(
+            input.temporal_backend_active, input.temporal_mask, 0x3u) &&
+        (!input.dlss_input_required || input.dlss_input_mask == 0x3u);
+}
+
+// Each cache carries the projection class of the immutable pixels it owns.
+// The final presenter must use that exact class regardless of Stereo/AER
+// cadence.
 constexpr bool cinema_presentation_uses_native_asymmetric(
     const CinemaPresentationInput& input) noexcept {
-    return input.packed_pair_native_asymmetric;
+    return input.packed_pair_native_asymmetric ||
+        (input.sequential_aer_pair_available &&
+            input.sequential_aer_pair_native_asymmetric);
 }
 
 struct PreflightInput {
@@ -107,12 +145,10 @@ struct PreflightInput {
     bool automatic_full_vr_camera_active{};
     bool cinema_full_vr_enabled{};
     bool force_mono_cinema{};
-    bool aer_presentation{};
 };
 
 constexpr bool preflight_ready(const PreflightInput& input) noexcept {
     const bool automatic_full_vr =
-        !input.aer_presentation &&
         input.cinema_mode &&
         input.automatic_full_vr_camera_active &&
         input.cinema_full_vr_enabled &&
