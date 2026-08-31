@@ -12,28 +12,32 @@ endif()
 
 string(REGEX MATCHALL "g_config\\.presentation_scale" slider_reads "${source}")
 list(LENGTH slider_reads slider_read_count)
-if(NOT slider_read_count EQUAL 3)
+if(NOT slider_read_count EQUAL 4)
     message(FATAL_ERROR
-        "Presentation Size must have exactly three reads (INI, config log, final OpenXR); found ${slider_read_count}")
+        "Presentation Size must have exactly four reads (INI, Alt producer coupling, config log, final OpenXR); found ${slider_read_count}")
 endif()
 
 string(SUBSTRING "${source}" 0 ${final_hook_position} upstream_source)
 string(REGEX MATCHALL "g_config\\.presentation_scale" upstream_slider_reads
     "${upstream_source}")
 list(LENGTH upstream_slider_reads upstream_slider_read_count)
-if(NOT upstream_slider_read_count EQUAL 2)
+if(NOT upstream_slider_read_count EQUAL 3)
     message(FATAL_ERROR
-        "Presentation Size escaped into producer code before final OpenXR; expected only INI and config-log reads, found ${upstream_slider_read_count}")
+        "Presentation Size has an unexpected upstream read; expected INI, gated Alt producer coupling and config log, found ${upstream_slider_read_count}")
 endif()
 
 foreach(required_fragment IN ITEMS
         "float producer_render_fov_scale()"
+        "float alternate_resize_producer_scale()"
+        "if (!g_config.presentation_black_resize ||"
+        "!g_xr_presentation_window_ready)"
         "ProducerProjectionScales producer_projection_scales("
-        "producer_fovs[eye] = g_xr_views[eye].fov;"
+        "const float alternate_scale = alternate_resize_producer_scale();"
         "presentation=final_submit_only"
         "[FIX:FINAL-OPENXR-PRESENTATION-SIZE V1417 1/2]"
         "[FIX:FINAL-OPENXR-PRESENTATION-SIZE V1417 2/2]"
-        "if (final_presentation_scale < 1.0f)"
+        "if (final_presentation_scale < 1.0f &&"
+        "!presentation_black_resize_requested"
         "const XrRect2Di base_presentation_rect ="
         "const XrFovf base_presentation_fov ="
         "final_presentation_scale,"
@@ -86,4 +90,4 @@ if(final_application_position LESS final_image_rect_position)
         "Presentation Size must be applied after the final route imageRect")
 endif()
 
-message(STATUS "V1417 universal final subimage/FOV Presentation Size contract verified")
+message(STATUS "V1525 standard final presenter and gated Alt producer coupling verified")

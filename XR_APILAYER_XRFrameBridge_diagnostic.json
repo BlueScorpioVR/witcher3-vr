@@ -1,0 +1,10 @@
+{
+  "file_format_version": "1.0.0",
+  "api_layer": {
+    "name": "XR_APILAYER_XRFrameBridge_diagnostic",
+    "library_path": "XR_APILAYER_XRFrameBridge_diagnostic.dll",
+    "api_version": "1.0",
+    "implementation_version": "43",
+    "description": "OFXR Bridge XRFG-V043 SteamVR adaptive presenter"
+  }
+}

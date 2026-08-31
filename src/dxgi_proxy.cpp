@@ -58,11 +58,12 @@
 // byte-for-byte on the V1512 path.
 // [PERF:WORLD-DETAIL-RANGE-CONTROL V1516]
 
-// V1511 keeps the exact V1501 compositor signature and changes only its
-// resolution admission. DLSS can align the actual paired t0/t3 extent down by
-// at most 31 pixels per axis, so compare that pair against the requested
-// resolution with the bounded alignment policy instead of exact equality.
-// [FIX:WITCHER-SENSE-ALIGNED-EXTENT V1511 1/2]
+// V1526 removes the live requested render extent from Witcher Senses
+// admission. Alt. resize can establish that global extent before the exact
+// compositor draw, while the draw's immutable t0/t3 pair already carries its
+// real resolution. Their equal non-zero extent is authoritative; the exact
+// V1501 draw, root, formats, t2 and distinct-resource signature stay required.
+// [FIX:WITCHER-SENSE-DESCRIPTOR-EXTENT-AUTHORITY V1526 1/2]
 // V1509 starts physically from V1508. Runtime diagnostics proved that exact
 // AER HUD tag/capture publication succeeded but every pre-Execute snapshot had
 // draw=0: the old AFW-gameplay scene-pair gate prevented the scene-only HUD PSO
@@ -486,6 +487,7 @@ struct Config {
     bool mode3_aer_presentation{false};
     float resolution_scale{1.0f};
     float presentation_scale{0.9f};
+    bool presentation_black_resize{};
     float world_detail_range{1.0f};
     // Native asymmetric producer geometry is always the raw runtime geometry.
     // Presentation Size is consumed only by the final OpenXR presenter.
@@ -1376,6 +1378,13 @@ ID3D12RootSignature* g_xr_cinema_projection_root_signature{};
 ID3D12PipelineState* g_xr_cinema_projection_pipeline{};
 ID3D12DescriptorHeap* g_xr_cinema_projection_srv_heap{};
 UINT g_xr_cinema_projection_srv_increment{};
+ID3D12RootSignature* g_xr_presentation_window_root_signature{};
+ID3D12PipelineState* g_xr_presentation_window_pipeline{};
+ID3D12DescriptorHeap* g_xr_presentation_window_srv_heap{};
+UINT g_xr_presentation_window_srv_increment{};
+std::array<ID3D12Resource*, kXrCommandAllocatorCount>
+    g_xr_presentation_window_scratch{};
+bool g_xr_presentation_window_ready{};
 std::atomic<bool> g_mode3_hud_layer_available{};
 bool g_xr_resources_ready{};
 IDXGISwapChain* g_game_swapchain{};
@@ -1858,6 +1867,18 @@ float producer_render_fov_scale() {
         1.0f / cover_fraction, 0.01f, 2.0f);
 }
 
+// [TRIAL:ALT-RESIZE-PRODUCER-COUPLING V1525 1/4] The black-canvas route
+// cannot repair perspective after the completed image has been rendered.
+// Narrow the producer's tangent interval by the same amount as the final
+// optical-centred placement. The default presenter remains producer-neutral.
+float alternate_resize_producer_scale() {
+    if (!g_config.presentation_black_resize ||
+        !g_xr_presentation_window_ready) {
+        return 1.0f;
+    }
+    return std::clamp(g_config.presentation_scale, 0.5f, 1.0f);
+}
+
 struct ProducerProjectionScales {
     float horizontal{1.0f};
     float vertical{1.0f};
@@ -1876,6 +1897,7 @@ struct ProjectionFloatRect {
 // unavailable, conservatively cover the complete rectangular runtime FOV.
 ProducerProjectionScales producer_projection_scales(
     float left, float right, float down, float up) {
+    const float alternate_scale = alternate_resize_producer_scale();
     const float horizontal_span = right - left;
     const float vertical_span = up - down;
     if (g_config.fullscreen_projection &&
@@ -1897,16 +1919,18 @@ ProducerProjectionScales producer_projection_scales(
             return {
                 std::clamp(
                     2.0f * half_tan_x /
-                        horizontal_span,
+                        horizontal_span * alternate_scale,
                     0.01f, 2.0f),
                 std::clamp(
                     2.0f * half_tan_y /
-                        vertical_span,
+                        vertical_span * alternate_scale,
                     0.01f, 2.0f)};
         }
     }
     const float cover_scale = producer_render_fov_scale();
-    return {cover_scale, cover_scale};
+    return {
+        cover_scale * alternate_scale,
+        cover_scale * alternate_scale};
 }
 
 bool ensure_stereo_eye_cache(const D3D12_RESOURCE_DESC& source_desc);
@@ -2929,12 +2953,20 @@ bool initialize_native_asymmetric_pair(uint64_t pair_id) {
         g_xr_views.size() < 2 || pair_id == 0 || pair_id == UINT64_MAX) {
         return false;
     }
-    // Freeze the raw runtime FOV into the native producer. Presentation Size
-    // is deliberately absent from render, temporal, DLSS and AFW geometry.
+    // [TRIAL:ALT-RESIZE-PRODUCER-COUPLING V1525 2/4] Freeze the exact FOV
+    // rendered by the native producer. Alt. resize scales its tangent interval
+    // here so temporal, DLSS and AFW metadata follow the same camera.
     std::array<XrFovf, 2> producer_fovs{};
+    const float alternate_scale = alternate_resize_producer_scale();
     for (uint32_t eye = 0; eye < 2; ++eye) {
         w3vr::openxr_eye_geometry::AsymmetricProjectionDescriptor descriptor{};
         producer_fovs[eye] = g_xr_views[eye].fov;
+        if (alternate_scale < 1.0f &&
+            !w3vr::openxr_eye_geometry::scale_asymmetric_projection_fov(
+                producer_fovs[eye], alternate_scale,
+                producer_fovs[eye])) {
+            return false;
+        }
         if (!w3vr::openxr_eye_geometry::
                 derive_asymmetric_projection_descriptor(
                     producer_fovs[eye], 1, 1, descriptor)) {
@@ -13878,13 +13910,11 @@ bool witcher_sense_history_input_signature_matches(
         t3.resource == nullptr ||
         t3.kind != WitcherSenseDescriptorKind::Auxiliary ||
         t0.resource == t2.resource || t0.resource == t3.resource ||
-        t2.resource == t3.resource ||
-        g_game_render_width == 0 || g_game_render_height == 0) {
+        t2.resource == t3.resource) {
         return false;
     }
     return w3vr::witcher_sense::compositor_extent_matches(
-        t0.width, t0.height, t3.width, t3.height,
-        g_game_render_width, g_game_render_height);
+        t0.width, t0.height, t3.width, t3.height);
 }
 
 bool resolve_witcher_sense_history_target(
@@ -14096,6 +14126,8 @@ void load_config() {
             "openxr", "mode3_aer_presentation", false);
         g_config.resolution_scale = std::clamp(read_ini_float("openxr", "resolution_scale", 1.0f), 0.25f, 2.0f);
         g_config.presentation_scale = std::clamp(read_ini_float("openxr", "presentation_scale", 0.9f), 0.5f, 1.0f);
+        g_config.presentation_black_resize = read_ini_bool(
+            "openxr", "presentation_black_resize", false);
         g_config.world_detail_range =
             w3vr::render_proxy_distance::clamp_world_detail_range(
                 read_ini_float("openxr", "world_detail_range", 1.0f));
@@ -14568,11 +14600,12 @@ void load_config() {
                 g_config.runtime_diagnostics ? 1 : 0);
         }
 
-        log_line("Config openxr enabled=%d mode=%d resolution_scale=%.3f presentation_scale=%.3f native_stereo=%d fullscreen_projection=%d mono_shift=%d reverse enabled=%d periodic=%d unmap=%d cbv=%d active_nudge=%d nudge=%.3f start=%d cycle=%d pulse=%d orbit_probe=%d orbit_interval=%d orbit_max=%d copy_probe=%d copy_max=%d stereo_probe=%d geometry_shift=%d",
+        log_line("Config openxr enabled=%d mode=%d resolution_scale=%.3f presentation_scale=%.3f presentation_black_resize=%d native_stereo=%d fullscreen_projection=%d mono_shift=%d reverse enabled=%d periodic=%d unmap=%d cbv=%d active_nudge=%d nudge=%.3f start=%d cycle=%d pulse=%d orbit_probe=%d orbit_interval=%d orbit_max=%d copy_probe=%d copy_max=%d stereo_probe=%d geometry_shift=%d",
             g_config.openxr_enabled,
             g_config.openxr_mode,
             g_config.resolution_scale,
             g_config.presentation_scale,
+            g_config.presentation_black_resize ? 1 : 0,
             native_stereo_runtime_enabled() ? 1 : 0,
             g_config.fullscreen_projection ? 1 : 0,
             clean_mono_transport_active()
@@ -43101,10 +43134,11 @@ void ensure_initialized() {
                 g_config.puredark_afw_enabled ? 1 : 0,
                 focus_projection_shader_registry_enabled() ? 1 : 0,
                 g_config.optiscaler_enabled ? 1 : 0);
-            // [FIX:WITCHER-SENSE-ALIGNED-EXTENT V1511 2/2]
+            // [FIX:WITCHER-SENSE-DESCRIPTOR-EXTENT-AUTHORITY V1526 2/2]
             log_line(
-                "V1511 witcher_sense_extent=paired_t0_t3 "
-                "requested_trim_max=31 dlss_alignment=accepted "
+                "V1526 witcher_sense_extent=paired_descriptor_authority "
+                "live_requested_extent=diagnostic_only "
+                "alt_resize_early_publication=isolated "
                 "pso_draw_root_formats_descriptors=V1501_unchanged");
             log_line(
                 "V1517 world_detail_range=%.3f smoke_basis=V1514 "
@@ -44644,6 +44678,444 @@ bool render_supersampled_fit_projection(
     return true;
 }
 
+// [TRIAL:ALT-RESIZE-PRODUCER-COUPLING V1525 3/4] V1119's alternate presenter
+// proved the full-surface transport needed by runtimes which mishandle a
+// reduced projection imageRect. The modern renderer composites retained HUD
+// after the scene transport, so this replacement operates once on the final
+// projection slices: copy them to allocator-owned scratch, clear to black,
+// and draw the selected source rectangle into its smaller tangent window.
+bool initialize_presentation_window_pipeline(
+    DXGI_FORMAT target_format,
+    uint32_t width,
+    uint32_t height) {
+    if (g_d3d12_device == nullptr || width == 0 || height == 0 ||
+        !initialize_dxc()) {
+        return false;
+    }
+
+    static constexpr char kVertexShader[] = R"(
+cbuffer PresentationConstants : register(b0) {
+    float4 clip_top_left;
+    float4 clip_top_right;
+    float4 clip_bottom_left;
+    float4 clip_bottom_right;
+    float4 source_uv_bounds;
+    uint4 presentation_control;
+};
+struct VertexOutput {
+    float4 position : SV_Position;
+    float2 uv : TEXCOORD0;
+};
+VertexOutput vs_main(uint vertex_id : SV_VertexID) {
+    VertexOutput output;
+    if (vertex_id == 0) {
+        output.position = clip_top_left;
+        output.uv = source_uv_bounds.xy;
+    } else if (vertex_id == 1 || vertex_id == 4) {
+        output.position = clip_top_right;
+        output.uv = source_uv_bounds.zy;
+    } else if (vertex_id == 2 || vertex_id == 3) {
+        output.position = clip_bottom_left;
+        output.uv = source_uv_bounds.xw;
+    } else {
+        output.position = clip_bottom_right;
+        output.uv = source_uv_bounds.zw;
+    }
+    return output;
+}
+)";
+    static constexpr char kPixelShader[] = R"(
+cbuffer PresentationConstants : register(b0) {
+    float4 clip_top_left;
+    float4 clip_top_right;
+    float4 clip_bottom_left;
+    float4 clip_bottom_right;
+    float4 source_uv_bounds;
+    uint4 presentation_control;
+};
+Texture2DArray<float4> completed_projection : register(t0);
+SamplerState linear_sampler : register(s0);
+struct PixelInput {
+    float4 position : SV_Position;
+    float2 uv : TEXCOORD0;
+};
+float4 ps_main(PixelInput input) : SV_Target0 {
+    float4 color = completed_projection.SampleLevel(
+        linear_sampler,
+        float3(saturate(input.uv), presentation_control.x), 0.0);
+    color.a = 1.0;
+    return color;
+}
+)";
+
+    auto compile_stage = [](const char* source_text, size_t source_size,
+                            const wchar_t* entry,
+                            const wchar_t* target) -> IDxcBlob* {
+        DxcBuffer source{source_text, source_size, DXC_CP_UTF8};
+        LPCWSTR arguments[] = {L"-E", entry, L"-T", target, L"-O3"};
+        IDxcResult* result{};
+        if (FAILED(g_dxc_compiler->Compile(
+                &source, arguments,
+                static_cast<UINT32>(std::size(arguments)),
+                nullptr, IID_PPV_ARGS(&result))) ||
+            result == nullptr) {
+            return nullptr;
+        }
+        HRESULT status{};
+        result->GetStatus(&status);
+        if (FAILED(status)) {
+            IDxcBlobUtf8* errors{};
+            result->GetOutput(
+                DXC_OUT_ERRORS, IID_PPV_ARGS(&errors), nullptr);
+            log_line(
+                "Presentation black-resize shader compile failed: %s",
+                errors != nullptr
+                    ? errors->GetStringPointer() : "unknown");
+            if (errors != nullptr) errors->Release();
+            result->Release();
+            return nullptr;
+        }
+        IDxcBlob* shader{};
+        if (FAILED(result->GetOutput(
+                DXC_OUT_OBJECT, IID_PPV_ARGS(&shader), nullptr))) {
+            shader = nullptr;
+        }
+        result->Release();
+        return shader;
+    };
+
+    IDxcBlob* vertex_shader = compile_stage(
+        kVertexShader, sizeof(kVertexShader) - 1,
+        L"vs_main", L"vs_6_0");
+    IDxcBlob* pixel_shader = compile_stage(
+        kPixelShader, sizeof(kPixelShader) - 1,
+        L"ps_main", L"ps_6_0");
+    if (vertex_shader == nullptr || pixel_shader == nullptr) {
+        if (vertex_shader != nullptr) vertex_shader->Release();
+        if (pixel_shader != nullptr) pixel_shader->Release();
+        return false;
+    }
+
+    D3D12_DESCRIPTOR_RANGE range{};
+    range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    range.NumDescriptors = 1;
+    range.BaseShaderRegister = 0;
+    range.OffsetInDescriptorsFromTableStart = 0;
+    D3D12_ROOT_PARAMETER parameters[2]{};
+    parameters[0].ParameterType =
+        D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    parameters[0].DescriptorTable = {1, &range};
+    parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    parameters[1].ParameterType =
+        D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    parameters[1].Constants.ShaderRegister = 0;
+    parameters[1].Constants.Num32BitValues = 24;
+    parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    D3D12_STATIC_SAMPLER_DESC sampler{};
+    sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    sampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sampler.ShaderRegister = 0;
+    sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    sampler.MaxLOD = D3D12_FLOAT32_MAX;
+    D3D12_ROOT_SIGNATURE_DESC root_desc{};
+    root_desc.NumParameters = static_cast<UINT>(std::size(parameters));
+    root_desc.pParameters = parameters;
+    root_desc.NumStaticSamplers = 1;
+    root_desc.pStaticSamplers = &sampler;
+    root_desc.Flags =
+        D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+    ID3DBlob* serialized{};
+    ID3DBlob* errors{};
+    const auto serialize_hr = D3D12SerializeRootSignature(
+        &root_desc, D3D_ROOT_SIGNATURE_VERSION_1,
+        &serialized, &errors);
+    if (FAILED(serialize_hr) || serialized == nullptr ||
+        FAILED(g_d3d12_device->CreateRootSignature(
+            0,
+            serialized != nullptr
+                ? serialized->GetBufferPointer() : nullptr,
+            serialized != nullptr
+                ? serialized->GetBufferSize() : 0,
+            IID_PPV_ARGS(
+                &g_xr_presentation_window_root_signature)))) {
+        log_line(
+            "Presentation black-resize root signature failed hr=0x%08X: %s",
+            static_cast<unsigned>(serialize_hr),
+            errors != nullptr
+                ? static_cast<const char*>(errors->GetBufferPointer())
+                : "unknown");
+        if (errors != nullptr) errors->Release();
+        if (serialized != nullptr) serialized->Release();
+        vertex_shader->Release();
+        pixel_shader->Release();
+        return false;
+    }
+    if (errors != nullptr) errors->Release();
+    serialized->Release();
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pipeline_desc{};
+    pipeline_desc.pRootSignature =
+        g_xr_presentation_window_root_signature;
+    pipeline_desc.VS = {
+        vertex_shader->GetBufferPointer(),
+        vertex_shader->GetBufferSize()};
+    pipeline_desc.PS = {
+        pixel_shader->GetBufferPointer(),
+        pixel_shader->GetBufferSize()};
+    pipeline_desc.BlendState.RenderTarget[0].RenderTargetWriteMask =
+        D3D12_COLOR_WRITE_ENABLE_ALL;
+    pipeline_desc.SampleMask = UINT_MAX;
+    pipeline_desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    pipeline_desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    pipeline_desc.RasterizerState.DepthClipEnable = TRUE;
+    pipeline_desc.DepthStencilState.DepthEnable = FALSE;
+    pipeline_desc.DepthStencilState.StencilEnable = FALSE;
+    pipeline_desc.PrimitiveTopologyType =
+        D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pipeline_desc.NumRenderTargets = 1;
+    pipeline_desc.RTVFormats[0] = target_format;
+    pipeline_desc.SampleDesc.Count = 1;
+    const auto pipeline_hr = g_d3d12_device->CreateGraphicsPipelineState(
+        &pipeline_desc,
+        IID_PPV_ARGS(&g_xr_presentation_window_pipeline));
+    vertex_shader->Release();
+    pixel_shader->Release();
+    if (FAILED(pipeline_hr) ||
+        g_xr_presentation_window_pipeline == nullptr) {
+        log_line(
+            "Presentation black-resize pipeline failed hr=0x%08X",
+            static_cast<unsigned>(pipeline_hr));
+        return false;
+    }
+
+    D3D12_DESCRIPTOR_HEAP_DESC heap_desc{};
+    heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    heap_desc.NumDescriptors = kXrCommandAllocatorCount;
+    heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    if (FAILED(g_d3d12_device->CreateDescriptorHeap(
+            &heap_desc,
+            IID_PPV_ARGS(&g_xr_presentation_window_srv_heap)))) {
+        return false;
+    }
+    g_xr_presentation_window_srv_increment =
+        g_d3d12_device->GetDescriptorHandleIncrementSize(heap_desc.Type);
+
+    D3D12_HEAP_PROPERTIES default_heap{};
+    default_heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC scratch_desc{};
+    scratch_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    scratch_desc.Width = width;
+    scratch_desc.Height = height;
+    scratch_desc.DepthOrArraySize = 2;
+    scratch_desc.MipLevels = 1;
+    scratch_desc.Format = target_format;
+    scratch_desc.SampleDesc.Count = 1;
+    scratch_desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    for (uint32_t index = 0;
+         index < kXrCommandAllocatorCount; ++index) {
+        if (FAILED(g_d3d12_device->CreateCommittedResource(
+                &default_heap, D3D12_HEAP_FLAG_NONE,
+                &scratch_desc, D3D12_RESOURCE_STATE_COPY_DEST,
+                nullptr,
+                IID_PPV_ARGS(
+                    &g_xr_presentation_window_scratch[index])))) {
+            return false;
+        }
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc{};
+        srv_desc.Format = target_format;
+        srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+        srv_desc.Shader4ComponentMapping =
+            D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv_desc.Texture2DArray.MostDetailedMip = 0;
+        srv_desc.Texture2DArray.MipLevels = 1;
+        srv_desc.Texture2DArray.FirstArraySlice = 0;
+        srv_desc.Texture2DArray.ArraySize = 2;
+        auto srv_cpu = g_xr_presentation_window_srv_heap
+            ->GetCPUDescriptorHandleForHeapStart();
+        srv_cpu.ptr += static_cast<SIZE_T>(index) *
+            g_xr_presentation_window_srv_increment;
+        g_d3d12_device->CreateShaderResourceView(
+            g_xr_presentation_window_scratch[index],
+            &srv_desc, srv_cpu);
+    }
+    log_line(
+        "V1522 presentation black-resize pipeline ready scratch=%ux%u allocators=%zu format=%u",
+        width, height, kXrCommandAllocatorCount,
+        static_cast<unsigned>(target_format));
+    return true;
+}
+
+bool render_presentation_black_resize(
+    XrEyeSwapchain& target_swapchain,
+    uint32_t image_index,
+    const w3vr::openxr_eye_geometry::BlackResizePresentation
+        presentations[2]) {
+    if (!g_xr_presentation_window_ready ||
+        g_xr_command_list == nullptr ||
+        g_xr_presentation_window_pipeline == nullptr ||
+        g_xr_presentation_window_root_signature == nullptr ||
+        g_xr_presentation_window_srv_heap == nullptr ||
+        g_set_descriptor_heaps == nullptr ||
+        g_set_graphics_root_signature == nullptr ||
+        g_set_pipeline_state == nullptr ||
+        g_set_graphics_root_descriptor_table == nullptr ||
+        g_draw_instanced == nullptr ||
+        image_index >= target_swapchain.images.size() ||
+        image_index * 2 + 1 >= target_swapchain.rtvs.size() ||
+        g_xr_command_allocator_index >= kXrCommandAllocatorCount) {
+        return false;
+    }
+    auto* const target =
+        target_swapchain.images[image_index].texture;
+    auto* const scratch = g_xr_presentation_window_scratch[
+        g_xr_command_allocator_index];
+    if (target == nullptr || scratch == nullptr) {
+        return false;
+    }
+    for (uint32_t eye = 0; eye < 2; ++eye) {
+        const auto& presentation = presentations[eye];
+        if (!std::isfinite(presentation.target_left_px) ||
+            !std::isfinite(presentation.target_top_px) ||
+            !std::isfinite(presentation.target_right_px) ||
+            !std::isfinite(presentation.target_bottom_px) ||
+            !std::isfinite(presentation.source_left_uv) ||
+            !std::isfinite(presentation.source_top_uv) ||
+            !std::isfinite(presentation.source_right_uv) ||
+            !std::isfinite(presentation.source_bottom_uv) ||
+            presentation.target_right_px <=
+                presentation.target_left_px ||
+            presentation.target_bottom_px <=
+                presentation.target_top_px ||
+            presentation.source_right_uv <=
+                presentation.source_left_uv ||
+            presentation.source_bottom_uv <=
+                presentation.source_top_uv) {
+            return false;
+        }
+    }
+
+    D3D12_RESOURCE_BARRIER copy_barriers[2]{};
+    copy_barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    copy_barriers[0].Transition.pResource = target;
+    copy_barriers[0].Transition.StateBefore =
+        D3D12_RESOURCE_STATE_RENDER_TARGET;
+    copy_barriers[0].Transition.StateAfter =
+        D3D12_RESOURCE_STATE_COPY_SOURCE;
+    copy_barriers[0].Transition.Subresource =
+        D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    copy_barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    copy_barriers[1].Transition.pResource = scratch;
+    copy_barriers[1].Transition.StateBefore =
+        D3D12_RESOURCE_STATE_COPY_DEST;
+    copy_barriers[1].Transition.StateAfter =
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    copy_barriers[1].Transition.Subresource =
+        D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    g_xr_command_list->ResourceBarrier(1, &copy_barriers[0]);
+    for (uint32_t eye = 0; eye < 2; ++eye) {
+        D3D12_TEXTURE_COPY_LOCATION destination{};
+        destination.pResource = scratch;
+        destination.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        destination.SubresourceIndex = eye;
+        D3D12_TEXTURE_COPY_LOCATION source{};
+        source.pResource = target;
+        source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        source.SubresourceIndex = eye;
+        g_xr_command_list->CopyTextureRegion(
+            &destination, 0, 0, 0, &source, nullptr);
+    }
+    std::swap(
+        copy_barriers[0].Transition.StateBefore,
+        copy_barriers[0].Transition.StateAfter);
+    g_xr_command_list->ResourceBarrier(1, &copy_barriers[0]);
+    g_xr_command_list->ResourceBarrier(1, &copy_barriers[1]);
+
+    ID3D12DescriptorHeap* heaps[]{
+        g_xr_presentation_window_srv_heap};
+    g_set_descriptor_heaps(g_xr_command_list, 1, heaps);
+    g_set_graphics_root_signature(
+        g_xr_command_list,
+        g_xr_presentation_window_root_signature);
+    g_set_pipeline_state(
+        g_xr_command_list,
+        g_xr_presentation_window_pipeline);
+    g_xr_command_list->IASetPrimitiveTopology(
+        D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    D3D12_VIEWPORT viewport{
+        0.0f, 0.0f,
+        static_cast<float>(target_swapchain.width),
+        static_cast<float>(target_swapchain.height),
+        0.0f, 1.0f};
+    D3D12_RECT scissor{
+        0, 0,
+        static_cast<LONG>(target_swapchain.width),
+        static_cast<LONG>(target_swapchain.height)};
+    g_xr_command_list->RSSetViewports(1, &viewport);
+    g_xr_command_list->RSSetScissorRects(1, &scissor);
+    auto srv_gpu = g_xr_presentation_window_srv_heap
+        ->GetGPUDescriptorHandleForHeapStart();
+    srv_gpu.ptr += static_cast<UINT64>(
+        g_xr_command_allocator_index) *
+        g_xr_presentation_window_srv_increment;
+    g_set_graphics_root_descriptor_table(
+        g_xr_command_list, 0, srv_gpu);
+
+    struct PresentationConstants {
+        float clip_positions[16]{};
+        float source_uv_bounds[4]{};
+        uint32_t presentation_control[4]{};
+    };
+    static_assert(sizeof(PresentationConstants) == 24 * sizeof(uint32_t));
+    for (uint32_t eye = 0; eye < 2; ++eye) {
+        const auto& presentation = presentations[eye];
+        const float left = 2.0f * presentation.target_left_px /
+            static_cast<float>(target_swapchain.width) - 1.0f;
+        const float right = 2.0f * presentation.target_right_px /
+            static_cast<float>(target_swapchain.width) - 1.0f;
+        const float top = 1.0f - 2.0f * presentation.target_top_px /
+            static_cast<float>(target_swapchain.height);
+        const float bottom = 1.0f -
+            2.0f * presentation.target_bottom_px /
+                static_cast<float>(target_swapchain.height);
+        PresentationConstants constants{};
+        const float clip_positions[16]{
+            left, top, 0.5f, 1.0f,
+            right, top, 0.5f, 1.0f,
+            left, bottom, 0.5f, 1.0f,
+            right, bottom, 0.5f, 1.0f};
+        memcpy(
+            constants.clip_positions, clip_positions,
+            sizeof(clip_positions));
+        constants.source_uv_bounds[0] =
+            presentation.source_left_uv;
+        constants.source_uv_bounds[1] =
+            presentation.source_top_uv;
+        constants.source_uv_bounds[2] =
+            presentation.source_right_uv;
+        constants.source_uv_bounds[3] =
+            presentation.source_bottom_uv;
+        constants.presentation_control[0] = eye;
+        g_xr_command_list->SetGraphicsRoot32BitConstants(
+            1, 24, &constants, 0);
+        const auto rtv = target_swapchain.rtvs[
+            image_index * 2 + eye];
+        const float black[]{0.0f, 0.0f, 0.0f, 1.0f};
+        g_xr_command_list->ClearRenderTargetView(
+            rtv, black, 0, nullptr);
+        g_xr_command_list->OMSetRenderTargets(
+            1, &rtv, FALSE, nullptr);
+        g_draw_instanced(g_xr_command_list, 6, 1, 0, 0);
+    }
+
+    std::swap(
+        copy_barriers[1].Transition.StateBefore,
+        copy_barriers[1].Transition.StateAfter);
+    g_xr_command_list->ResourceBarrier(1, &copy_barriers[1]);
+    return true;
+}
+
 // [FIX:VISIBILITY-MASK-FIT 2/7] Query the lens-visible contour in the
 // extension's z=-1 view plane. Its x/y values are tangent-space coordinates,
 // so the largest absolute extent around optical zero is exactly the symmetric
@@ -44876,6 +45348,10 @@ bool create_openxr_swapchains() {
     swapchain_info.usageFlags = XR_SWAPCHAIN_USAGE_SAMPLED_BIT |
         XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT |
         XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
+    if (g_config.presentation_black_resize) {
+        swapchain_info.usageFlags |=
+            XR_SWAPCHAIN_USAGE_TRANSFER_SRC_BIT;
+    }
     swapchain_info.format = selected_format;
     swapchain_info.sampleCount = config.recommendedSwapchainSampleCount;
     swapchain_info.width = swapchain.width;
@@ -44964,6 +45440,18 @@ bool create_openxr_swapchains() {
     if (!cinema_projection_ready && g_config.openxr_mode == 3) {
         log_line(
             "Cinema anchored stereo projection unavailable; mono quad bootstrap retained");
+    }
+    if (g_config.presentation_black_resize &&
+        swapchain_info.sampleCount == 1) {
+        g_xr_presentation_window_ready =
+            initialize_presentation_window_pipeline(
+                selected_format, swapchain.width, swapchain.height);
+    }
+    if (g_config.presentation_black_resize &&
+        !g_xr_presentation_window_ready) {
+        log_line(
+            "V1522 presentation black-resize unavailable; standard imageRect presenter retained samples=%u",
+            swapchain_info.sampleCount);
     }
 
     // [FIX:XR-ALLOCATOR-PIPELINING 2/4] One command list is still enough: a
@@ -47661,6 +48149,9 @@ void render_openxr_test_frame(
     std::array<bool, 2> asymmetric_submit_source_desc_valid{};
     std::array<UINT, 2> asymmetric_submit_copy_width{};
     std::array<UINT, 2> asymmetric_submit_copy_height{};
+    w3vr::openxr_eye_geometry::BlackResizePresentation
+        black_resize_presentations[2]{};
+    bool presentation_black_resize_active{};
     // Until REDengine exposes its GUI manager, startup/frontend frames are menus.
     // Treating the unknown state as gameplay presents them as two world projections.
     const auto current_present = g_present_count.load(std::memory_order_relaxed);
@@ -50482,6 +50973,40 @@ void render_openxr_test_frame(
             // projection boundary; no upstream buffer or route sees it.
             const float final_presentation_scale = std::clamp(
                 g_config.presentation_scale, 0.5f, 1.0f);
+            const bool presentation_black_resize_requested =
+                g_config.presentation_black_resize &&
+                final_presentation_scale < 1.0f &&
+                !spatial_panel_active &&
+                g_xr_presentation_window_ready;
+            bool black_resize_eye_valid[2]{};
+            const auto apply_standard_final_presentation =
+                [&](uint32_t eye) {
+                    const XrRect2Di base_presentation_rect =
+                        projection_views[eye].subImage.imageRect;
+                    const XrFovf base_presentation_fov =
+                        projection_views[eye].fov;
+                    XrFovf requested_presentation_fov{};
+                    w3vr::openxr_eye_geometry::SymmetricEyeSubimage
+                        final_presentation{};
+                    if (w3vr::openxr_eye_geometry::
+                            scale_asymmetric_projection_fov(
+                                base_presentation_fov,
+                                final_presentation_scale,
+                                requested_presentation_fov) &&
+                        w3vr::openxr_eye_geometry::
+                            derive_symmetric_eye_subimage(
+                                base_presentation_fov,
+                                requested_presentation_fov,
+                                base_presentation_rect,
+                                final_presentation)) {
+                        projection_views[eye].subImage.imageRect =
+                            final_presentation.image_rect;
+                        projection_views[eye].fov =
+                            final_presentation.represented_fov;
+                        return true;
+                    }
+                    return false;
+                };
             for (uint32_t eye = 0; eye < 2; ++eye) {
                 const uint32_t render_source_eye = g_engine_dual_render_active.load() &&
                         g_config.engine_sync_swap_eyes
@@ -50713,30 +51238,25 @@ void render_openxr_test_frame(
                 // boundaries. This narrows the visible window without
                 // resampling the completed image, so fixed foveated rendering
                 // retains its native center and scale 1 remains bit-exact.
-                if (final_presentation_scale < 1.0f) {
-                    const XrRect2Di base_presentation_rect =
-                        projection_views[eye].subImage.imageRect;
-                    const XrFovf base_presentation_fov =
-                        projection_views[eye].fov;
-                    XrFovf requested_presentation_fov{};
-                    w3vr::openxr_eye_geometry::SymmetricEyeSubimage
-                        final_presentation{};
-                    if (w3vr::openxr_eye_geometry::
-                            scale_asymmetric_projection_fov(
-                                base_presentation_fov,
-                                final_presentation_scale,
-                                requested_presentation_fov) &&
+                if (final_presentation_scale < 1.0f &&
+                    !presentation_black_resize_requested) {
+                    apply_standard_final_presentation(eye);
+                } else if (presentation_black_resize_requested) {
+                    // The source pixels already carry the producer-coupled
+                    // FOV. Submit their reduced placement inside the runtime's
+                    // raw eye FOV so OpenXR receives the headset geometry.
+                    const XrFovf runtime_submission_fov =
+                        eye < g_xr_views.size()
+                        ? g_xr_views[eye].fov
+                        : projection_views[eye].fov;
+                    black_resize_eye_valid[eye] =
                         w3vr::openxr_eye_geometry::
-                            derive_symmetric_eye_subimage(
-                                base_presentation_fov,
-                                requested_presentation_fov,
-                                base_presentation_rect,
-                                final_presentation)) {
-                        projection_views[eye].subImage.imageRect =
-                            final_presentation.image_rect;
-                        projection_views[eye].fov =
-                            final_presentation.represented_fov;
-                    }
+                            derive_black_resize_presentation(
+                                runtime_submission_fov,
+                                projection_views[eye].subImage.imageRect,
+                                swapchain.width, swapchain.height,
+                                final_presentation_scale,
+                                black_resize_presentations[eye]);
                 }
                 if (g_config.hmd_freelook &&
                     g_hmd_render_fov_valid.load() &&
@@ -50855,6 +51375,16 @@ void render_openxr_test_frame(
                 }
                 projection_views[eye].subImage.imageArrayIndex = eye;
             }
+            presentation_black_resize_active =
+                presentation_black_resize_requested &&
+                black_resize_eye_valid[0] &&
+                black_resize_eye_valid[1];
+            if (presentation_black_resize_requested &&
+                !presentation_black_resize_active) {
+                for (uint32_t eye = 0; eye < 2; ++eye) {
+                    apply_standard_final_presentation(eye);
+                }
+            }
         }
 
     // [FIX:AER-AFW-POST-HUD V1189 9/9] AFW scene evaluation and real/generated
@@ -50919,6 +51449,36 @@ void render_openxr_test_frame(
                 if (take_bounded_log_slot(transient_hud_miss_logs, 8)) {
                     log_line(
                         "Mode 3 projection HUD composite transient miss image=%u present=%llu; retrying next frame",
+                        image_index,
+                        static_cast<unsigned long long>(current_present));
+                }
+            }
+        }
+
+        // [TRIAL:ALT-RESIZE-PRODUCER-COUPLING V1525 4/4] This pass deliberately
+        // runs after retained-HUD composition. It therefore replaces the
+        // imageRect presenter for the complete eye image instead of shrinking
+        // only the scene underneath an unscaled HUD.
+        if (command_list_recording && submitted &&
+            presentation_black_resize_active) {
+            if (render_presentation_black_resize(
+                    swapchain, image_index,
+                    black_resize_presentations)) {
+                for (uint32_t eye = 0; eye < 2; ++eye) {
+                    projection_views[eye].fov =
+                        black_resize_presentations[eye].submitted_fov;
+                }
+                static std::atomic<bool> route_logged{};
+                if (!route_logged.exchange(true)) {
+                    log_line(
+                        "V1525 presentation route=black_resize full_image=1 post_hud=1 producer_coupled=1 submitted_fov=runtime image_rect=base");
+                }
+            } else {
+                presentation_black_resize_active = false;
+                static std::atomic<uint32_t> failure_logs{};
+                if (take_bounded_log_slot(failure_logs, 8)) {
+                    log_line(
+                        "V1522 presentation black-resize render unavailable image=%u present=%llu; scale-1 frame retained",
                         image_index,
                         static_cast<unsigned long long>(current_present));
                 }

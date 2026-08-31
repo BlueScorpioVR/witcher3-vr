@@ -6,7 +6,20 @@ param(
 
     [string] $OutputDirectory = (Join-Path (Split-Path -Parent $PSScriptRoot) 'dist'),
 
-    [string] $PureDarkPlugin
+    [string] $PureDarkPlugin,
+
+    [string] $OfxrLayer,
+
+    [string] $OptiScalerDll,
+
+    [string] $OptiScalerIni,
+
+    [string] $AmdFidelityFxDll,
+
+    [string] $AmdFidelityFxUpscalerDll,
+
+    [ValidatePattern('^[A-Za-z0-9._-]+$')]
+    [string] $ArtifactName
 )
 
 $ErrorActionPreference = 'Stop'
@@ -27,7 +40,51 @@ if ([string]::IsNullOrWhiteSpace($PureDarkPlugin)) {
 } else {
     $PureDarkPlugin = [System.IO.Path]::GetFullPath($PureDarkPlugin)
 }
+$ofxrLayerDefault = Join-Path $repositoryRoot `
+    'external/ofxr/XR_APILAYER_XRFrameBridge_diagnostic.dll'
+if ([string]::IsNullOrWhiteSpace($OfxrLayer)) {
+    $OfxrLayer = $ofxrLayerDefault
+} else {
+    $OfxrLayer = [System.IO.Path]::GetFullPath($OfxrLayer)
+}
+$optiscalerDllDefault = Join-Path $repositoryRoot `
+    'external/optiscaler/OptiScaler.dll'
+if ([string]::IsNullOrWhiteSpace($OptiScalerDll)) {
+    $OptiScalerDll = $optiscalerDllDefault
+} else {
+    $OptiScalerDll = [System.IO.Path]::GetFullPath($OptiScalerDll)
+}
+$optiscalerIniDefault = Join-Path $repositoryRoot `
+    'external/optiscaler/OptiScaler.ini'
+if ([string]::IsNullOrWhiteSpace($OptiScalerIni)) {
+    $OptiScalerIni = $optiscalerIniDefault
+} else {
+    $OptiScalerIni = [System.IO.Path]::GetFullPath($OptiScalerIni)
+}
+$amdFidelityFxDllDefault = Join-Path $repositoryRoot `
+    'external/optiscaler/amd_fidelityfx_dx12.dll'
+if ([string]::IsNullOrWhiteSpace($AmdFidelityFxDll)) {
+    $AmdFidelityFxDll = $amdFidelityFxDllDefault
+} else {
+    $AmdFidelityFxDll = [System.IO.Path]::GetFullPath($AmdFidelityFxDll)
+}
+$amdFidelityFxUpscalerDllDefault = Join-Path $repositoryRoot `
+    'external/optiscaler/amd_fidelityfx_upscaler_dx12.dll'
+if ([string]::IsNullOrWhiteSpace($AmdFidelityFxUpscalerDll)) {
+    $AmdFidelityFxUpscalerDll = $amdFidelityFxUpscalerDllDefault
+} else {
+    $AmdFidelityFxUpscalerDll =
+        [System.IO.Path]::GetFullPath($AmdFidelityFxUpscalerDll)
+}
+if ([string]::IsNullOrWhiteSpace($ArtifactName)) {
+    $ArtifactName = "Witcher3VR-$normalizedVersion"
+}
 $pureDarkIni = Join-Path $repositoryRoot 'puredark_afw.ini'
+$ofxrManifest = Join-Path $repositoryRoot `
+    'XR_APILAYER_XRFrameBridge_diagnostic.json'
+$ofxrIni = Join-Path $repositoryRoot 'ofxr_bridge.ini'
+$optiscalerBridgeIni = Join-Path $repositoryRoot 'optiscaler_bridge.ini'
+$optiscalerPayload = Join-Path $repositoryRoot 'OPTISCALER_PAYLOAD.md'
 $releaseDll = Join-Path $repositoryRoot 'build/release/Release/dxgi.dll'
 $launcher = Join-Path $repositoryRoot 'build/release/launcher/Release/Witcher3VRLauncher.exe'
 $openXrLoaderSource = Join-Path $repositoryRoot 'external/openxr-loader'
@@ -81,6 +138,15 @@ foreach ($requiredFile in @(
         $openXrLoader,
         $PureDarkPlugin,
         $pureDarkIni,
+        $OfxrLayer,
+        $ofxrManifest,
+        $ofxrIni,
+        $OptiScalerDll,
+        $OptiScalerIni,
+        $AmdFidelityFxDll,
+        $AmdFidelityFxUpscalerDll,
+        $optiscalerBridgeIni,
+        $optiscalerPayload,
         $exampleIni,
         $readme,
         $license,
@@ -134,6 +200,15 @@ try {
     Copy-Item -LiteralPath $PureDarkPlugin `
         -Destination (Join-Path $binaryStage 'PDAFWPlugin.dll')
     Copy-Item -LiteralPath $pureDarkIni -Destination $binaryStage
+    Copy-Item -LiteralPath $OfxrLayer -Destination `
+        (Join-Path $binaryStage 'XR_APILAYER_XRFrameBridge_diagnostic.dll')
+    Copy-Item -LiteralPath $ofxrManifest -Destination $binaryStage
+    Copy-Item -LiteralPath $ofxrIni -Destination $binaryStage
+    Copy-Item -LiteralPath $OptiScalerDll -Destination $binaryStage
+    Copy-Item -LiteralPath $OptiScalerIni -Destination $binaryStage
+    Copy-Item -LiteralPath $AmdFidelityFxDll -Destination $binaryStage
+    Copy-Item -LiteralPath $AmdFidelityFxUpscalerDll -Destination $binaryStage
+    Copy-Item -LiteralPath $optiscalerBridgeIni -Destination $binaryStage
 
     $modsStage = Join-Path $releaseStage 'mods'
     New-Item -ItemType Directory -Path $modsStage | Out-Null
@@ -162,6 +237,7 @@ try {
     Copy-Item -LiteralPath $readme -Destination $documentationStage
     Copy-Item -LiteralPath $license -Destination $documentationStage
     Copy-Item -LiteralPath $thirdPartyNotices -Destination $documentationStage
+    Copy-Item -LiteralPath $optiscalerPayload -Destination $documentationStage
     Set-Content -LiteralPath (Join-Path $documentationStage 'BUILD.txt') `
         -Value @(
             $normalizedVersion,
@@ -169,7 +245,7 @@ try {
             'Use Diagnostic Logging in the launcher when support logs are needed.'
         ) -Encoding utf8
 
-    $archivePath = Join-Path $OutputDirectory "Witcher3VR-$normalizedVersion.zip"
+    $archivePath = Join-Path $OutputDirectory "$ArtifactName.zip"
     if (Test-Path -LiteralPath $archivePath) {
         Remove-Item -LiteralPath $archivePath -Force
     }
@@ -183,6 +259,22 @@ try {
         (Get-FileHash -LiteralPath $PureDarkPlugin -Algorithm SHA256).Hash
     $pureDarkIniHash =
         (Get-FileHash -LiteralPath $pureDarkIni -Algorithm SHA256).Hash
+    $ofxrLayerHash =
+        (Get-FileHash -LiteralPath $OfxrLayer -Algorithm SHA256).Hash
+    $ofxrManifestHash =
+        (Get-FileHash -LiteralPath $ofxrManifest -Algorithm SHA256).Hash
+    $ofxrIniHash =
+        (Get-FileHash -LiteralPath $ofxrIni -Algorithm SHA256).Hash
+    $optiscalerDllHash =
+        (Get-FileHash -LiteralPath $OptiScalerDll -Algorithm SHA256).Hash
+    $optiscalerIniHash =
+        (Get-FileHash -LiteralPath $OptiScalerIni -Algorithm SHA256).Hash
+    $amdFidelityFxDllHash =
+        (Get-FileHash -LiteralPath $AmdFidelityFxDll -Algorithm SHA256).Hash
+    $amdFidelityFxUpscalerDllHash =
+        (Get-FileHash -LiteralPath $AmdFidelityFxUpscalerDll -Algorithm SHA256).Hash
+    $optiscalerBridgeIniHash =
+        (Get-FileHash -LiteralPath $optiscalerBridgeIni -Algorithm SHA256).Hash
     $movementDlcBundleHash =
         (Get-FileHash -LiteralPath $movementDlcBundle -Algorithm SHA256).Hash
     $movementDlcMetadataHash =
@@ -205,6 +297,14 @@ try {
     $manifestLines += "openxr_loader.sha256=$openXrLoaderHash"
     $manifestLines += "puredark_plugin.sha256=$pureDarkPluginHash"
     $manifestLines += "puredark_ini.sha256=$pureDarkIniHash"
+    $manifestLines += "ofxr_layer.sha256=$ofxrLayerHash"
+    $manifestLines += "ofxr_manifest.sha256=$ofxrManifestHash"
+    $manifestLines += "ofxr_ini.sha256=$ofxrIniHash"
+    $manifestLines += "optiscaler.sha256=$optiscalerDllHash"
+    $manifestLines += "optiscaler_ini.sha256=$optiscalerIniHash"
+    $manifestLines += "amd_fidelityfx.sha256=$amdFidelityFxDllHash"
+    $manifestLines += "amd_fidelityfx_upscaler.sha256=$amdFidelityFxUpscalerDllHash"
+    $manifestLines += "optiscaler_bridge_ini.sha256=$optiscalerBridgeIniHash"
     $manifestLines += "movement_dlc_bundle.sha256=$movementDlcBundleHash"
     $manifestLines += "movement_dlc_metadata.sha256=$movementDlcMetadataHash"
     $manifestLines += "hud_editor_script.sha256=$hudEditorScriptHash"
@@ -215,7 +315,7 @@ try {
     $manifestLines += "first_person_visibility.sha256=$firstPersonVisibilityHash"
     $manifestLines += "archive.sha256=$archiveHash"
 
-    $manifestPath = Join-Path $OutputDirectory "Witcher3VR-$normalizedVersion-SHA256.txt"
+    $manifestPath = Join-Path $OutputDirectory "$ArtifactName-SHA256.txt"
     Set-Content -LiteralPath $manifestPath -Value $manifestLines -Encoding utf8
     Write-Host "Release packages written to $OutputDirectory"
 } finally {

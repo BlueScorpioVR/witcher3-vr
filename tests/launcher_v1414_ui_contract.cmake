@@ -119,7 +119,7 @@ foreach(required IN ITEMS
 endforeach()
 
 foreach(required IN ITEMS
-    "config_version=17"
+    "config_version=18"
         "[renderdoc]"
         "streamline_device_bridge=0"
         "route_flight_recorder=0"

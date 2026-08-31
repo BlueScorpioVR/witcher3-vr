@@ -46,6 +46,7 @@ enum ControlId {
     IdConvergenceValue,
     IdPresentationScale,
     IdPresentationScaleValue,
+    IdPresentationBlackResize,
     IdWorldDetailRange,
     IdWorldDetailRangeValue,
     IdMenuScale,
@@ -424,6 +425,8 @@ bool CaptureState(LauncherState& state, std::wstring& error) {
         Item(IdConvergence), TBM_GETPOS, 0, 0));
     state.presentation_scale = static_cast<float>(SendMessageW(
         Item(IdPresentationScale), TBM_GETPOS, 0, 0)) / 100.0f;
+    state.presentation_black_resize = SendMessageW(
+        Item(IdPresentationBlackResize), BM_GETCHECK, 0, 0) == BST_CHECKED;
     state.world_detail_range = static_cast<float>(SendMessageW(
         Item(IdWorldDetailRange), TBM_GETPOS, 0, 0)) / 100.0f;
     state.menu_scale = static_cast<float>(SendMessageW(
@@ -836,6 +839,8 @@ void RestoreLauncherDefaults() {
         defaults.hud_convergence_delta);
     SendMessageW(Item(IdPresentationScale), TBM_SETPOS, TRUE,
         static_cast<int>(std::lround(defaults.presentation_scale * 100.0f)));
+    SendMessageW(Item(IdPresentationBlackResize), BM_SETCHECK,
+        defaults.presentation_black_resize ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(Item(IdWorldDetailRange), TBM_SETPOS, TRUE,
         static_cast<int>(std::lround(defaults.world_detail_range * 100.0f)));
     SendMessageW(Item(IdMenuScale), TBM_SETPOS, TRUE,
@@ -1021,6 +1026,9 @@ void PopulateControls() {
         loaded.state.hud_convergence_delta);
     SendMessageW(Item(IdPresentationScale), TBM_SETPOS, TRUE,
         static_cast<int>(std::lround(loaded.state.presentation_scale * 100.0f)));
+    SendMessageW(Item(IdPresentationBlackResize), BM_SETCHECK,
+        loaded.state.presentation_black_resize ? BST_CHECKED : BST_UNCHECKED,
+        0);
     SendMessageW(Item(IdWorldDetailRange), TBM_SETPOS, TRUE,
         static_cast<int>(std::lround(
             loaded.state.world_detail_range * 100.0f)));
@@ -1132,7 +1140,7 @@ void CreateInterface(HWND window) {
         BS_AUTOCHECKBOX | WS_TABSTOP, 38, 112, 150, 28, IdOptiscaler),
         L"OptiScaler (download the dedicated package from the release page). Uses the game's DLSS route to run FSR through OptiScaler. Useful for AMD Radeon graphics cards.");
     AddTooltips(
-        L"Optional OpenXR frame-generation bridge. Off launches normally. FidelityFX or NVIDIA is enabled only for the child started by Save && Launch; a normal game launch remains unaffected.",
+        L"OFXR is frame generation for VR using optical flow. FidelityFX generally increases FPS by about 50% but produces more artifacts. NVIDIA generally increases FPS by about 25% with fewer artifacts. Off disables it.",
         {AddLabel(L"OFXR Bridge", 202, 116, 96, 22),
          AddCombo(300, 108, 258, IdOfxrBridge)});
 
@@ -1140,11 +1148,15 @@ void CreateInterface(HWND window) {
         20, 174, 560, 448),
         L"Tune headset presentation, HUD, cinema framing, and comfort options. Hover any setting name or control for details.");
     AddTooltips(
-        L"Lower values concentrate the same render resolution into a smaller angular area, increasing effective pixel density and supersampling. Black bands gradually appear, so find the lowest value that remains comfortable for your headset and fit.",
+        L"Adjusts the image size in the headset. Lower values make the image smaller and may show black borders.",
         {AddLabel(L"Presentation size", 38, 200, 155, 22),
-         AddTrack(193, 194, 310, IdPresentationScale, 50, 100),
-         AddLabel(L"1.00", 510, 200, 50, 22,
+         AddTrack(193, 194, 202, IdPresentationScale, 50, 100),
+         AddLabel(L"1.00", 398, 200, 42, 22,
               IdPresentationScaleValue, SS_RIGHT)});
+    AddTooltip(AddControl(L"BUTTON", L"Alt. resize",
+        BS_AUTOCHECKBOX | WS_TABSTOP, 444, 194, 116, 28,
+        IdPresentationBlackResize),
+        L"Required for Presentation Size to work correctly with SteamVR. Image quality is slightly reduced. Leave it off if Presentation Size already works with your OpenXR runtime.");
 
     AddTooltips(
         L"Controls REDengine render-proxy culling and downstream world-detail distance. 100% preserves the full corrected range; lower values can recover performance at the cost of earlier object, texture-detail, and shadow transitions.",

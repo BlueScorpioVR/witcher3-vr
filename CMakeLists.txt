@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(witcher3vr VERSION 0.1521.0 LANGUAGES C CXX)
+project(witcher3vr VERSION 0.1526.0 LANGUAGES C CXX)
 
 include(CTest)
 
@@ -458,6 +458,18 @@ if(BUILD_TESTING)
     )
 
     add_test(
+        NAME renderer_presentation_black_resize_contract
+        COMMAND "${CMAKE_COMMAND}"
+            "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
+            "-DOPENXR_GEOMETRY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/openxr_eye_geometry.cpp"
+            "-DLAUNCHER_MAIN=${CMAKE_CURRENT_SOURCE_DIR}/launcher/main.cpp"
+            "-DLAUNCHER_CONFIG=${CMAKE_CURRENT_SOURCE_DIR}/launcher/config.cpp"
+            "-DLAUNCHER_HEADER=${CMAKE_CURRENT_SOURCE_DIR}/launcher/config.h"
+            "-DLAUNCHER_DEFAULTS=${CMAKE_CURRENT_SOURCE_DIR}/launcher/witcher3vr.default.ini"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/presentation_black_resize_contract.cmake"
+    )
+
+    add_test(
         NAME renderer_mode3_native_reused_camera_fallback_contract
         COMMAND "${CMAKE_COMMAND}"
             "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
@@ -523,10 +535,10 @@ if(BUILD_TESTING)
     )
 
     add_test(
-        NAME renderer_witcher_sense_aligned_extent_contract
+        NAME renderer_witcher_sense_descriptor_extent_authority_contract
         COMMAND "${CMAKE_COMMAND}"
             "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
-            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/witcher_sense_aligned_extent_contract.cmake"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/witcher_sense_descriptor_extent_authority_contract.cmake"
     )
 
     add_test(
@@ -656,6 +668,13 @@ if(BUILD_TESTING)
             "-DLAUNCHER_CONFIG_HEADER=${CMAKE_CURRENT_SOURCE_DIR}/launcher/config.h"
             "-DLAUNCHER_DEFAULT_INI=${CMAKE_CURRENT_SOURCE_DIR}/launcher/witcher3vr.default.ini"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/launcher_v1518_world_detail_range_contract.cmake"
+    )
+
+    add_test(
+        NAME launcher_v1523_copy_contract
+        COMMAND "${CMAKE_COMMAND}"
+            "-DLAUNCHER_MAIN_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/launcher/main.cpp"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/launcher_v1523_copy_contract.cmake"
     )
 
 endif()
