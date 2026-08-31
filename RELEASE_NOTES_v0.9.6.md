@@ -11,7 +11,7 @@ This release adds the first version of frame generation for VR, brings back Mono
 ## Downloads
 
 - **Witcher3VR** is the main package and includes OFXR frame generation.
-- **OptiScaler Addon** is required only if you want to use OptiScaler. Install it after the main package.
+- **OptiScaler Addon** is required only if you want to use OptiScaler. Install it after the main package; it uses the FidelityFX files already supplied with the game.
 - **RenderDoc Addon** contains the custom diagnostic DLL. It is optional and is not required to play.
 
 ## Highlights

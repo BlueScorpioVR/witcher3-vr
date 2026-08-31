@@ -14,13 +14,7 @@ param(
 
     [string] $OptiScalerIni,
 
-    [string] $AmdFidelityFxDll,
-
-    [string] $AmdFidelityFxUpscalerDll,
-
     [string] $OptiScalerLicense,
-
-    [string] $OptiScalerLicenseDirectory,
 
     [string] $RenderDocDll,
 
@@ -69,35 +63,12 @@ if ([string]::IsNullOrWhiteSpace($OptiScalerIni)) {
 } else {
     $OptiScalerIni = [System.IO.Path]::GetFullPath($OptiScalerIni)
 }
-$amdFidelityFxDllDefault = Join-Path $repositoryRoot `
-    'external/optiscaler/amd_fidelityfx_dx12.dll'
-if ([string]::IsNullOrWhiteSpace($AmdFidelityFxDll)) {
-    $AmdFidelityFxDll = $amdFidelityFxDllDefault
-} else {
-    $AmdFidelityFxDll = [System.IO.Path]::GetFullPath($AmdFidelityFxDll)
-}
-$amdFidelityFxUpscalerDllDefault = Join-Path $repositoryRoot `
-    'external/optiscaler/amd_fidelityfx_upscaler_dx12.dll'
-if ([string]::IsNullOrWhiteSpace($AmdFidelityFxUpscalerDll)) {
-    $AmdFidelityFxUpscalerDll = $amdFidelityFxUpscalerDllDefault
-} else {
-    $AmdFidelityFxUpscalerDll =
-        [System.IO.Path]::GetFullPath($AmdFidelityFxUpscalerDll)
-}
 $optiscalerLicenseDefault = Join-Path $repositoryRoot `
     'external/optiscaler/LICENSE'
 if ([string]::IsNullOrWhiteSpace($OptiScalerLicense)) {
     $OptiScalerLicense = $optiscalerLicenseDefault
 } else {
     $OptiScalerLicense = [System.IO.Path]::GetFullPath($OptiScalerLicense)
-}
-$optiscalerLicenseDirectoryDefault = Join-Path $repositoryRoot `
-    'external/optiscaler/Licenses'
-if ([string]::IsNullOrWhiteSpace($OptiScalerLicenseDirectory)) {
-    $OptiScalerLicenseDirectory = $optiscalerLicenseDirectoryDefault
-} else {
-    $OptiScalerLicenseDirectory =
-        [System.IO.Path]::GetFullPath($OptiScalerLicenseDirectory)
 }
 $renderDocDllDefault = Join-Path $repositoryRoot `
     'external/renderdoc/renderdoc.dll'
@@ -180,8 +151,6 @@ foreach ($requiredFile in @(
         $ofxrIni,
         $OptiScalerDll,
         $OptiScalerIni,
-        $AmdFidelityFxDll,
-        $AmdFidelityFxUpscalerDll,
         $OptiScalerLicense,
         $RenderDocDll,
         $RenderDocLicense,
@@ -203,10 +172,6 @@ foreach ($requiredFile in @(
     if (-not (Test-Path -LiteralPath $requiredFile -PathType Leaf)) {
         throw "Missing release input: $requiredFile"
     }
-}
-if (-not (Test-Path -LiteralPath $OptiScalerLicenseDirectory `
-        -PathType Container)) {
-    throw "Missing release input directory: $OptiScalerLicenseDirectory"
 }
 
 New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
@@ -291,17 +256,13 @@ try {
         -Force | Out-Null
     Copy-Item -LiteralPath $OptiScalerDll -Destination $optiscalerBinaryStage
     Copy-Item -LiteralPath $OptiScalerIni -Destination $optiscalerBinaryStage
-    Copy-Item -LiteralPath $AmdFidelityFxDll -Destination $optiscalerBinaryStage
-    Copy-Item -LiteralPath $AmdFidelityFxUpscalerDll `
-        -Destination $optiscalerBinaryStage
     Copy-Item -LiteralPath $optiscalerBridgeIni `
         -Destination $optiscalerBinaryStage
     Copy-Item -LiteralPath $optiscalerPayload `
         -Destination $optiscalerDocumentationStage
     $optiscalerLicensesStage = Join-Path $optiscalerDocumentationStage `
         'OptiScaler-Licenses'
-    Copy-Item -LiteralPath $OptiScalerLicenseDirectory `
-        -Destination $optiscalerLicensesStage -Recurse
+    New-Item -ItemType Directory -Path $optiscalerLicensesStage | Out-Null
     Copy-Item -LiteralPath $OptiScalerLicense -Destination `
         (Join-Path $optiscalerLicensesStage 'OptiScaler-GPL-3.0.txt')
     Set-Content -LiteralPath `
@@ -372,10 +333,6 @@ try {
         (Get-FileHash -LiteralPath $OptiScalerDll -Algorithm SHA256).Hash
     $optiscalerIniHash =
         (Get-FileHash -LiteralPath $OptiScalerIni -Algorithm SHA256).Hash
-    $amdFidelityFxDllHash =
-        (Get-FileHash -LiteralPath $AmdFidelityFxDll -Algorithm SHA256).Hash
-    $amdFidelityFxUpscalerDllHash =
-        (Get-FileHash -LiteralPath $AmdFidelityFxUpscalerDll -Algorithm SHA256).Hash
     $optiscalerBridgeIniHash =
         (Get-FileHash -LiteralPath $optiscalerBridgeIni -Algorithm SHA256).Hash
     $renderDocDllHash =
@@ -411,8 +368,6 @@ try {
     $manifestLines += "ofxr_ini.sha256=$ofxrIniHash"
     $manifestLines += "optiscaler.sha256=$optiscalerDllHash"
     $manifestLines += "optiscaler_ini.sha256=$optiscalerIniHash"
-    $manifestLines += "amd_fidelityfx.sha256=$amdFidelityFxDllHash"
-    $manifestLines += "amd_fidelityfx_upscaler.sha256=$amdFidelityFxUpscalerDllHash"
     $manifestLines += "optiscaler_bridge_ini.sha256=$optiscalerBridgeIniHash"
     $manifestLines += "renderdoc_custom_v1273.sha256=$renderDocDllHash"
     $manifestLines += "movement_dlc_bundle.sha256=$movementDlcBundleHash"

@@ -172,10 +172,10 @@ game and compatible NVIDIA driver.
 
 ## Optional OptiScaler Addon
 
-OptiScaler v0.9.4 and its required FidelityFX runtime files are distributed
-only in the separate OptiScaler Addon, under their respective upstream license
-terms. OptiScaler is licensed under GPL-3.0; the addon includes the upstream
-OptiScaler and FidelityFX license files.
+OptiScaler v0.9.4 is distributed only in the separate OptiScaler Addon under
+GPL-3.0. The addon includes the upstream OptiScaler license. It relies on the
+FidelityFX runtime files already supplied with The Witcher 3 and does not
+redistribute or replace them.
 
 - Source repository: https://github.com/optiscaler/OptiScaler
 - Release: https://github.com/optiscaler/OptiScaler/releases/tag/v0.9.4
