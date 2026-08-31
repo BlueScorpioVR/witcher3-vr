@@ -170,14 +170,27 @@ No NVIDIA game DLL or standalone SDK package is distributed by Witcher 3 VR.
 Users must rely on the DLSS/NGX runtime supplied with their legally installed
 game and compatible NVIDIA driver.
 
-## RenderDoc in-application API header
+## Optional OptiScaler Addon
+
+OptiScaler v0.9.4 and its required FidelityFX runtime files are distributed
+only in the separate OptiScaler Addon, under their respective upstream license
+terms. OptiScaler is licensed under GPL-3.0; the addon includes the upstream
+OptiScaler and FidelityFX license files.
+
+- Source repository: https://github.com/optiscaler/OptiScaler
+- Release: https://github.com/optiscaler/OptiScaler/releases/tag/v0.9.4
+
+## RenderDoc in-application API and optional runtime
 
 - Source repository: https://github.com/baldurk/renderdoc
 - Pinned revision: `e43b7c14d3c37fab664391db94f7586be29e49a0`
 - Vendored file: `renderdoc/api/app/renderdoc_app.h`
 
 The RenderDoc API header is distributed under the MIT license included in the
-header. Witcher 3 VR does not distribute or relicense the RenderDoc runtime.
+header. The separate optional RenderDoc Addon contains the custom V1273
+RenderDoc 1.45 runtime derived from upstream commit
+`2fc0bc04cb95499635f63986a55bc6f67849dd9f`. The addon includes the upstream
+MIT license and is not required to play Witcher 3 VR.
 
 ## CD PROJEKT RED fan content
 

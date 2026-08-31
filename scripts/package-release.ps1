@@ -18,6 +18,14 @@ param(
 
     [string] $AmdFidelityFxUpscalerDll,
 
+    [string] $OptiScalerLicense,
+
+    [string] $OptiScalerLicenseDirectory,
+
+    [string] $RenderDocDll,
+
+    [string] $RenderDocLicense,
+
     [ValidatePattern('^[A-Za-z0-9._-]+$')]
     [string] $ArtifactName
 )
@@ -75,6 +83,35 @@ if ([string]::IsNullOrWhiteSpace($AmdFidelityFxUpscalerDll)) {
 } else {
     $AmdFidelityFxUpscalerDll =
         [System.IO.Path]::GetFullPath($AmdFidelityFxUpscalerDll)
+}
+$optiscalerLicenseDefault = Join-Path $repositoryRoot `
+    'external/optiscaler/LICENSE'
+if ([string]::IsNullOrWhiteSpace($OptiScalerLicense)) {
+    $OptiScalerLicense = $optiscalerLicenseDefault
+} else {
+    $OptiScalerLicense = [System.IO.Path]::GetFullPath($OptiScalerLicense)
+}
+$optiscalerLicenseDirectoryDefault = Join-Path $repositoryRoot `
+    'external/optiscaler/Licenses'
+if ([string]::IsNullOrWhiteSpace($OptiScalerLicenseDirectory)) {
+    $OptiScalerLicenseDirectory = $optiscalerLicenseDirectoryDefault
+} else {
+    $OptiScalerLicenseDirectory =
+        [System.IO.Path]::GetFullPath($OptiScalerLicenseDirectory)
+}
+$renderDocDllDefault = Join-Path $repositoryRoot `
+    'external/renderdoc/renderdoc.dll'
+if ([string]::IsNullOrWhiteSpace($RenderDocDll)) {
+    $RenderDocDll = $renderDocDllDefault
+} else {
+    $RenderDocDll = [System.IO.Path]::GetFullPath($RenderDocDll)
+}
+$renderDocLicenseDefault = Join-Path $repositoryRoot `
+    'external/renderdoc/LICENSE.md'
+if ([string]::IsNullOrWhiteSpace($RenderDocLicense)) {
+    $RenderDocLicense = $renderDocLicenseDefault
+} else {
+    $RenderDocLicense = [System.IO.Path]::GetFullPath($RenderDocLicense)
 }
 if ([string]::IsNullOrWhiteSpace($ArtifactName)) {
     $ArtifactName = "Witcher3VR-$normalizedVersion"
@@ -145,6 +182,9 @@ foreach ($requiredFile in @(
         $OptiScalerIni,
         $AmdFidelityFxDll,
         $AmdFidelityFxUpscalerDll,
+        $OptiScalerLicense,
+        $RenderDocDll,
+        $RenderDocLicense,
         $optiscalerBridgeIni,
         $optiscalerPayload,
         $exampleIni,
@@ -163,6 +203,10 @@ foreach ($requiredFile in @(
     if (-not (Test-Path -LiteralPath $requiredFile -PathType Leaf)) {
         throw "Missing release input: $requiredFile"
     }
+}
+if (-not (Test-Path -LiteralPath $OptiScalerLicenseDirectory `
+        -PathType Container)) {
+    throw "Missing release input directory: $OptiScalerLicenseDirectory"
 }
 
 New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
@@ -204,11 +248,6 @@ try {
         (Join-Path $binaryStage 'XR_APILAYER_XRFrameBridge_diagnostic.dll')
     Copy-Item -LiteralPath $ofxrManifest -Destination $binaryStage
     Copy-Item -LiteralPath $ofxrIni -Destination $binaryStage
-    Copy-Item -LiteralPath $OptiScalerDll -Destination $binaryStage
-    Copy-Item -LiteralPath $OptiScalerIni -Destination $binaryStage
-    Copy-Item -LiteralPath $AmdFidelityFxDll -Destination $binaryStage
-    Copy-Item -LiteralPath $AmdFidelityFxUpscalerDll -Destination $binaryStage
-    Copy-Item -LiteralPath $optiscalerBridgeIni -Destination $binaryStage
 
     $modsStage = Join-Path $releaseStage 'mods'
     New-Item -ItemType Directory -Path $modsStage | Out-Null
@@ -237,7 +276,6 @@ try {
     Copy-Item -LiteralPath $readme -Destination $documentationStage
     Copy-Item -LiteralPath $license -Destination $documentationStage
     Copy-Item -LiteralPath $thirdPartyNotices -Destination $documentationStage
-    Copy-Item -LiteralPath $optiscalerPayload -Destination $documentationStage
     Set-Content -LiteralPath (Join-Path $documentationStage 'BUILD.txt') `
         -Value @(
             $normalizedVersion,
@@ -245,11 +283,76 @@ try {
             'Use Diagnostic Logging in the launcher when support logs are needed.'
         ) -Encoding utf8
 
+    $optiscalerStage = Join-Path $stagingRoot 'optiscaler-addon'
+    $optiscalerBinaryStage = Join-Path $optiscalerStage 'bin/x64_dx12'
+    $optiscalerDocumentationStage = Join-Path $optiscalerStage 'Witcher3VR'
+    New-Item -ItemType Directory -Path $optiscalerBinaryStage -Force | Out-Null
+    New-Item -ItemType Directory -Path $optiscalerDocumentationStage `
+        -Force | Out-Null
+    Copy-Item -LiteralPath $OptiScalerDll -Destination $optiscalerBinaryStage
+    Copy-Item -LiteralPath $OptiScalerIni -Destination $optiscalerBinaryStage
+    Copy-Item -LiteralPath $AmdFidelityFxDll -Destination $optiscalerBinaryStage
+    Copy-Item -LiteralPath $AmdFidelityFxUpscalerDll `
+        -Destination $optiscalerBinaryStage
+    Copy-Item -LiteralPath $optiscalerBridgeIni `
+        -Destination $optiscalerBinaryStage
+    Copy-Item -LiteralPath $optiscalerPayload `
+        -Destination $optiscalerDocumentationStage
+    $optiscalerLicensesStage = Join-Path $optiscalerDocumentationStage `
+        'OptiScaler-Licenses'
+    Copy-Item -LiteralPath $OptiScalerLicenseDirectory `
+        -Destination $optiscalerLicensesStage -Recurse
+    Copy-Item -LiteralPath $OptiScalerLicense -Destination `
+        (Join-Path $optiscalerLicensesStage 'OptiScaler-GPL-3.0.txt')
+    Set-Content -LiteralPath `
+        (Join-Path $optiscalerDocumentationStage `
+            'README-OPTISCALER-ADDON.txt') -Value @(
+            "OptiScaler Addon for $ArtifactName",
+            '',
+            'Install the main Witcher3VR package first.',
+            'Extract this archive into the Witcher 3 game folder.',
+            'Enable OptiScaler in the VR Launcher and disable DLSS Override.'
+        ) -Encoding utf8
+
+    $renderDocStage = Join-Path $stagingRoot 'renderdoc-addon'
+    $renderDocBinaryStage = Join-Path $renderDocStage 'bin/x64_dx12'
+    $renderDocDocumentationStage = Join-Path $renderDocStage 'Witcher3VR'
+    New-Item -ItemType Directory -Path $renderDocBinaryStage -Force | Out-Null
+    New-Item -ItemType Directory -Path $renderDocDocumentationStage `
+        -Force | Out-Null
+    Copy-Item -LiteralPath $RenderDocDll -Destination `
+        (Join-Path $renderDocBinaryStage 'renderdoc.dll')
+    Copy-Item -LiteralPath $RenderDocLicense -Destination `
+        (Join-Path $renderDocDocumentationStage 'RENDERDOC-LICENSE.md')
+    Set-Content -LiteralPath `
+        (Join-Path $renderDocDocumentationStage `
+            'README-RENDERDOC-ADDON.txt') -Value @(
+            "RenderDoc Addon for $ArtifactName",
+            '',
+            'This optional diagnostic addon is not required to play.',
+            'Install it only when RenderDoc captures are needed.',
+            'Extract this archive into the Witcher 3 game folder.'
+        ) -Encoding utf8
+
     $archivePath = Join-Path $OutputDirectory "$ArtifactName.zip"
     if (Test-Path -LiteralPath $archivePath) {
         Remove-Item -LiteralPath $archivePath -Force
     }
     Compress-Archive -Path (Join-Path $releaseStage '*') -DestinationPath $archivePath
+    $optiscalerArchivePath = Join-Path $OutputDirectory `
+        "$ArtifactName-OptiScaler-Addon.zip"
+    if (Test-Path -LiteralPath $optiscalerArchivePath) {
+        Remove-Item -LiteralPath $optiscalerArchivePath -Force
+    }
+    Compress-Archive -Path (Join-Path $optiscalerStage '*') `
+        -DestinationPath $optiscalerArchivePath
+    $renderDocArchivePath = Join-Path $OutputDirectory `
+        "$ArtifactName-RenderDoc-Addon.zip"
+    if (Test-Path -LiteralPath $renderDocArchivePath) {
+        Remove-Item -LiteralPath $renderDocArchivePath -Force
+    }
+    Compress-Archive -Path (Join-Path $renderDocStage '*') `
+        -DestinationPath $renderDocArchivePath
 
     $dllHash = (Get-FileHash -LiteralPath $releaseDll -Algorithm SHA256).Hash
     $launcherHash = (Get-FileHash -LiteralPath $launcher -Algorithm SHA256).Hash
@@ -275,6 +378,8 @@ try {
         (Get-FileHash -LiteralPath $AmdFidelityFxUpscalerDll -Algorithm SHA256).Hash
     $optiscalerBridgeIniHash =
         (Get-FileHash -LiteralPath $optiscalerBridgeIni -Algorithm SHA256).Hash
+    $renderDocDllHash =
+        (Get-FileHash -LiteralPath $RenderDocDll -Algorithm SHA256).Hash
     $movementDlcBundleHash =
         (Get-FileHash -LiteralPath $movementDlcBundle -Algorithm SHA256).Hash
     $movementDlcMetadataHash =
@@ -292,6 +397,10 @@ try {
     $firstPersonVisibilityHash =
         (Get-FileHash -LiteralPath $firstPersonVisibilityScript -Algorithm SHA256).Hash
     $archiveHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash
+    $optiscalerArchiveHash =
+        (Get-FileHash -LiteralPath $optiscalerArchivePath -Algorithm SHA256).Hash
+    $renderDocArchiveHash =
+        (Get-FileHash -LiteralPath $renderDocArchivePath -Algorithm SHA256).Hash
     $manifestLines += "dll.sha256=$dllHash"
     $manifestLines += "launcher.sha256=$launcherHash"
     $manifestLines += "openxr_loader.sha256=$openXrLoaderHash"
@@ -305,6 +414,7 @@ try {
     $manifestLines += "amd_fidelityfx.sha256=$amdFidelityFxDllHash"
     $manifestLines += "amd_fidelityfx_upscaler.sha256=$amdFidelityFxUpscalerDllHash"
     $manifestLines += "optiscaler_bridge_ini.sha256=$optiscalerBridgeIniHash"
+    $manifestLines += "renderdoc_custom_v1273.sha256=$renderDocDllHash"
     $manifestLines += "movement_dlc_bundle.sha256=$movementDlcBundleHash"
     $manifestLines += "movement_dlc_metadata.sha256=$movementDlcMetadataHash"
     $manifestLines += "hud_editor_script.sha256=$hudEditorScriptHash"
@@ -313,7 +423,9 @@ try {
     $manifestLines += "first_person_head.sha256=$firstPersonHeadHash"
     $manifestLines += "first_person_strafe.sha256=$firstPersonStrafeHash"
     $manifestLines += "first_person_visibility.sha256=$firstPersonVisibilityHash"
-    $manifestLines += "archive.sha256=$archiveHash"
+    $manifestLines += "main_archive.sha256=$archiveHash"
+    $manifestLines += "optiscaler_addon_archive.sha256=$optiscalerArchiveHash"
+    $manifestLines += "renderdoc_addon_archive.sha256=$renderDocArchiveHash"
 
     $manifestPath = Join-Path $OutputDirectory "$ArtifactName-SHA256.txt"
     Set-Content -LiteralPath $manifestPath -Value $manifestLines -Encoding utf8

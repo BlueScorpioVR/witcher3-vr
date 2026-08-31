@@ -96,10 +96,13 @@ DLSS and DLAA require a compatible NVIDIA GPU. OptiScaler and OFXR have their ow
 
 1. Extract the release archive into the Witcher 3 game folder, the directory containing `bin`, `content` and `mods`.
 2. Allow the folders from the archive to merge with the existing game folders.
-3. Run `bin\x64_dx12\Witcher3VRLauncher.exe`.
-4. Choose your settings, then select **Save & Launch**.
+3. If you want to use OptiScaler, extract the separate **OptiScaler Addon** into the same folder.
+4. Run `bin\x64_dx12\Witcher3VRLauncher.exe`.
+5. Choose your settings, then select **Save & Launch**.
 
-The complete release includes the VR DLL, launcher, configuration, scripts and bundled mod files inside the correct `bin\x64_dx12`, `mods`, `dlc` and `Witcher3VR` folders. Install the whole package when changing release versions; replacing only the DLL can leave incompatible files behind.
+The main package includes the VR DLL, launcher, OFXR, configuration, scripts and bundled mod files inside the correct `bin\x64_dx12`, `mods`, `dlc` and `Witcher3VR` folders. Install the whole main package when changing release versions; replacing only the DLL can leave incompatible files behind.
+
+The separate **RenderDoc Addon** is only for diagnostic captures. It is not required to play.
 
 Back up any files you have edited manually before installing a new release.
 

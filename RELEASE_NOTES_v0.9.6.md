@@ -8,6 +8,12 @@ This release adds the first version of frame generation for VR, brings back Mono
 - Mono mode has returned after only quick validation. Some cutscenes may not retain DLSS/DLAA or TAAU correctly.
 - Ray tracing support has been removed for now because it does not work correctly with asymmetric projection.
 
+## Downloads
+
+- **Witcher3VR** is the main package and includes OFXR frame generation.
+- **OptiScaler Addon** is required only if you want to use OptiScaler. Install it after the main package.
+- **RenderDoc Addon** contains the custom diagnostic DLL. It is optional and is not required to play.
+
 ## Highlights
 
 ### Frame Generation for VR
