@@ -61,17 +61,6 @@ struct SymmetricEyeSubimage {
     XrFovf represented_fov{};
 };
 
-struct BlackResizePresentation {
-    float target_left_px{};
-    float target_top_px{};
-    float target_right_px{};
-    float target_bottom_px{};
-    float source_left_uv{};
-    float source_top_uv{};
-    float source_right_uv{};
-    float source_bottom_uv{};
-    XrFovf submitted_fov{};
-};
 
 XrQuaternionf multiply(
     const XrQuaternionf& left, const XrQuaternionf& right);
@@ -118,16 +107,6 @@ bool scale_asymmetric_projection_fov(
     float scale,
     XrFovf& scaled_fov);
 
-// Shrinks the completed eye image around its optical axis on a black canvas.
-// The submitted FOV remains the established route FOV, matching the legacy
-// full-surface presenter: the completed image itself becomes smaller.
-bool derive_black_resize_presentation(
-    const XrFovf& base_fov,
-    const XrRect2Di& base_image_rect,
-    uint32_t surface_width,
-    uint32_t surface_height,
-    float presentation_scale,
-    BlackResizePresentation& presentation);
 
 bool derive_pixel_exact_subimage_fov(
     const XrFovf& content_fov,

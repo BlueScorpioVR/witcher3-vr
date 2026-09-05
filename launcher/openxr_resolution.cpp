@@ -6,10 +6,26 @@
 #include <openxr/openxr.h>
 
 #include <cstring>
+#include <iterator>
 #include <vector>
 
 namespace w3vr {
 namespace {
+
+class ScopedModule {
+public:
+    explicit ScopedModule(HMODULE module = nullptr) noexcept
+        : module_(module) {}
+    ~ScopedModule() {
+        if (module_ != nullptr) FreeLibrary(module_);
+    }
+    ScopedModule(const ScopedModule&) = delete;
+    ScopedModule& operator=(const ScopedModule&) = delete;
+    HMODULE get() const noexcept { return module_; }
+
+private:
+    HMODULE module_{};
+};
 
 template <typename Function>
 bool LoadOpenXrFunction(
@@ -57,26 +73,59 @@ bool QueryOpenXrRecommendedResolution(
     resolution = {};
     error.clear();
 
-    const auto adjacent_loader = launcher_directory / L"openxr_loader.dll";
-    HMODULE loader = LoadLibraryW(adjacent_loader.c_str());
-    if (loader == nullptr) {
-        loader = LoadLibraryW(L"openxr_loader.dll");
+    // [FIX:OPENXR-QUERY-SYSTEM-DXGI V23026 1/1] The OpenXR runtime creates a
+    // temporary graphics query inside the launcher. Preload the real system
+    // DXGI so a runtime LoadLibrary("dxgi.dll") cannot resolve to the managed
+    // game-root proxy, which would recursively load and lock OptiScaler,
+    // ReShade and other integration files before the launcher publishes them.
+    wchar_t system_directory[MAX_PATH]{};
+    const UINT system_length = GetSystemDirectoryW(
+        system_directory, static_cast<UINT>(std::size(system_directory)));
+    if (system_length == 0 || system_length >= std::size(system_directory)) {
+        error = L"OpenXR AUTO could not resolve the Windows system directory.";
+        return false;
     }
-    if (loader == nullptr) {
+    const auto system_dxgi_path =
+        std::filesystem::path(system_directory) / L"dxgi.dll";
+    if (HMODULE existing_dxgi = GetModuleHandleW(L"dxgi.dll")) {
+        wchar_t existing_path[32768]{};
+        const DWORD existing_length = GetModuleFileNameW(
+            existing_dxgi, existing_path,
+            static_cast<DWORD>(std::size(existing_path)));
+        if (existing_length == 0 || existing_length >= std::size(existing_path) ||
+            _wcsicmp(existing_path, system_dxgi_path.c_str()) != 0) {
+            error = L"OpenXR AUTO found a non-system dxgi.dll already loaded "
+                L"inside the launcher. Close and reopen the launcher before "
+                L"retrying.";
+            return false;
+        }
+    }
+    ScopedModule system_dxgi(LoadLibraryW(system_dxgi_path.c_str()));
+    if (system_dxgi.get() == nullptr) {
+        error = L"OpenXR AUTO could not preload the Windows system dxgi.dll.";
+        return false;
+    }
+
+    const auto adjacent_loader = launcher_directory / L"openxr_loader.dll";
+    HMODULE loader_handle = LoadLibraryW(adjacent_loader.c_str());
+    if (loader_handle == nullptr) {
+        loader_handle = LoadLibraryW(L"openxr_loader.dll");
+    }
+    if (loader_handle == nullptr) {
         error = L"OpenXR AUTO could not load openxr_loader.dll. Keep the "
             L"project loader beside Witcher3VRLauncher.exe.";
         return false;
     }
+    ScopedModule loader(loader_handle);
 
     const auto get_instance_proc_addr =
         reinterpret_cast<PFN_xrGetInstanceProcAddr>(
-            GetProcAddress(loader, "xrGetInstanceProcAddr"));
+            GetProcAddress(loader.get(), "xrGetInstanceProcAddr"));
     PFN_xrCreateInstance create_instance{};
     if (!LoadOpenXrFunction(
             get_instance_proc_addr, XR_NULL_HANDLE,
             "xrCreateInstance", create_instance)) {
         error = L"OpenXR AUTO could not resolve xrCreateInstance.";
-        FreeLibrary(loader);
         return false;
     }
 
@@ -93,7 +142,6 @@ bool QueryOpenXrRecommendedResolution(
     XrResult xr_result = create_instance(&create_info, &instance);
     if (XR_FAILED(xr_result) || instance == XR_NULL_HANDLE) {
         error = OpenXrFailure(L"Creating the OpenXR query instance", xr_result);
-        FreeLibrary(loader);
         return false;
     }
 
@@ -117,7 +165,6 @@ bool QueryOpenXrRecommendedResolution(
         if (destroy_instance != nullptr) {
             destroy_instance(instance);
         }
-        FreeLibrary(loader);
         return false;
     }
 
@@ -129,7 +176,6 @@ bool QueryOpenXrRecommendedResolution(
         error = OpenXrFailure(
             L"Finding the active OpenXR headset", xr_result);
         destroy_instance(instance);
-        FreeLibrary(loader);
         return false;
     }
 
@@ -141,7 +187,6 @@ bool QueryOpenXrRecommendedResolution(
         error = OpenXrFailure(
             L"Reading the OpenXR stereo view count", xr_result);
         destroy_instance(instance);
-        FreeLibrary(loader);
         return false;
     }
 
@@ -157,7 +202,6 @@ bool QueryOpenXrRecommendedResolution(
         error = OpenXrFailure(
             L"Reading the OpenXR recommended resolution", xr_result);
         destroy_instance(instance);
-        FreeLibrary(loader);
         return false;
     }
 
@@ -173,7 +217,6 @@ bool QueryOpenXrRecommendedResolution(
     }
 
     destroy_instance(instance);
-    FreeLibrary(loader);
     return true;
 }
 

@@ -6,9 +6,17 @@ file(READ "${DXGI_PROXY_SOURCE}" dxgi_proxy)
 
 set(required_fragments
     "void reset_mode3_hud_publication_state(uint32_t generation)"
-    "g_mode3_scene_only_draw_generations.clear();"
+    "g_mode3_hud_draw_ownership.clear();"
+    "g_mode3_hud_scene_ownership.reset(generation);"
+    "if (track_hud_ownership) {"
+    "g_mode3_hud_draw_ownership[command_list].record("
+    "draw_marker->second.scene_only_for("
     "g_mode3_aer_afw_pending_hud_tags.clear();"
     "g_mode3_aer_afw_submitted_hud_tags.clear();"
+    "V23035 gameplay_hud_late_composite=exact_current_scene_pair"
+    "strict_stereo_scene_only_output_pair_id("
+    "EngineFrameTag scene_only_output_tag{};"
+    "scene_only_output_tag.pair_id ="
     "reset_mode3_early_hud_generation_locked(generation);"
     "reset_mode3_hud_publication_state(generation);"
     "void arm_mode3_hud_generation_drain(uint32_t generation)"
@@ -31,6 +39,15 @@ foreach(fragment IN LISTS required_fragments)
     if(position EQUAL -1)
         message(FATAL_ERROR
             "Missing Mode-3 HUD projection lifecycle contract: ${fragment}")
+    endif()
+endforeach()
+
+foreach(retired IN ITEMS g_mode3_scene_only_output_pairs
+        g_mode3_scene_only_draw_generations g_mode3_scene_only_pending_valid
+        g_mode3_scene_only_pending_pair g_mode3_scene_only_pending_eye_mask)
+    string(FIND "${dxgi_proxy}" "${retired}" position)
+    if(NOT position EQUAL -1)
+        message(FATAL_ERROR "Retired positive-only HUD ownership remains: ${retired}")
     endif()
 endforeach()
 
@@ -115,9 +132,23 @@ string(FIND "${dxgi_proxy}"
     "void STDMETHODCALLTYPE hook_set_pipeline_state(\n    ID3D12GraphicsCommandList* command_list,\n    ID3D12PipelineState* pipeline_state) {\n    if (mode3_aer_presentation_active())"
     hud_hook_begin)
 if(hud_hook_begin EQUAL -1)
-    message(FATAL_ERROR "Missing HUD pipeline hook")
+    string(FIND "${dxgi_proxy}"
+        "void STDMETHODCALLTYPE hook_set_pipeline_state(\n    ID3D12GraphicsCommandList* command_list,\n    ID3D12PipelineState* pipeline_state) {"
+        hud_hook_begin)
+    if(hud_hook_begin EQUAL -1)
+        message(FATAL_ERROR "Missing HUD pipeline hook")
+    endif()
 endif()
 string(SUBSTRING "${dxgi_proxy}" ${hud_hook_begin} -1 hud_hook_body)
+string(FIND "${hud_hook_body}"
+    "if (is_reshade_immediate_command_list(command_list))" reshade_bypass)
+string(FIND "${hud_hook_body}"
+    "if (mode3_aer_presentation_active())" hud_tracking_begin)
+if(reshade_bypass EQUAL -1 OR hud_tracking_begin EQUAL -1 OR
+        NOT reshade_bypass LESS hud_tracking_begin)
+    message(FATAL_ERROR
+        "V23001 must bypass ReShade before the unchanged HUD pipeline hook")
+endif()
 foreach(eye IN ITEMS 0 1)
     string(FIND "${hud_hook_body}"
         "g_asymmetric_hud_composite_eye${eye}_pso.load("

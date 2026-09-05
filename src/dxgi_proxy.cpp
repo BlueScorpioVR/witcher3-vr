@@ -17,6 +17,7 @@
 
 #include "aer_scheduler.h"
 #include "cbv_descriptor_cache_policy.h"
+#include "command_list_identity.h"
 #include "cinema_aspect.h"
 #include "openxr_eye_geometry.h"
 #include "puredark_afw_bridge.h"
@@ -28,6 +29,8 @@
 #include "focus_fire_projection_policy.h"
 #include "hmd_camera_orientation.h"
 #include "mode3_transport_policy.h"
+#include "mode3_hud_ownership.h"
+#include "reshade_overlay_policy.h"
 #include "mode3_dlss_constants_policy.h"
 #include "native_asymmetric_transport_policy.h"
 #include "optiscaler_jitter_policy.h"
@@ -39,6 +42,33 @@
 #include "taau_submission_policy.h"
 #include "witcher_sense_extent_policy.h"
 #include "world_detail_range_policy.h"
+
+// V23001 starts physically from V23000. ReShade records its runtime effects
+// and overlay into a raw D3D12 command list named exactly
+// "ReShade immediate command list" before submitting the game's lists. That
+// list must execute unchanged, but none of its PSOs, descriptors, draws,
+// barriers or queue boundaries belong to REDengine's stereo/HUD authority.
+// Classify the exact debug name once per raw command-list identity and bypass
+// every Witcher3VR command-list tracker for that identity only.
+// [TRIAL:RESHADE-IMMEDIATE-LIST-ISOLATION V23001 1/4]
+
+// V23011 returns the chained ReShade path to the ownership model used by
+// ReShade 6.8 itself: its named immediate list is an opaque queue submission.
+// Witcher3VR neither waits on it nor brackets or mutates its GPU command
+// stream. This physically excludes the V23002/V23003/V23006/V23010 timing and
+// marker trials while retaining V23001's exact-name ledger isolation. Plain F6
+// remains reserved for the DLSS5 add-on.
+// [TRIAL:RESHADE-OPAQUE-SUBMIT-CLEANUP V23011]
+
+// ReShade can invoke the native Streamline/DLSS chain while recording its
+// named immediate list. V23001's blanket queue bypass then stranded the exact
+// AFW producer ticket before submission publication: six bundles recorded,
+// zero submitted, followed by permanent ring starvation and black transport.
+// V23019 proved the ticket is not owned by ReShade's immediate list. V1532
+// follows the published Streamline/ReShade base-object QI chain to the exact
+// D3D12 list; the one-level pointer scan could not resolve nested wrappers.
+// ReShade's opaque immediate submission stays fully isolated.
+// [FIX:NESTED-COMMAND-LIST-IDENTITY V1532 OVERVIEW]
 
 // V1521 removes only V1419/V18025's foliage orientation transform. The two
 // exact owner draws retain byte-identical native b0/b12 snapshots and their
@@ -59,8 +89,8 @@
 // [PERF:WORLD-DETAIL-RANGE-CONTROL V1516]
 
 // V1526 removes the live requested render extent from Witcher Senses
-// admission. Alt. resize can establish that global extent before the exact
-// compositor draw, while the draw's immutable t0/t3 pair already carries its
+// admission. The global extent can change before the exact compositor draw,
+// while the draw's immutable t0/t3 pair already carries its
 // real resolution. Their equal non-zero extent is authoritative; the exact
 // V1501 draw, root, formats, t2 and distinct-resource signature stay required.
 // [FIX:WITCHER-SENSE-DESCRIPTOR-EXTENT-AUTHORITY V1526 1/2]
@@ -424,6 +454,19 @@ HMODULE g_real_d3d12{};
 HMODULE g_openxr_loader{};
 HMODULE g_dxcompiler{};
 HMODULE g_renderdoc_module{};
+// [TRIAL:RESHADE-SECONDARY-BOOTSTRAP V23000 1/4] ReShade is never the proxy
+// owner on this isolated line. Witcher3VR freezes and hooks the real DXGI
+// factory first, then loads the stock 64-bit add-on runtime under its neutral
+// distribution name. The returned ReShade factory remains outside the raw
+// factory methods hooked below, so its Present work completes before OpenXR
+// publication while our queue and command-list identities stay unwrapped.
+HMODULE g_reshade_secondary_module{};
+HMODULE g_proxy_module{};
+std::once_flag g_reshade_secondary_once{};
+bool g_reshade_secondary_attempted{};
+bool g_reshade_secondary_factory_bootstrapped{};
+std::atomic<bool> g_reshade_overlay_open{};
+bool g_reshade_overlay_event_registered{};
 RENDERDOC_API_1_6_0* g_renderdoc_api{};
 std::mutex g_renderdoc_api_mutex{};
 bool g_renderdoc_loaded_from_game_directory{};
@@ -487,10 +530,10 @@ struct Config {
     bool mode3_aer_presentation{false};
     float resolution_scale{1.0f};
     float presentation_scale{0.9f};
-    bool presentation_black_resize{};
     float world_detail_range{1.0f};
-    // Native asymmetric producer geometry is always the raw runtime geometry.
-    // Presentation Size is consumed only by the final OpenXR presenter.
+    // Presentation Size scales producer tangent geometry and the matching
+    // submitted FOV together. The standard presenter keeps the route's full
+    // imageRect so every rendered pixel reaches the OpenXR compositor.
     bool native_stereo{false};
     // The visibility-mask envelope/fit route is opt-in. Missing keys retain
     // the proven legacy crop-and-copy presentation path.
@@ -1378,13 +1421,6 @@ ID3D12RootSignature* g_xr_cinema_projection_root_signature{};
 ID3D12PipelineState* g_xr_cinema_projection_pipeline{};
 ID3D12DescriptorHeap* g_xr_cinema_projection_srv_heap{};
 UINT g_xr_cinema_projection_srv_increment{};
-ID3D12RootSignature* g_xr_presentation_window_root_signature{};
-ID3D12PipelineState* g_xr_presentation_window_pipeline{};
-ID3D12DescriptorHeap* g_xr_presentation_window_srv_heap{};
-UINT g_xr_presentation_window_srv_increment{};
-std::array<ID3D12Resource*, kXrCommandAllocatorCount>
-    g_xr_presentation_window_scratch{};
-bool g_xr_presentation_window_ready{};
 std::atomic<bool> g_mode3_hud_layer_available{};
 bool g_xr_resources_ready{};
 IDXGISwapChain* g_game_swapchain{};
@@ -1867,16 +1903,21 @@ float producer_render_fov_scale() {
         1.0f / cover_fraction, 0.01f, 2.0f);
 }
 
-// [TRIAL:ALT-RESIZE-PRODUCER-COUPLING V1525 1/4] The black-canvas route
-// cannot repair perspective after the completed image has been rendered.
-// Narrow the producer's tangent interval by the same amount as the final
-// optical-centred placement. The default presenter remains producer-neutral.
-float alternate_resize_producer_scale() {
-    if (!g_config.presentation_black_resize ||
-        !g_xr_presentation_window_ready) {
-        return 1.0f;
-    }
+// [TRIAL:STANDARD-PRODUCER-FOV-RESCALE V23038 1/5] Port V1527's perspective
+// correction into the ReShade/DLSS5 renderer. Both the standard full-image
+// presenter and the optional black-canvas presenter share one producer scale;
+// neither route repairs already-rendered pixels afterwards.
+float presentation_producer_scale() {
     return std::clamp(g_config.presentation_scale, 0.5f, 1.0f);
+}
+
+bool scaled_runtime_presentation_fov(uint32_t eye, XrFovf& scaled_fov) {
+    if (eye >= g_xr_views.size()) {
+        return false;
+    }
+    scaled_fov = g_xr_views[eye].fov;
+    return w3vr::openxr_eye_geometry::scale_asymmetric_projection_fov(
+        scaled_fov, presentation_producer_scale(), scaled_fov);
 }
 
 struct ProducerProjectionScales {
@@ -1897,7 +1938,7 @@ struct ProjectionFloatRect {
 // unavailable, conservatively cover the complete rectangular runtime FOV.
 ProducerProjectionScales producer_projection_scales(
     float left, float right, float down, float up) {
-    const float alternate_scale = alternate_resize_producer_scale();
+    const float presentation_scale = presentation_producer_scale();
     const float horizontal_span = right - left;
     const float vertical_span = up - down;
     if (g_config.fullscreen_projection &&
@@ -1919,18 +1960,18 @@ ProducerProjectionScales producer_projection_scales(
             return {
                 std::clamp(
                     2.0f * half_tan_x /
-                        horizontal_span * alternate_scale,
+                        horizontal_span * presentation_scale,
                     0.01f, 2.0f),
                 std::clamp(
                     2.0f * half_tan_y /
-                        vertical_span * alternate_scale,
+                        vertical_span * presentation_scale,
                     0.01f, 2.0f)};
         }
     }
     const float cover_scale = producer_render_fov_scale();
     return {
-        cover_scale * alternate_scale,
-        cover_scale * alternate_scale};
+        cover_scale * presentation_scale,
+        cover_scale * presentation_scale};
 }
 
 bool ensure_stereo_eye_cache(const D3D12_RESOURCE_DESC& source_desc);
@@ -2657,6 +2698,7 @@ thread_local uint64_t g_engine_producer_pair_id{};
 using EngineIsAnyMenuFn = void(__fastcall*)(void*, void*, uint8_t*);
 EngineIsAnyMenuFn g_engine_is_any_menu{};
 std::atomic<int> g_engine_menu_state{-1};
+std::atomic<int> g_engine_raw_menu_state{-1};
 
 // [FIX:AER-AFW-CINEMA-HUD-RESTORE V1190 1/4] AFW is suspended in normal or
 // manual Cinema, so its HUD must remain on the already validated per-eye
@@ -2953,17 +2995,17 @@ bool initialize_native_asymmetric_pair(uint64_t pair_id) {
         g_xr_views.size() < 2 || pair_id == 0 || pair_id == UINT64_MAX) {
         return false;
     }
-    // [TRIAL:ALT-RESIZE-PRODUCER-COUPLING V1525 2/4] Freeze the exact FOV
-    // rendered by the native producer. Alt. resize scales its tangent interval
-    // here so temporal, DLSS and AFW metadata follow the same camera.
+    // [TRIAL:STANDARD-PRODUCER-FOV-RESCALE V23038 2/5] Freeze the exact FOV
+    // rendered by the native producer. Presentation Size scales its tangent
+    // interval here so temporal, DLSS and AFW metadata follow the same camera.
     std::array<XrFovf, 2> producer_fovs{};
-    const float alternate_scale = alternate_resize_producer_scale();
+    const float presentation_scale = presentation_producer_scale();
     for (uint32_t eye = 0; eye < 2; ++eye) {
         w3vr::openxr_eye_geometry::AsymmetricProjectionDescriptor descriptor{};
         producer_fovs[eye] = g_xr_views[eye].fov;
-        if (alternate_scale < 1.0f &&
+        if (presentation_scale < 1.0f &&
             !w3vr::openxr_eye_geometry::scale_asymmetric_projection_fov(
-                producer_fovs[eye], alternate_scale,
+                producer_fovs[eye], presentation_scale,
                 producer_fovs[eye])) {
             return false;
         }
@@ -3842,6 +3884,9 @@ void record_streamline_command_list_eye(
     uint32_t eye) {
     ID3D12GraphicsCommandList* const command_list =
         resolve_native_command_list(wrapped_command_list);
+    if (command_list == nullptr) {
+        return;
+    }
     std::scoped_lock lock{g_streamline_command_list_eye_mutex};
     g_streamline_command_list_eyes[command_list] = eye;
     g_streamline_command_list_last_eyes[command_list] = eye;
@@ -4739,6 +4784,18 @@ std::unordered_map<ID3D12Resource*, ResourceInfo> g_resource_infos{};
 std::atomic<uint64_t> g_resource_registry_generation{1};
 std::atomic<uint64_t> g_resource_registry_serial{1};
 std::unordered_map<ID3D12GraphicsCommandList*, CommandListInfo> g_command_list_infos{};
+// [TRIAL:RESHADE-IMMEDIATE-LIST-ISOLATION V23001 2/4] A thread-local last-hit
+// avoids adding a mutex to every draw after the ReShade list is identified.
+// [FIX:RESHADE-DEFERRED-NAME-CLASSIFICATION V23033 1/2] Cache only positive
+// identities. ReShade may assign its debug name after W3VR first sees the raw
+// list; a cached negative would then enroll every later overlay draw as game
+// HUD state for the lifetime of the process.
+std::mutex g_reshade_command_list_classification_mutex{};
+std::unordered_set<ID3D12GraphicsCommandList*>
+    g_reshade_command_list_classification{};
+thread_local ID3D12GraphicsCommandList*
+    g_reshade_last_internal_command_list{};
+std::atomic<uint32_t> g_reshade_immediate_command_list_detection_count{};
 std::unordered_map<ID3D12DescriptorHeap*, DescriptorHeapInfo> g_descriptor_heap_infos{};
 std::unordered_map<SIZE_T, ResourceDescriptorInfo> g_resource_descriptors{};
 std::unordered_map<SIZE_T, ID3D12Resource*> g_rtv_descriptors{};
@@ -4977,20 +5034,12 @@ struct HudCompositePsoRecipe {
 HudCompositePsoRecipe g_hud_composite_pso_recipe{};
 HudCompositePsoRecipe g_real_smoke_pso_recipe{};
 std::mutex g_real_smoke_pso_creation_mutex{};
-constexpr uint32_t kMode3SceneOnlyPairHistory = 4;
 std::mutex g_mode3_scene_only_output_mutex{};
-std::array<uint64_t, kMode3SceneOnlyPairHistory>
-    g_mode3_scene_only_output_pairs{};
-// A command list can bind another PSO after the scene-only HUD draw and before
-// its final PRESENT transition. Track the draw in the current recording epoch
-// instead of inferring it from whichever PSO happens to remain bound later.
-std::unordered_map<ID3D12GraphicsCommandList*, uint32_t>
-    g_mode3_scene_only_draw_generations{};
-uint32_t g_mode3_scene_only_output_generation{};
-uint32_t g_mode3_scene_only_output_cursor{};
-uint64_t g_mode3_scene_only_pending_pair{};
-uint32_t g_mode3_scene_only_pending_eye_mask{};
-bool g_mode3_scene_only_pending_valid{};
+w3vr::mode3_transport::HudSceneOwnership g_mode3_hud_scene_ownership{};
+// V1531 tracks every actual HUD-family draw in the current recording. Merely
+// binding an unrelated PSO cannot change ownership; a later baked-HUD draw can.
+std::unordered_map<ID3D12GraphicsCommandList*,
+    w3vr::mode3_transport::HudDrawOwnership> g_mode3_hud_draw_ownership{};
 std::atomic<ID3D12Resource*> g_mode3_latest_hud_source{};
 std::atomic<uint32_t> g_mode3_latest_hud_format{
     static_cast<uint32_t>(DXGI_FORMAT_UNKNOWN)};
@@ -5056,6 +5105,7 @@ struct Mode3AerAfwHudExecuteSubmission {
     bool has_present{};
     bool has_capture{};
     bool scene_only_draw_recorded{};
+    bool hud_draw_recorded{};
 };
 struct Mode3SubmittedEarlyHudPending {
     Mode3EarlyHudPending pending{};
@@ -5065,6 +5115,7 @@ struct Mode3SubmittedEarlyHudPending {
     uint64_t producer_queue_fence_value{};
     uint64_t submission_serial{};
     bool scene_only_draw_recorded{};
+    bool hud_draw_recorded{};
 };
 struct Mode3StrictHudCommandListEye {
     uint32_t generation{};
@@ -5182,18 +5233,10 @@ bool mode3_hud_pipeline_family(ID3D12PipelineState* pipeline) {
 }
 
 bool mode3_scene_only_output_pair_ready(uint64_t pair_id) {
-    if (pair_id == 0 || pair_id == UINT64_MAX) {
-        return false;
-    }
     std::scoped_lock lock{g_mode3_scene_only_output_mutex};
-    if (g_mode3_scene_only_output_generation !=
-        g_streamline_capture_generation.load(std::memory_order_acquire)) {
-        return false;
-    }
-    return std::find(
-        g_mode3_scene_only_output_pairs.begin(),
-        g_mode3_scene_only_output_pairs.end(), pair_id) !=
-        g_mode3_scene_only_output_pairs.end();
+    return g_mode3_hud_scene_ownership.ready(
+        g_streamline_capture_generation.load(std::memory_order_acquire),
+        pair_id);
 }
 struct TaauUavWriter {
     ID3D12GraphicsCommandList* command_list{};
@@ -9836,6 +9879,59 @@ void log_line(const char* fmt, ...) {
     va_end(args);
 }
 
+bool is_reshade_immediate_command_list(
+    ID3D12GraphicsCommandList* command_list) {
+    if (command_list == nullptr || g_reshade_secondary_module == nullptr) {
+        return false;
+    }
+    if (command_list == g_reshade_last_internal_command_list) {
+        return true;
+    }
+
+    {
+        std::scoped_lock lock{
+            g_reshade_command_list_classification_mutex};
+        const auto found =
+            g_reshade_command_list_classification.find(command_list);
+        if (found != g_reshade_command_list_classification.end()) {
+            g_reshade_last_internal_command_list = command_list;
+            return true;
+        }
+    }
+
+    wchar_t object_name[64]{};
+    UINT object_name_size = sizeof(object_name);
+    const HRESULT name_result = command_list->GetPrivateData(
+        WKPDID_D3DDebugObjectNameW, &object_name_size, object_name);
+    const bool is_internal = SUCCEEDED(name_result) &&
+        wcscmp(object_name, L"ReShade immediate command list") == 0;
+    if (!is_internal) {
+        // The name can be published later. Do not turn this transient miss
+        // into a permanent classification for this raw COM identity.
+        return false;
+    }
+
+    bool inserted{};
+    {
+        std::scoped_lock lock{
+            g_reshade_command_list_classification_mutex};
+        inserted =
+            g_reshade_command_list_classification.insert(command_list).second;
+    }
+    g_reshade_last_internal_command_list = command_list;
+    if (inserted) {
+        const uint32_t detection =
+            g_reshade_immediate_command_list_detection_count.fetch_add(
+                1, std::memory_order_relaxed) + 1;
+        log_line(
+            "V23033 ReShade immediate command list isolated list=%p "
+            "detection=%u gpu_submission=unchanged "
+            "w3vr_tracking=disabled classification=positive_only",
+            command_list, detection);
+    }
+    return true;
+}
+
 // [DEBUG:RENDERDOC-DLSS-CAPTURE V12102 1/3] Bind the official in-application
 // API. Prefer an injected module, otherwise load an explicit renderdoc.dll
 // beside the game executable. initialize_real_dxgi_exports() runs first so
@@ -11670,65 +11766,54 @@ bool command_list_is_d3d12_runtime(const void* object) {
         module_base_name_is(owner, L"d3d12.dll");
 }
 
-// Offset of the native pointer inside the wrapper, once proven. UINT32_MAX means
-// "not yet resolved"; the scan runs until one candidate validates.
-std::atomic<uint32_t> g_streamline_command_list_native_offset{UINT32_MAX};
-std::atomic<uint32_t> g_streamline_unwrap_logs{};
+w3vr::command_list_identity::Owner classify_command_list_owner(
+    const IUnknown* object) {
+    using w3vr::command_list_identity::Owner;
+    const HMODULE owner = vtable_owner_of(object);
+    if (module_base_name_is(owner, L"D3D12Core.dll") ||
+        module_base_name_is(owner, L"d3d12.dll")) {
+        return Owner::Native;
+    }
+    if (module_base_name_is(owner, L"sl.interposer.dll")) {
+        return Owner::Streamline;
+    }
+    if (module_base_name_is(owner, L"ReShade64.dll")) {
+        return Owner::ReShade;
+    }
+    return Owner::Unknown;
+}
 
-// [FIX:STREAMLINE-COMMAND-LIST-UNWRAP 2/3]
+// [FIX:NESTED-COMMAND-LIST-IDENTITY V1532 1/3]
 ID3D12GraphicsCommandList* resolve_native_command_list(
     ID3D12GraphicsCommandList* command_list) {
-    if (command_list == nullptr ||
-        command_list_is_d3d12_runtime(command_list)) {
+    using w3vr::command_list_identity::Owner;
+    if (command_list == nullptr) {
+        return nullptr;
+    }
+    const auto owner = classify_command_list_owner(command_list);
+    // Native lists and unrelated integrations are outside the proxy rewrite.
+    // Unknown objects encountered INSIDE a recognized chain are rejected.
+    if (owner == Owner::Native || owner == Owner::Unknown) {
         return command_list;
     }
-    if (!module_base_name_is(
-            vtable_owner_of(command_list), L"sl.interposer.dll")) {
-        return command_list;
-    }
-
-    const auto* bytes = reinterpret_cast<const uint8_t*>(command_list);
-    const uint32_t known =
-        g_streamline_command_list_native_offset.load(
-            std::memory_order_acquire);
-    if (known != UINT32_MAX) {
-        if (address_is_readable(bytes + known, sizeof(void*))) {
-            auto* candidate = *reinterpret_cast<ID3D12GraphicsCommandList* const*>(
-                bytes + known);
-            if (command_list_is_d3d12_runtime(candidate)) {
-                return candidate;
-            }
+    const auto resolved = w3vr::command_list_identity::resolve(
+        command_list, classify_command_list_owner);
+    if (resolved.native == nullptr) {
+        static std::atomic<uint32_t> failure_logs{};
+        if (take_bounded_log_slot(failure_logs, 8)) {
+            log_line("V1532 command-list identity rejected wrapper=%p depth=%u reason=%u",
+                command_list, resolved.wrappers,
+                static_cast<unsigned>(resolved.failure));
         }
-        return command_list;
+        return nullptr;
     }
-
-    constexpr uint32_t kMaxWrapperScanBytes = 256;
-    for (uint32_t offset = sizeof(void*); offset <= kMaxWrapperScanBytes;
-         offset += sizeof(void*)) {
-        if (!address_is_readable(bytes + offset, sizeof(void*))) {
-            break;
-        }
-        auto* candidate = *reinterpret_cast<ID3D12GraphicsCommandList* const*>(
-            bytes + offset);
-        if (!command_list_is_d3d12_runtime(candidate)) {
-            continue;
-        }
-        g_streamline_command_list_native_offset.store(
-            offset, std::memory_order_release);
-        log_line(
-            "Streamline command-list unwrap resolved offset=%u wrapper=%p "
-            "native=%p",
-            offset, command_list, candidate);
-        return candidate;
+    static std::atomic<uint32_t> success_logs{};
+    if (take_bounded_log_slot(success_logs, 8)) {
+        log_line("V1532 command-list identity resolved owner=%s wrapper=%p native=%p depth=%u",
+            owner == Owner::Streamline ? "Streamline" : "ReShade",
+            command_list, resolved.native, resolved.wrappers);
     }
-
-    if (take_bounded_log_slot(g_streamline_unwrap_logs, 8)) {
-        log_line(
-            "Streamline command-list unwrap failed wrapper=%p scan_bytes=%u "
-            "(producer join will use the wrapper, as before)",
-            command_list, kMaxWrapperScanBytes);
-    }
-    return command_list;
+    return resolved.native;
 }
 
 void finalize_puredark_afw_dlss_submission(
@@ -13685,6 +13770,17 @@ void STDMETHODCALLTYPE hook_om_set_render_targets(
     const D3D12_CPU_DESCRIPTOR_HANDLE* render_target_descriptors,
     BOOL rts_single_handle_to_descriptor_range,
     const D3D12_CPU_DESCRIPTOR_HANDLE* depth_stencil_descriptor) {
+    // [TRIAL:RESHADE-IMMEDIATE-LIST-ISOLATION V23001 3/4] ReShade's own
+    // command stream remains byte-for-byte native. It must never enroll its
+    // backbuffer RTV, overlay PSO or effect draws as REDengine HUD state.
+    if (is_reshade_immediate_command_list(command_list)) {
+        g_om_set_render_targets(
+            command_list, num_render_target_descriptors,
+            render_target_descriptors,
+            rts_single_handle_to_descriptor_range,
+            depth_stencil_descriptor);
+        return;
+    }
     // Active render-target state is part of the historical functional TAAU
     // route, not a reverse diagnostic. Follow the selected TAAU backend.
     if (taau_functional_hooks_needed() || reverse_enabled()) {
@@ -14126,8 +14222,6 @@ void load_config() {
             "openxr", "mode3_aer_presentation", false);
         g_config.resolution_scale = std::clamp(read_ini_float("openxr", "resolution_scale", 1.0f), 0.25f, 2.0f);
         g_config.presentation_scale = std::clamp(read_ini_float("openxr", "presentation_scale", 0.9f), 0.5f, 1.0f);
-        g_config.presentation_black_resize = read_ini_bool(
-            "openxr", "presentation_black_resize", false);
         g_config.world_detail_range =
             w3vr::render_proxy_distance::clamp_world_detail_range(
                 read_ini_float("openxr", "world_detail_range", 1.0f));
@@ -14600,12 +14694,11 @@ void load_config() {
                 g_config.runtime_diagnostics ? 1 : 0);
         }
 
-        log_line("Config openxr enabled=%d mode=%d resolution_scale=%.3f presentation_scale=%.3f presentation_black_resize=%d native_stereo=%d fullscreen_projection=%d mono_shift=%d reverse enabled=%d periodic=%d unmap=%d cbv=%d active_nudge=%d nudge=%.3f start=%d cycle=%d pulse=%d orbit_probe=%d orbit_interval=%d orbit_max=%d copy_probe=%d copy_max=%d stereo_probe=%d geometry_shift=%d",
+        log_line("Config openxr enabled=%d mode=%d resolution_scale=%.3f presentation_scale=%.3f native_stereo=%d fullscreen_projection=%d mono_shift=%d reverse enabled=%d periodic=%d unmap=%d cbv=%d active_nudge=%d nudge=%.3f start=%d cycle=%d pulse=%d orbit_probe=%d orbit_interval=%d orbit_max=%d copy_probe=%d copy_max=%d stereo_probe=%d geometry_shift=%d",
             g_config.openxr_enabled,
             g_config.openxr_mode,
             g_config.resolution_scale,
             g_config.presentation_scale,
-            g_config.presentation_black_resize ? 1 : 0,
             native_stereo_runtime_enabled() ? 1 : 0,
             g_config.fullscreen_projection ? 1 : 0,
             clean_mono_transport_active()
@@ -20498,8 +20591,30 @@ void STDMETHODCALLTYPE hook_execute_command_lists(
     ID3D12CommandQueue* queue,
     UINT num_command_lists,
     ID3D12CommandList* const* command_lists) {
+    // [TRIAL:RESHADE-IMMEDIATE-LIST-ISOLATION V23001 4/4] The official
+    // D3D12 queue wrapper flushes its named immediate list as a separate raw
+    // ExecuteCommandLists call before the game's submission. Preserve that GPU
+    // call while excluding it from every W3VR publication/fence ledger. AFW
+    // producer identity is resolved earlier, at the public Streamline callback.
+    bool reshade_internal_submission = num_command_lists != 0 &&
+        command_lists != nullptr;
+    for (UINT index = 0;
+        reshade_internal_submission && index < num_command_lists; ++index) {
+        reshade_internal_submission =
+            is_reshade_immediate_command_list(
+                reinterpret_cast<ID3D12GraphicsCommandList*>(
+                    command_lists[index]));
+    }
     const bool puredark_afw_route_configured =
         puredark_afw_mode3_aer_any_route_configured();
+    if (reshade_internal_submission) {
+        // [FIX:NESTED-COMMAND-LIST-IDENTITY V1532 2/3] Keep V23001's proven
+        // opaque immediate submission completely isolated. V23019's attempt to
+        // publish AFW here was physically removed: this list is not the wrapper
+        // that owns the DLSS producer commands.
+        g_execute_command_lists(queue, num_command_lists, command_lists);
+        return;
+    }
     const bool puredark_afw_cross_queue_route =
         puredark_afw_mode3_aer_common_transport_configured();
     // [FIX:UNIFIED-MODE3-TRANSPORT V1234 4/6] Exact command-list identity is
@@ -20908,6 +21023,12 @@ void STDMETHODCALLTYPE hook_copy_buffer_region(
     ID3D12Resource* src_buffer,
     UINT64 src_offset,
     UINT64 num_bytes) {
+    if (is_reshade_immediate_command_list(command_list)) {
+        g_copy_buffer_region(
+            command_list, dst_buffer, dst_offset, src_buffer, src_offset,
+            num_bytes);
+        return;
+    }
     if (reverse_enabled() && g_config.reverse_copy_probe && src_buffer != nullptr && dst_buffer != nullptr) {
         ResourceInfo src_info{};
         ResourceInfo dst_info{};
@@ -22142,6 +22263,11 @@ void STDMETHODCALLTYPE hook_set_descriptor_heaps(
     ID3D12GraphicsCommandList* command_list,
     UINT num_descriptor_heaps,
     ID3D12DescriptorHeap* const* descriptor_heaps) {
+    if (is_reshade_immediate_command_list(command_list)) {
+        g_set_descriptor_heaps(
+            command_list, num_descriptor_heaps, descriptor_heaps);
+        return;
+    }
     if (dlss_graphics_state_tracking_active() && descriptor_heaps != nullptr) {
         auto* state = access_dlss_graphics_state(command_list, true);
         if (state != nullptr) {
@@ -22245,6 +22371,10 @@ HRESULT STDMETHODCALLTYPE hook_reset_command_list(
     ID3D12GraphicsCommandList* command_list,
     ID3D12CommandAllocator* allocator,
     ID3D12PipelineState* initial_state) {
+    if (is_reshade_immediate_command_list(command_list)) {
+        return g_reset_command_list(
+            command_list, allocator, initial_state);
+    }
     const HRESULT result =
         g_reset_command_list(command_list, allocator, initial_state);
     if (FAILED(result)) {
@@ -22327,7 +22457,7 @@ HRESULT STDMETHODCALLTYPE hook_reset_command_list(
     // preceding recording authorize the next output that reuses this object.
     {
         std::scoped_lock lock{g_mode3_scene_only_output_mutex};
-        g_mode3_scene_only_draw_generations.erase(command_list);
+        g_mode3_hud_draw_ownership.erase(command_list);
     }
     // [FIX:AER-AFW-POST-HUD V1189 4/9] A recycled command list must never
     // inherit the retained-HUD identity from its preceding recording epoch.
@@ -22424,6 +22554,11 @@ void STDMETHODCALLTYPE hook_set_graphics_root_descriptor_table(
     ID3D12GraphicsCommandList* command_list,
     UINT root_parameter_index,
     D3D12_GPU_DESCRIPTOR_HANDLE base_descriptor) {
+    if (is_reshade_immediate_command_list(command_list)) {
+        g_set_graphics_root_descriptor_table(
+            command_list, root_parameter_index, base_descriptor);
+        return;
+    }
     if (dlss_graphics_state_tracking_active() &&
         root_parameter_index < 32) {
         if (auto* state = access_dlss_graphics_state(command_list, true)) {
@@ -22454,6 +22589,11 @@ void STDMETHODCALLTYPE hook_set_compute_root_descriptor_table(
     ID3D12GraphicsCommandList* command_list,
     UINT root_parameter_index,
     D3D12_GPU_DESCRIPTOR_HANDLE base_descriptor) {
+    if (is_reshade_immediate_command_list(command_list)) {
+        g_set_compute_root_descriptor_table(
+            command_list, root_parameter_index, base_descriptor);
+        return;
+    }
     const bool diagnostic_tracking =
         (reverse_enabled() ||
             g_compute_probe_active.load(std::memory_order_relaxed));
@@ -22482,6 +22622,11 @@ void STDMETHODCALLTYPE hook_set_graphics_root_cbv(
     ID3D12GraphicsCommandList* command_list,
     UINT root_parameter_index,
     D3D12_GPU_VIRTUAL_ADDRESS buffer_location) {
+    if (is_reshade_immediate_command_list(command_list)) {
+        g_set_graphics_root_cbv(
+            command_list, root_parameter_index, buffer_location);
+        return;
+    }
     if (native_temporal_terrain_motion_route_active() &&
         root_parameter_index < 32) {
         if (auto* state = access_dlss_graphics_state(command_list, true)) {
@@ -22509,6 +22654,11 @@ void STDMETHODCALLTYPE hook_set_compute_root_cbv(
     ID3D12GraphicsCommandList* command_list,
     UINT root_parameter_index,
     D3D12_GPU_VIRTUAL_ADDRESS buffer_location) {
+    if (is_reshade_immediate_command_list(command_list)) {
+        g_set_compute_root_cbv(
+            command_list, root_parameter_index, buffer_location);
+        return;
+    }
     if ((reverse_enabled() ||
             g_compute_probe_active.load(std::memory_order_relaxed)) &&
         root_parameter_index < 32) {
@@ -22523,6 +22673,12 @@ void STDMETHODCALLTYPE hook_set_compute_root_32bit_constant(
     UINT root_parameter_index,
     UINT src_data,
     UINT dest_offset_in_32bit_values) {
+    if (is_reshade_immediate_command_list(command_list)) {
+        g_set_compute_root_32bit_constant(
+            command_list, root_parameter_index, src_data,
+            dest_offset_in_32bit_values);
+        return;
+    }
     if ((reverse_enabled() ||
             g_compute_probe_active.load(std::memory_order_relaxed)) &&
         root_parameter_index < 32 && dest_offset_in_32bit_values < 64) {
@@ -22541,6 +22697,12 @@ void STDMETHODCALLTYPE hook_set_compute_root_32bit_constants(
     UINT num_32bit_values_to_set,
     const void* src_data,
     UINT dest_offset_in_32bit_values) {
+    if (is_reshade_immediate_command_list(command_list)) {
+        g_set_compute_root_32bit_constants(
+            command_list, root_parameter_index, num_32bit_values_to_set,
+            src_data, dest_offset_in_32bit_values);
+        return;
+    }
     if ((reverse_enabled() ||
             g_compute_probe_active.load(std::memory_order_relaxed)) &&
         root_parameter_index < 32 && src_data != nullptr &&
@@ -22562,6 +22724,10 @@ void STDMETHODCALLTYPE hook_set_compute_root_32bit_constants(
 void STDMETHODCALLTYPE hook_set_pipeline_state(
     ID3D12GraphicsCommandList* command_list,
     ID3D12PipelineState* pipeline_state) {
+    if (is_reshade_immediate_command_list(command_list)) {
+        g_set_pipeline_state(command_list, pipeline_state);
+        return;
+    }
     if (mode3_aer_presentation_active()) {
         EngineFrameTag exact_render_tag{};
         if (current_exact_engine_render_tag(exact_render_tag)) {
@@ -23003,6 +23169,10 @@ void STDMETHODCALLTYPE hook_set_pipeline_state(
 void STDMETHODCALLTYPE hook_set_graphics_root_signature(
     ID3D12GraphicsCommandList* command_list,
     ID3D12RootSignature* root_signature) {
+    if (is_reshade_immediate_command_list(command_list)) {
+        g_set_graphics_root_signature(command_list, root_signature);
+        return;
+    }
     if (dlss_graphics_state_tracking_active()) {
         if (auto* state = access_dlss_graphics_state(command_list, true)) {
             state->root_signature = root_signature;
@@ -23025,6 +23195,10 @@ void STDMETHODCALLTYPE hook_set_graphics_root_signature(
 void STDMETHODCALLTYPE hook_set_compute_root_signature(
     ID3D12GraphicsCommandList* command_list,
     ID3D12RootSignature* root_signature) {
+    if (is_reshade_immediate_command_list(command_list)) {
+        g_set_compute_root_signature(command_list, root_signature);
+        return;
+    }
     const bool diagnostic_tracking =
         (reverse_enabled() ||
             g_compute_probe_active.load(std::memory_order_relaxed));
@@ -23587,6 +23761,13 @@ void STDMETHODCALLTYPE hook_draw_indexed_instanced(
     UINT start_index_location,
     INT base_vertex_location,
     UINT start_instance_location) {
+    if (is_reshade_immediate_command_list(command_list)) {
+        g_draw_indexed_instanced(
+            command_list, index_count_per_instance, instance_count,
+            start_index_location, base_vertex_location,
+            start_instance_location);
+        return;
+    }
     // [PERF:NOAA-PIPELINE-LOOKUP V1441 1/3] Foliage, smoke and focus inspect
     // the same currently bound PSO. Publish one nonblocking snapshot for the
     // draw instead of probing the command-list table up to three times.
@@ -23850,13 +24031,8 @@ void reset_mode3_hud_publication_state(uint32_t generation) {
     {
         std::scoped_lock scene_only_lock{
             g_mode3_scene_only_output_mutex};
-        g_mode3_scene_only_output_pairs.fill(0);
-        g_mode3_scene_only_draw_generations.clear();
-        g_mode3_scene_only_output_generation = generation;
-        g_mode3_scene_only_output_cursor = 0;
-        g_mode3_scene_only_pending_pair = 0;
-        g_mode3_scene_only_pending_eye_mask = 0;
-        g_mode3_scene_only_pending_valid = false;
+        g_mode3_hud_scene_ownership.reset(generation);
+        g_mode3_hud_draw_ownership.clear();
     }
 
     g_mode3_latest_hud_source.store(nullptr, std::memory_order_release);
@@ -24246,38 +24422,33 @@ bool capture_mode3_early_hud(
 void record_mode3_scene_only_hud_output(
     const EngineFrameTag& tag,
     bool scene_only_draw_recorded) {
-    // [FIX:RETAINED-CINEMA-HUD-PREVIOUS-FRAME V1123 3/3] Record complete L/R
-    // scene pairs that actually executed a scene-only HUD draw. V1280 carries
-    // this proof with the submitted HUD-writer list instead of looking for it
-    // on an unrelated final-PRESENT list.
-    std::scoped_lock scene_only_lock{g_mode3_scene_only_output_mutex};
-    if (g_mode3_scene_only_output_generation != tag.generation) {
-        g_mode3_scene_only_output_pairs.fill(0);
-        g_mode3_scene_only_output_generation = tag.generation;
-        g_mode3_scene_only_output_cursor = 0;
-        g_mode3_scene_only_pending_pair = 0;
-        g_mode3_scene_only_pending_eye_mask = 0;
-        g_mode3_scene_only_pending_valid = false;
+    // [FIX:HUD-CURRENT-OUTPUT-OWNERSHIP V1531] The writer-list snapshot carries
+    // positive AND negative ownership. A published pair is not permanently
+    // scene-only if a later submission puts the native HUD back into it.
+    bool revoked{};
+    {
+        std::scoped_lock scene_only_lock{g_mode3_scene_only_output_mutex};
+        if (tag.generation != g_streamline_capture_generation.load(
+                std::memory_order_acquire)) {
+            return;
+        }
+        if (g_mode3_hud_scene_ownership.generation() != tag.generation) {
+            g_mode3_hud_scene_ownership.reset(tag.generation);
+        }
+        const bool was_ready = g_mode3_hud_scene_ownership.ready(
+            tag.generation, tag.pair_id);
+        g_mode3_hud_scene_ownership.record(
+            tag.generation, tag.pair_id, tag.eye, scene_only_draw_recorded);
+        revoked = was_ready && !g_mode3_hud_scene_ownership.ready(
+            tag.generation, tag.pair_id);
     }
-    if (g_mode3_scene_only_pending_pair != tag.pair_id) {
-        g_mode3_scene_only_pending_pair = tag.pair_id;
-        g_mode3_scene_only_pending_eye_mask = 0;
-        g_mode3_scene_only_pending_valid = true;
-    }
-    if (scene_only_draw_recorded) {
-        g_mode3_scene_only_pending_eye_mask |= 1u << tag.eye;
-    } else {
-        g_mode3_scene_only_pending_valid = false;
-    }
-    if (g_mode3_scene_only_pending_valid &&
-        g_mode3_scene_only_pending_eye_mask == 0x3u &&
-        std::find(
-            g_mode3_scene_only_output_pairs.begin(),
-            g_mode3_scene_only_output_pairs.end(), tag.pair_id) ==
-            g_mode3_scene_only_output_pairs.end()) {
-        g_mode3_scene_only_output_pairs[
-            g_mode3_scene_only_output_cursor++ %
-                kMode3SceneOnlyPairHistory] = tag.pair_id;
+    if (revoked) {
+        static std::atomic<uint32_t> ownership_revoke_logs{};
+        if (take_bounded_log_slot(ownership_revoke_logs, 16)) {
+            log_line("V1531 HUD scene-only proof revoked pair=%llu eye=%u generation=%u",
+                static_cast<unsigned long long>(tag.pair_id),
+                tag.eye, tag.generation);
+        }
     }
 }
 
@@ -24787,6 +24958,12 @@ void STDMETHODCALLTYPE hook_draw_instanced(
     UINT instance_count,
     UINT start_vertex_location,
     UINT start_instance_location) {
+    if (is_reshade_immediate_command_list(command_list)) {
+        g_draw_instanced(
+            command_list, vertex_count_per_instance, instance_count,
+            start_vertex_location, start_instance_location);
+        return;
+    }
     auto* draw_pipeline =
         load_command_list_pipeline_effect_nonblocking(command_list);
     // Construct before every early-return path. Only the exact cached 4x1
@@ -24964,7 +25141,8 @@ void STDMETHODCALLTYPE hook_draw_instanced(
     }
     auto* const active_hud_pipeline =
         load_command_list_pipeline(command_list);
-    if (mode3_hud_pipeline_family(active_hud_pipeline)) {
+    const bool hud_family_draw = mode3_hud_pipeline_family(active_hud_pipeline);
+    if (hud_family_draw) {
         // [FIX:AER-CINEMA-EXACT-EYE-CONTRACT V1214 5/12] Record the actual
         // HUD draw, after any V1190 baked-HUD restoration, under the same
         // exact task tag used by the scene. Present will reject a mismatched
@@ -24977,10 +25155,14 @@ void STDMETHODCALLTYPE hook_draw_instanced(
             routed_hud_eye <= 1
                 ? static_cast<int>(routed_hud_eye) : -1);
     }
-    const bool scene_only_hud_draw =
-        mode3_stereo_transport_active() && command_list != nullptr &&
-        active_hud_pipeline ==
-            g_mode3_scene_only_pso.load(std::memory_order_acquire);
+    const bool track_hud_ownership = hud_family_draw &&
+        mode3_stereo_transport_active() && command_list != nullptr;
+    const bool scene_only_hud_draw = active_hud_pipeline ==
+        g_mode3_scene_only_pso.load(std::memory_order_acquire);
+    const uint32_t hud_draw_generation =
+        track_hud_ownership
+            ? g_streamline_capture_generation.load(std::memory_order_acquire)
+            : 0;
     g_draw_instanced(
         command_list,
         vertex_count_per_instance,
@@ -24992,15 +25174,12 @@ void STDMETHODCALLTYPE hook_draw_instanced(
     replay_native_temporal_terrain_nonindexed_motion(
         command_list, vertex_count_per_instance, instance_count,
         start_vertex_location, start_instance_location);
-    // [FIX:RETAINED-CINEMA-HUD-PREVIOUS-FRAME V1123 2/3] Commit the marker
-    // only after the real scene-only draw has executed. If the current HUD
-    // pair is incomplete, get_mode3_early_hud_pair() already falls back to the
-    // last accepted immutable pair, so Cinema repeats that previous HUD frame
-    // instead of presenting a scene with no HUD.
-    if (scene_only_hud_draw) {
+    // Commit the actual final HUD-family draw, including native/baked output.
+    // Later non-HUD draws or PSO binds must not erase this recording's proof.
+    if (track_hud_ownership) {
         std::scoped_lock lock{g_mode3_scene_only_output_mutex};
-        g_mode3_scene_only_draw_generations[command_list] =
-            g_streamline_capture_generation.load(std::memory_order_acquire);
+        g_mode3_hud_draw_ownership[command_list].record(
+            hud_draw_generation, scene_only_hud_draw);
     }
     publish_mode3_hud_source(command_list);
 }
@@ -28060,6 +28239,12 @@ void STDMETHODCALLTYPE hook_dispatch(
     UINT thread_group_count_x,
     UINT thread_group_count_y,
     UINT thread_group_count_z) {
+    if (is_reshade_immediate_command_list(command_list)) {
+        g_dispatch(
+            command_list, thread_group_count_x, thread_group_count_y,
+            thread_group_count_z);
+        return;
+    }
     if (high_frequency_runtime_diagnostics_active()) {
     }
     // [PERF:NOAA-DISPATCH-ROUTE V1441] The four RT helpers all begin with the
@@ -28245,6 +28430,10 @@ void STDMETHODCALLTYPE hook_resource_barrier(
     ID3D12GraphicsCommandList* command_list,
     UINT num_barriers,
     const D3D12_RESOURCE_BARRIER* barriers) {
+    if (is_reshade_immediate_command_list(command_list)) {
+        g_resource_barrier(command_list, num_barriers, barriers);
+        return;
+    }
     const bool clean_mode3_fast_path =
         g_clean_mode3_resource_barrier_fast_path &&
         !g_compute_probe_active.load(std::memory_order_relaxed);
@@ -29649,11 +29838,11 @@ bool label_mode3_early_hud_at_present(
         std::scoped_lock scene_only_lock{
             g_mode3_scene_only_output_mutex};
         const auto draw_marker =
-            g_mode3_scene_only_draw_generations.find(command_list);
-        if (draw_marker != g_mode3_scene_only_draw_generations.end()) {
+            g_mode3_hud_draw_ownership.find(command_list);
+        if (draw_marker != g_mode3_hud_draw_ownership.end()) {
             scene_only_draw_recorded =
-                draw_marker->second == tag.generation;
-            g_mode3_scene_only_draw_generations.erase(draw_marker);
+                draw_marker->second.scene_only_for(tag.generation);
+            g_mode3_hud_draw_ownership.erase(draw_marker);
         }
     }
     record_mode3_scene_only_hud_output(tag, scene_only_draw_recorded);
@@ -29721,14 +29910,16 @@ take_mode3_aer_afw_hud_submissions_before_execute(
             std::scoped_lock scene_only_lock{
                 g_mode3_scene_only_output_mutex};
             const auto draw_marker =
-                g_mode3_scene_only_draw_generations.find(command_list);
-            if (draw_marker != g_mode3_scene_only_draw_generations.end()) {
+                g_mode3_hud_draw_ownership.find(command_list);
+            if (draw_marker != g_mode3_hud_draw_ownership.end()) {
+                const uint32_t draw_generation = submission.has_tag
+                    ? submission.recorded_tag.tag.generation
+                    : submission.recorded_capture.generation;
+                submission.hud_draw_recorded =
+                    draw_marker->second.recorded_for(draw_generation);
                 submission.scene_only_draw_recorded =
-                    draw_marker->second ==
-                        (submission.has_tag
-                            ? submission.recorded_tag.tag.generation
-                            : submission.recorded_capture.generation);
-                g_mode3_scene_only_draw_generations.erase(draw_marker);
+                    draw_marker->second.scene_only_for(draw_generation);
+                g_mode3_hud_draw_ownership.erase(draw_marker);
             }
         }
         if (!submission.has_tag && !submission.has_capture &&
@@ -29747,8 +29938,8 @@ take_mode3_aer_afw_hud_submissions_before_execute(
             static std::atomic<uint32_t> preexecute_snapshot_logs{};
             if (take_bounded_log_slot(preexecute_snapshot_logs, 96)) {
                 log_line(
-                    "V1492 Mode-3 HUD pre-execute snapshot tag=%d "
-                    "capture=%d present=%d draw=%d strict_eye=%d/%u "
+                    "V1531 Mode-3 HUD pre-execute snapshot tag=%d "
+                    "capture=%d present=%d scene_only=%d hud_draw=%d strict_eye=%d/%u "
                     "eye=%u pair=%llu generation=%u "
                     "tag_present=%llu capture_present=%llu "
                     "boundary_present=%llu submission_serial=%llu "
@@ -29757,6 +29948,7 @@ take_mode3_aer_afw_hud_submissions_before_execute(
                     submission.has_capture ? 1 : 0,
                     submission.has_present ? 1 : 0,
                     submission.scene_only_draw_recorded ? 1 : 0,
+                    submission.hud_draw_recorded ? 1 : 0,
                     submission.recorded_capture.strict_eye_valid ? 1 : 0,
                     submission.recorded_capture.strict_eye,
                     submission.recorded_tag.tag.eye,
@@ -29830,7 +30022,8 @@ void publish_mode3_aer_afw_hud_submissions_before_execute(
                 cross_queue_publication
                     ? producer_queue_fence_value : 0,
                 submission.submission_serial,
-                submission.scene_only_draw_recorded});
+                submission.scene_only_draw_recorded,
+                submission.hud_draw_recorded});
         }
         if (has_tag) {
             std::scoped_lock lock{g_mode3_aer_afw_hud_mutex};
@@ -29913,8 +30106,13 @@ void publish_mode3_aer_afw_hud_submissions_before_execute(
                                 candidate.queue != queue &&
                                 candidate.producer_queue_fence != nullptr &&
                                 candidate.producer_queue_fence_value != 0);
-                        if (!candidate.pending.strict_eye_valid || eye > 1 ||
-                            !candidate.scene_only_draw_recorded ||
+                        // The copy and the actual HUD draw must share this
+                        // submission/eye, but a native draw is also a valid
+                        // t1 producer. Scene-only is checked independently
+                        // when compositing onto the output scene below.
+                        if (!w3vr::mode3_transport::strict_hud_capture_publishable(
+                                candidate.pending.strict_eye_valid, eye,
+                                candidate.hud_draw_recorded) ||
                             (ready_eye_mask & (1u << eye)) != 0 ||
                             !capture_ordered_for_present ||
                             !strict_stereo_hud_join_window_matches(
@@ -29970,15 +30168,38 @@ void publish_mode3_aer_afw_hud_submissions_before_execute(
                 }
             }
             if (labeled) {
-                EngineFrameTag accepted_predecessor_tag{};
-                accepted_predecessor_tag.eye =
+                // [FIX:GAMEPLAY-HUD-CURRENT-SCENE-PROOF V23035 2/3]
+                // V1494 labels the retained HUD copy with the accepted
+                // predecessor consumed by the compositor. That texture label
+                // is not proof about the current scene image. Publish the
+                // scene-only draw under the current accepted scene so the
+                // later OpenXR gate queries the backbuffer it displays.
+                EngineFrameTag scene_only_output_tag{};
+                scene_only_output_tag.eye =
                     selected_capture.pending.strict_eye;
-                accepted_predecessor_tag.generation = generation;
-                accepted_predecessor_tag.pair_id =
-                    accepted_predecessor_pair;
-                record_mode3_scene_only_hud_output(
-                    accepted_predecessor_tag,
-                    selected_capture.scene_only_draw_recorded);
+                scene_only_output_tag.generation = generation;
+                scene_only_output_tag.pair_id =
+                    w3vr::mode3_transport::
+                        strict_stereo_scene_only_output_pair_id(
+                            current_accepted_scene_pair,
+                            accepted_predecessor_pair);
+                if (scene_only_output_tag.pair_id != 0) {
+                    record_mode3_scene_only_hud_output(
+                        scene_only_output_tag,
+                        selected_capture.scene_only_draw_recorded);
+                    if (!selected_capture.scene_only_draw_recorded) {
+                        static std::atomic<uint32_t> native_hud_rejoin_logs{};
+                        if (take_bounded_log_slot(native_hud_rejoin_logs, 16)) {
+                            log_line(
+                                "V1531 HUD native capture rejoined scene=%llu hud=%llu eye=%u generation=%u complete=%d",
+                                static_cast<unsigned long long>(
+                                    scene_only_output_tag.pair_id),
+                                static_cast<unsigned long long>(accepted_predecessor_pair),
+                                selected_capture.pending.strict_eye,
+                                generation, pair_complete_after_label ? 1 : 0);
+                        }
+                    }
+                }
             }
             if (g_config.runtime_diagnostics) {
                 static std::atomic<uint32_t> strict_scene_join_logs{};
@@ -33117,8 +33338,8 @@ bool prepare_full_vr_frame_camera(
         const float down = tanf(xr_fov->angleDown);
         const float up = tanf(xr_fov->angleUp);
         // Render the centered symmetric angular envelope selected from the
-        // runtime geometry. Presentation Size is absent from this producer;
-        // only the final OpenXR presenter may resize the completed image.
+        // runtime geometry. Presentation Size scales this producer envelope;
+        // the final standard submit publishes the same angular interval.
         const auto projection_scales = producer_projection_scales(
             left, right, down, up);
         float horizontal_scale = projection_scales.horizontal;
@@ -36606,8 +36827,8 @@ void __fastcall hook_engine_view_rebuild(float* view) {
         const float down = tanf(xr_fov.angleDown);
         const float up = tanf(xr_fov.angleUp);
         // Build the centered envelope required to contain both displaced
-        // runtime eyes. Presentation Size is absent from producer geometry;
-        // keep this regular factory path identical to the fallback above.
+        // runtime eyes. Presentation Size scales this producer geometry and
+        // its matching per-eye submit together.
         const auto projection_scales = producer_projection_scales(
             left, right, down, up);
         float horizontal_scale = projection_scales.horizontal;
@@ -39445,6 +39666,34 @@ void install_engine_render_proxy_distance_scale_hook() {
     }
 }
 
+void publish_engine_menu_state(
+    int raw_menu_open,
+    void* gui_manager,
+    const char* source) {
+    g_engine_raw_menu_state.store(raw_menu_open, std::memory_order_relaxed);
+    const bool reshade_overlay_open =
+        g_reshade_overlay_open.load(std::memory_order_acquire);
+    const int menu_open =
+        w3vr::reshade_overlay::effective_engine_menu_state(
+            raw_menu_open, reshade_overlay_open);
+    const int previous = g_engine_menu_state.exchange(menu_open);
+    if (menu_open != 0) {
+        g_engine_dual_gameplay_armed.store(false, std::memory_order_relaxed);
+    }
+    if (previous != menu_open) {
+        log_line(
+            "REDengine menu state %s raw=%d effective=%d "
+            "reshade_overlay=%d gui_manager=%p present=%llu",
+            source, raw_menu_open, menu_open,
+            reshade_overlay_open ? 1 : 0, gui_manager,
+            static_cast<unsigned long long>(g_present_count.load()));
+    }
+}
+
+// [FIX:RESHADE-OVERLAY-MENU-ISOLATION V23036 1/4] The ReShade overlay owns
+// input while visible, which makes REDengine's broad IsAnyMenu query report a
+// menu even though no game menu was opened. Publish the raw value separately
+// and derive the route-facing state from the official overlay state.
 void poll_engine_menu_state() {
     auto* gui_manager = g_engine_gui_manager.load();
     if (gui_manager == nullptr) {
@@ -39454,18 +39703,34 @@ void poll_engine_menu_state() {
     __try {
         auto** vtable = *static_cast<void***>(gui_manager);
         auto is_any_menu = reinterpret_cast<bool(__fastcall*)(void*)>(vtable[0x1E0 / sizeof(void*)]);
-        const int menu_open = is_any_menu(gui_manager) ? 1 : 0;
-        const int previous = g_engine_menu_state.exchange(menu_open);
-        if (menu_open != 0) {
-            g_engine_dual_gameplay_armed.store(false, std::memory_order_relaxed);
-        }
-        if (previous != menu_open) {
-            log_line("REDengine menu state polled open=%d gui_manager=%p present=%llu",
-                menu_open, gui_manager,
-                static_cast<unsigned long long>(g_present_count.load()));
-        }
+        publish_engine_menu_state(
+            is_any_menu(gui_manager) ? 1 : 0,
+            gui_manager,
+            "polled");
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
+}
+
+// ReShade 6.8 API 20, addon_event::reshade_open_overlay (86):
+// bool (effect_runtime *, bool open, input_source source).
+bool on_reshade_open_overlay(
+    void* effect_runtime,
+    bool open,
+    int input_source) {
+    (void)effect_runtime;
+    g_reshade_overlay_open.store(open, std::memory_order_release);
+    publish_engine_menu_state(
+        g_engine_raw_menu_state.load(std::memory_order_relaxed),
+        g_engine_gui_manager.load(),
+        open ? "overlay-open" : "overlay-closed");
+    log_line(
+        "V23036 ReShade overlay state open=%d source=%d present=%llu "
+        "menu_raw=%d menu_effective=%d",
+        open ? 1 : 0, input_source,
+        static_cast<unsigned long long>(g_present_count.load()),
+        g_engine_raw_menu_state.load(std::memory_order_relaxed),
+        g_engine_menu_state.load(std::memory_order_relaxed));
+    return false;
 }
 
 void apply_engine_dual_render_transition(
@@ -40245,16 +40510,10 @@ void __fastcall hook_engine_is_any_menu(void* gui_manager, void* script_context,
         return;
     }
 
-    const int menu_open = *result != 0 ? 1 : 0;
-    const int previous = g_engine_menu_state.exchange(menu_open);
-    if (menu_open != 0) {
-        g_engine_dual_gameplay_armed.store(false, std::memory_order_relaxed);
-    }
-    if (previous != menu_open) {
-        log_line("REDengine menu state changed open=%d gui_manager=%p present=%llu",
-            menu_open, gui_manager,
-            static_cast<unsigned long long>(g_present_count.load()));
-    }
+    publish_engine_menu_state(
+        *result != 0 ? 1 : 0,
+        gui_manager,
+        "changed");
 }
 
 void install_engine_menu_state_probe() {
@@ -43113,7 +43372,7 @@ void ensure_initialized() {
                 "afw_native_dlss_source=exact_final_backbuffer_tag_join "
                 "afw_transport=identity_depth_mvec_camera_fence_rt_ledger_nonblocking_final_color_trigger "
                 "afw_native_dlss_camera=exact_frozen_fov_scale_and_center "
-                "native_presentation_size=universal_final_openxr_subimage_fov_pair "
+                "native_presentation_size=producer_fov_full_image_pair "
                 "aer_final_source_cinema=strict_sequential_pair "
                 "aer_cinema_eye_phase=final_backbuffer_opposite_command_list "
                 "aer_cinema_hud_phase=all_backends_exact_command_list "
@@ -43138,8 +43397,23 @@ void ensure_initialized() {
             log_line(
                 "V1526 witcher_sense_extent=paired_descriptor_authority "
                 "live_requested_extent=diagnostic_only "
-                "alt_resize_early_publication=isolated "
                 "pso_draw_root_formats_descriptors=V1501_unchanged");
+            log_line(
+                "V23001 reshade_immediate_list=exact_debug_name "
+                "gpu_submission=unchanged "
+                "w3vr_command_tracking=disabled "
+                "game_command_lists=V23000_unchanged");
+            // [FIX:RESHADE-DEFERRED-NAME-CLASSIFICATION V23033 2/2]
+            log_line(
+                "V23033 reshade_immediate_classification=positive_only "
+                "transient_negative=retry exact_debug_name=unchanged "
+                "hud_route=unchanged");
+            // [FIX:NESTED-COMMAND-LIST-IDENTITY V1532 3/3]
+            log_line(
+                "V1532 command_list_identity=streamline_reshade_qi_chain "
+                "native_candidate=d3d12_graphics_command_list_qi_proven "
+                "max_wrappers=8 pointer_scan=removed "
+                "immediate_list_tracking=disabled opaque_gpu_submission=unchanged");
             log_line(
                 "V1517 world_detail_range=%.3f smoke_basis=V1514 "
                 "distance_scale=inverse_square_clamped_native_to_original "
@@ -43152,8 +43426,6 @@ void ensure_initialized() {
                 "V1280 retained HUD identity=queue_submitted_cross_command_list exact_queue_order=1 present_parity=0");
             log_line(
                 "V1282 retained HUD lifetime=preexecute_snapshot command_list_reset_race=closed");
-            log_line(
-                "V1283 retained HUD diagnostic=force_preexecute_snapshot pointer_exact_present_join=disabled metadata_capture=unchanged");
             // [PERF:AER-AFW-HUD-ATOMIC-SUBMISSION-ORDER V1284 6/6]
             log_line(
                 "V1284 retained HUD performance=submission_atomic_serial outer_join_mutex=removed selection=max_serial");
@@ -43215,6 +43487,18 @@ void ensure_initialized() {
             // [FIX:STRICT-STEREO-GAMEPLAY-HUD-EYE-AUTHORITY V1496 3/3]
             log_line(
                 "V1496 strict_stereo_gameplay_hud_eye=exact_pso_selected submitted_fallback=gameplay_full_vr_cinema diagnostic_logging_required=0 pointer_exact=unchanged aer=unchanged base=V1495");
+            // [FIX:GAMEPLAY-HUD-CURRENT-SCENE-PROOF V23035 3/3]
+            log_line(
+                "V23035 gameplay_hud_late_composite=exact_current_scene_pair "
+                "retained_hud_label=accepted_predecessor "
+                "native_hud_bootstrap=preserved baked_fallback=single_owner "
+                "reshade_optiscaler=unchanged");
+            // [FIX:RESHADE-OVERLAY-MENU-ISOLATION V23036 3/4]
+            log_line(
+                "V23036 reshade_overlay=official_open_close_event "
+                "engine_menu=raw_then_overlay_isolated "
+                "real_game_menu=unchanged_when_overlay_closed "
+                "hud_scene_queue_paths=unchanged");
             log_line(
                 "V1503 taau_submission_authority=latest_plus_immediate_exact_forward_predecessor max_lag_pairs=1 stale_replays=preserve_both nonforward=clear_predecessor strict_stereo_only=1 manual_cinema_recenter=pre_V1497_detector_owner base=V1501");
             // [FIX:NOAA-FACTORY-PROVEN-ASYM-FALLBACK V1506 3/3]
@@ -43264,7 +43548,7 @@ void ensure_initialized() {
             log_line(
                 "V1416 native_dlss_owner=public_streamline_v1409 mono=v19005_public_streamline aer_stereo=v1289_public_completion split_viewports=mode3_only private_ngx=optiscaler_only native_nvngx_direct_hooks=absent fallback=none");
             log_line(
-                "V1417 presentation_size=universal_final_openxr_subimage_fov_pair scale1=exact_identity pixels=resample_free foveated_rendering=preserved producer_temporal_transport=unchanged");
+                "V1534 release=0.9.7 command_list_identity=nested_qi_chain hud_capture=native_or_scene_only_exact_eye hud_ownership=latest_draw_per_eye reversible_scene_only_proof=1 standard_resize_only=1 reshade_dlss5=preserved");
             log_line(
                 "V1418 aer_opening_cutscene_centered_fallback_fov=published_after_corrected_camera_write mono=unchanged strict_stereo_superseded_by_V1487 native_asymmetric_factory=unchanged");
             log_line(
@@ -44678,444 +44962,6 @@ bool render_supersampled_fit_projection(
     return true;
 }
 
-// [TRIAL:ALT-RESIZE-PRODUCER-COUPLING V1525 3/4] V1119's alternate presenter
-// proved the full-surface transport needed by runtimes which mishandle a
-// reduced projection imageRect. The modern renderer composites retained HUD
-// after the scene transport, so this replacement operates once on the final
-// projection slices: copy them to allocator-owned scratch, clear to black,
-// and draw the selected source rectangle into its smaller tangent window.
-bool initialize_presentation_window_pipeline(
-    DXGI_FORMAT target_format,
-    uint32_t width,
-    uint32_t height) {
-    if (g_d3d12_device == nullptr || width == 0 || height == 0 ||
-        !initialize_dxc()) {
-        return false;
-    }
-
-    static constexpr char kVertexShader[] = R"(
-cbuffer PresentationConstants : register(b0) {
-    float4 clip_top_left;
-    float4 clip_top_right;
-    float4 clip_bottom_left;
-    float4 clip_bottom_right;
-    float4 source_uv_bounds;
-    uint4 presentation_control;
-};
-struct VertexOutput {
-    float4 position : SV_Position;
-    float2 uv : TEXCOORD0;
-};
-VertexOutput vs_main(uint vertex_id : SV_VertexID) {
-    VertexOutput output;
-    if (vertex_id == 0) {
-        output.position = clip_top_left;
-        output.uv = source_uv_bounds.xy;
-    } else if (vertex_id == 1 || vertex_id == 4) {
-        output.position = clip_top_right;
-        output.uv = source_uv_bounds.zy;
-    } else if (vertex_id == 2 || vertex_id == 3) {
-        output.position = clip_bottom_left;
-        output.uv = source_uv_bounds.xw;
-    } else {
-        output.position = clip_bottom_right;
-        output.uv = source_uv_bounds.zw;
-    }
-    return output;
-}
-)";
-    static constexpr char kPixelShader[] = R"(
-cbuffer PresentationConstants : register(b0) {
-    float4 clip_top_left;
-    float4 clip_top_right;
-    float4 clip_bottom_left;
-    float4 clip_bottom_right;
-    float4 source_uv_bounds;
-    uint4 presentation_control;
-};
-Texture2DArray<float4> completed_projection : register(t0);
-SamplerState linear_sampler : register(s0);
-struct PixelInput {
-    float4 position : SV_Position;
-    float2 uv : TEXCOORD0;
-};
-float4 ps_main(PixelInput input) : SV_Target0 {
-    float4 color = completed_projection.SampleLevel(
-        linear_sampler,
-        float3(saturate(input.uv), presentation_control.x), 0.0);
-    color.a = 1.0;
-    return color;
-}
-)";
-
-    auto compile_stage = [](const char* source_text, size_t source_size,
-                            const wchar_t* entry,
-                            const wchar_t* target) -> IDxcBlob* {
-        DxcBuffer source{source_text, source_size, DXC_CP_UTF8};
-        LPCWSTR arguments[] = {L"-E", entry, L"-T", target, L"-O3"};
-        IDxcResult* result{};
-        if (FAILED(g_dxc_compiler->Compile(
-                &source, arguments,
-                static_cast<UINT32>(std::size(arguments)),
-                nullptr, IID_PPV_ARGS(&result))) ||
-            result == nullptr) {
-            return nullptr;
-        }
-        HRESULT status{};
-        result->GetStatus(&status);
-        if (FAILED(status)) {
-            IDxcBlobUtf8* errors{};
-            result->GetOutput(
-                DXC_OUT_ERRORS, IID_PPV_ARGS(&errors), nullptr);
-            log_line(
-                "Presentation black-resize shader compile failed: %s",
-                errors != nullptr
-                    ? errors->GetStringPointer() : "unknown");
-            if (errors != nullptr) errors->Release();
-            result->Release();
-            return nullptr;
-        }
-        IDxcBlob* shader{};
-        if (FAILED(result->GetOutput(
-                DXC_OUT_OBJECT, IID_PPV_ARGS(&shader), nullptr))) {
-            shader = nullptr;
-        }
-        result->Release();
-        return shader;
-    };
-
-    IDxcBlob* vertex_shader = compile_stage(
-        kVertexShader, sizeof(kVertexShader) - 1,
-        L"vs_main", L"vs_6_0");
-    IDxcBlob* pixel_shader = compile_stage(
-        kPixelShader, sizeof(kPixelShader) - 1,
-        L"ps_main", L"ps_6_0");
-    if (vertex_shader == nullptr || pixel_shader == nullptr) {
-        if (vertex_shader != nullptr) vertex_shader->Release();
-        if (pixel_shader != nullptr) pixel_shader->Release();
-        return false;
-    }
-
-    D3D12_DESCRIPTOR_RANGE range{};
-    range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    range.NumDescriptors = 1;
-    range.BaseShaderRegister = 0;
-    range.OffsetInDescriptorsFromTableStart = 0;
-    D3D12_ROOT_PARAMETER parameters[2]{};
-    parameters[0].ParameterType =
-        D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    parameters[0].DescriptorTable = {1, &range};
-    parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-    parameters[1].ParameterType =
-        D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    parameters[1].Constants.ShaderRegister = 0;
-    parameters[1].Constants.Num32BitValues = 24;
-    parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-    D3D12_STATIC_SAMPLER_DESC sampler{};
-    sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
-    sampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-    sampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-    sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-    sampler.ShaderRegister = 0;
-    sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-    sampler.MaxLOD = D3D12_FLOAT32_MAX;
-    D3D12_ROOT_SIGNATURE_DESC root_desc{};
-    root_desc.NumParameters = static_cast<UINT>(std::size(parameters));
-    root_desc.pParameters = parameters;
-    root_desc.NumStaticSamplers = 1;
-    root_desc.pStaticSamplers = &sampler;
-    root_desc.Flags =
-        D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
-    ID3DBlob* serialized{};
-    ID3DBlob* errors{};
-    const auto serialize_hr = D3D12SerializeRootSignature(
-        &root_desc, D3D_ROOT_SIGNATURE_VERSION_1,
-        &serialized, &errors);
-    if (FAILED(serialize_hr) || serialized == nullptr ||
-        FAILED(g_d3d12_device->CreateRootSignature(
-            0,
-            serialized != nullptr
-                ? serialized->GetBufferPointer() : nullptr,
-            serialized != nullptr
-                ? serialized->GetBufferSize() : 0,
-            IID_PPV_ARGS(
-                &g_xr_presentation_window_root_signature)))) {
-        log_line(
-            "Presentation black-resize root signature failed hr=0x%08X: %s",
-            static_cast<unsigned>(serialize_hr),
-            errors != nullptr
-                ? static_cast<const char*>(errors->GetBufferPointer())
-                : "unknown");
-        if (errors != nullptr) errors->Release();
-        if (serialized != nullptr) serialized->Release();
-        vertex_shader->Release();
-        pixel_shader->Release();
-        return false;
-    }
-    if (errors != nullptr) errors->Release();
-    serialized->Release();
-
-    D3D12_GRAPHICS_PIPELINE_STATE_DESC pipeline_desc{};
-    pipeline_desc.pRootSignature =
-        g_xr_presentation_window_root_signature;
-    pipeline_desc.VS = {
-        vertex_shader->GetBufferPointer(),
-        vertex_shader->GetBufferSize()};
-    pipeline_desc.PS = {
-        pixel_shader->GetBufferPointer(),
-        pixel_shader->GetBufferSize()};
-    pipeline_desc.BlendState.RenderTarget[0].RenderTargetWriteMask =
-        D3D12_COLOR_WRITE_ENABLE_ALL;
-    pipeline_desc.SampleMask = UINT_MAX;
-    pipeline_desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-    pipeline_desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-    pipeline_desc.RasterizerState.DepthClipEnable = TRUE;
-    pipeline_desc.DepthStencilState.DepthEnable = FALSE;
-    pipeline_desc.DepthStencilState.StencilEnable = FALSE;
-    pipeline_desc.PrimitiveTopologyType =
-        D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-    pipeline_desc.NumRenderTargets = 1;
-    pipeline_desc.RTVFormats[0] = target_format;
-    pipeline_desc.SampleDesc.Count = 1;
-    const auto pipeline_hr = g_d3d12_device->CreateGraphicsPipelineState(
-        &pipeline_desc,
-        IID_PPV_ARGS(&g_xr_presentation_window_pipeline));
-    vertex_shader->Release();
-    pixel_shader->Release();
-    if (FAILED(pipeline_hr) ||
-        g_xr_presentation_window_pipeline == nullptr) {
-        log_line(
-            "Presentation black-resize pipeline failed hr=0x%08X",
-            static_cast<unsigned>(pipeline_hr));
-        return false;
-    }
-
-    D3D12_DESCRIPTOR_HEAP_DESC heap_desc{};
-    heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    heap_desc.NumDescriptors = kXrCommandAllocatorCount;
-    heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-    if (FAILED(g_d3d12_device->CreateDescriptorHeap(
-            &heap_desc,
-            IID_PPV_ARGS(&g_xr_presentation_window_srv_heap)))) {
-        return false;
-    }
-    g_xr_presentation_window_srv_increment =
-        g_d3d12_device->GetDescriptorHandleIncrementSize(heap_desc.Type);
-
-    D3D12_HEAP_PROPERTIES default_heap{};
-    default_heap.Type = D3D12_HEAP_TYPE_DEFAULT;
-    D3D12_RESOURCE_DESC scratch_desc{};
-    scratch_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-    scratch_desc.Width = width;
-    scratch_desc.Height = height;
-    scratch_desc.DepthOrArraySize = 2;
-    scratch_desc.MipLevels = 1;
-    scratch_desc.Format = target_format;
-    scratch_desc.SampleDesc.Count = 1;
-    scratch_desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-    for (uint32_t index = 0;
-         index < kXrCommandAllocatorCount; ++index) {
-        if (FAILED(g_d3d12_device->CreateCommittedResource(
-                &default_heap, D3D12_HEAP_FLAG_NONE,
-                &scratch_desc, D3D12_RESOURCE_STATE_COPY_DEST,
-                nullptr,
-                IID_PPV_ARGS(
-                    &g_xr_presentation_window_scratch[index])))) {
-            return false;
-        }
-        D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc{};
-        srv_desc.Format = target_format;
-        srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
-        srv_desc.Shader4ComponentMapping =
-            D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        srv_desc.Texture2DArray.MostDetailedMip = 0;
-        srv_desc.Texture2DArray.MipLevels = 1;
-        srv_desc.Texture2DArray.FirstArraySlice = 0;
-        srv_desc.Texture2DArray.ArraySize = 2;
-        auto srv_cpu = g_xr_presentation_window_srv_heap
-            ->GetCPUDescriptorHandleForHeapStart();
-        srv_cpu.ptr += static_cast<SIZE_T>(index) *
-            g_xr_presentation_window_srv_increment;
-        g_d3d12_device->CreateShaderResourceView(
-            g_xr_presentation_window_scratch[index],
-            &srv_desc, srv_cpu);
-    }
-    log_line(
-        "V1522 presentation black-resize pipeline ready scratch=%ux%u allocators=%zu format=%u",
-        width, height, kXrCommandAllocatorCount,
-        static_cast<unsigned>(target_format));
-    return true;
-}
-
-bool render_presentation_black_resize(
-    XrEyeSwapchain& target_swapchain,
-    uint32_t image_index,
-    const w3vr::openxr_eye_geometry::BlackResizePresentation
-        presentations[2]) {
-    if (!g_xr_presentation_window_ready ||
-        g_xr_command_list == nullptr ||
-        g_xr_presentation_window_pipeline == nullptr ||
-        g_xr_presentation_window_root_signature == nullptr ||
-        g_xr_presentation_window_srv_heap == nullptr ||
-        g_set_descriptor_heaps == nullptr ||
-        g_set_graphics_root_signature == nullptr ||
-        g_set_pipeline_state == nullptr ||
-        g_set_graphics_root_descriptor_table == nullptr ||
-        g_draw_instanced == nullptr ||
-        image_index >= target_swapchain.images.size() ||
-        image_index * 2 + 1 >= target_swapchain.rtvs.size() ||
-        g_xr_command_allocator_index >= kXrCommandAllocatorCount) {
-        return false;
-    }
-    auto* const target =
-        target_swapchain.images[image_index].texture;
-    auto* const scratch = g_xr_presentation_window_scratch[
-        g_xr_command_allocator_index];
-    if (target == nullptr || scratch == nullptr) {
-        return false;
-    }
-    for (uint32_t eye = 0; eye < 2; ++eye) {
-        const auto& presentation = presentations[eye];
-        if (!std::isfinite(presentation.target_left_px) ||
-            !std::isfinite(presentation.target_top_px) ||
-            !std::isfinite(presentation.target_right_px) ||
-            !std::isfinite(presentation.target_bottom_px) ||
-            !std::isfinite(presentation.source_left_uv) ||
-            !std::isfinite(presentation.source_top_uv) ||
-            !std::isfinite(presentation.source_right_uv) ||
-            !std::isfinite(presentation.source_bottom_uv) ||
-            presentation.target_right_px <=
-                presentation.target_left_px ||
-            presentation.target_bottom_px <=
-                presentation.target_top_px ||
-            presentation.source_right_uv <=
-                presentation.source_left_uv ||
-            presentation.source_bottom_uv <=
-                presentation.source_top_uv) {
-            return false;
-        }
-    }
-
-    D3D12_RESOURCE_BARRIER copy_barriers[2]{};
-    copy_barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    copy_barriers[0].Transition.pResource = target;
-    copy_barriers[0].Transition.StateBefore =
-        D3D12_RESOURCE_STATE_RENDER_TARGET;
-    copy_barriers[0].Transition.StateAfter =
-        D3D12_RESOURCE_STATE_COPY_SOURCE;
-    copy_barriers[0].Transition.Subresource =
-        D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    copy_barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    copy_barriers[1].Transition.pResource = scratch;
-    copy_barriers[1].Transition.StateBefore =
-        D3D12_RESOURCE_STATE_COPY_DEST;
-    copy_barriers[1].Transition.StateAfter =
-        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-    copy_barriers[1].Transition.Subresource =
-        D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    g_xr_command_list->ResourceBarrier(1, &copy_barriers[0]);
-    for (uint32_t eye = 0; eye < 2; ++eye) {
-        D3D12_TEXTURE_COPY_LOCATION destination{};
-        destination.pResource = scratch;
-        destination.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        destination.SubresourceIndex = eye;
-        D3D12_TEXTURE_COPY_LOCATION source{};
-        source.pResource = target;
-        source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        source.SubresourceIndex = eye;
-        g_xr_command_list->CopyTextureRegion(
-            &destination, 0, 0, 0, &source, nullptr);
-    }
-    std::swap(
-        copy_barriers[0].Transition.StateBefore,
-        copy_barriers[0].Transition.StateAfter);
-    g_xr_command_list->ResourceBarrier(1, &copy_barriers[0]);
-    g_xr_command_list->ResourceBarrier(1, &copy_barriers[1]);
-
-    ID3D12DescriptorHeap* heaps[]{
-        g_xr_presentation_window_srv_heap};
-    g_set_descriptor_heaps(g_xr_command_list, 1, heaps);
-    g_set_graphics_root_signature(
-        g_xr_command_list,
-        g_xr_presentation_window_root_signature);
-    g_set_pipeline_state(
-        g_xr_command_list,
-        g_xr_presentation_window_pipeline);
-    g_xr_command_list->IASetPrimitiveTopology(
-        D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    D3D12_VIEWPORT viewport{
-        0.0f, 0.0f,
-        static_cast<float>(target_swapchain.width),
-        static_cast<float>(target_swapchain.height),
-        0.0f, 1.0f};
-    D3D12_RECT scissor{
-        0, 0,
-        static_cast<LONG>(target_swapchain.width),
-        static_cast<LONG>(target_swapchain.height)};
-    g_xr_command_list->RSSetViewports(1, &viewport);
-    g_xr_command_list->RSSetScissorRects(1, &scissor);
-    auto srv_gpu = g_xr_presentation_window_srv_heap
-        ->GetGPUDescriptorHandleForHeapStart();
-    srv_gpu.ptr += static_cast<UINT64>(
-        g_xr_command_allocator_index) *
-        g_xr_presentation_window_srv_increment;
-    g_set_graphics_root_descriptor_table(
-        g_xr_command_list, 0, srv_gpu);
-
-    struct PresentationConstants {
-        float clip_positions[16]{};
-        float source_uv_bounds[4]{};
-        uint32_t presentation_control[4]{};
-    };
-    static_assert(sizeof(PresentationConstants) == 24 * sizeof(uint32_t));
-    for (uint32_t eye = 0; eye < 2; ++eye) {
-        const auto& presentation = presentations[eye];
-        const float left = 2.0f * presentation.target_left_px /
-            static_cast<float>(target_swapchain.width) - 1.0f;
-        const float right = 2.0f * presentation.target_right_px /
-            static_cast<float>(target_swapchain.width) - 1.0f;
-        const float top = 1.0f - 2.0f * presentation.target_top_px /
-            static_cast<float>(target_swapchain.height);
-        const float bottom = 1.0f -
-            2.0f * presentation.target_bottom_px /
-                static_cast<float>(target_swapchain.height);
-        PresentationConstants constants{};
-        const float clip_positions[16]{
-            left, top, 0.5f, 1.0f,
-            right, top, 0.5f, 1.0f,
-            left, bottom, 0.5f, 1.0f,
-            right, bottom, 0.5f, 1.0f};
-        memcpy(
-            constants.clip_positions, clip_positions,
-            sizeof(clip_positions));
-        constants.source_uv_bounds[0] =
-            presentation.source_left_uv;
-        constants.source_uv_bounds[1] =
-            presentation.source_top_uv;
-        constants.source_uv_bounds[2] =
-            presentation.source_right_uv;
-        constants.source_uv_bounds[3] =
-            presentation.source_bottom_uv;
-        constants.presentation_control[0] = eye;
-        g_xr_command_list->SetGraphicsRoot32BitConstants(
-            1, 24, &constants, 0);
-        const auto rtv = target_swapchain.rtvs[
-            image_index * 2 + eye];
-        const float black[]{0.0f, 0.0f, 0.0f, 1.0f};
-        g_xr_command_list->ClearRenderTargetView(
-            rtv, black, 0, nullptr);
-        g_xr_command_list->OMSetRenderTargets(
-            1, &rtv, FALSE, nullptr);
-        g_draw_instanced(g_xr_command_list, 6, 1, 0, 0);
-    }
-
-    std::swap(
-        copy_barriers[1].Transition.StateBefore,
-        copy_barriers[1].Transition.StateAfter);
-    g_xr_command_list->ResourceBarrier(1, &copy_barriers[1]);
-    return true;
-}
-
 // [FIX:VISIBILITY-MASK-FIT 2/7] Query the lens-visible contour in the
 // extension's z=-1 view plane. Its x/y values are tangent-space coordinates,
 // so the largest absolute extent around optical zero is exactly the symmetric
@@ -45327,8 +45173,9 @@ bool create_openxr_swapchains() {
     const bool selected_source_fixed_resolution =
         selected_resolution_full_image_transport_active();
     // Swapchain dimensions follow the selected source and resolution only.
-    // Presentation Size is a final per-frame OpenXR mapping and must not
-    // allocate a different render or transport surface.
+    // V23038's standard Presentation Size route changes producer/submit FOV,
+    // not source or transport dimensions; every rendered pixel remains in the
+    // route's established imageRect.
     swapchain.width = w3vr::mode3_transport::select_swapchain_dimension(
         selected_source_fixed_resolution, source_width, scaled_width,
         source_width, config.maxImageRectWidth);
@@ -45348,10 +45195,6 @@ bool create_openxr_swapchains() {
     swapchain_info.usageFlags = XR_SWAPCHAIN_USAGE_SAMPLED_BIT |
         XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT |
         XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
-    if (g_config.presentation_black_resize) {
-        swapchain_info.usageFlags |=
-            XR_SWAPCHAIN_USAGE_TRANSFER_SRC_BIT;
-    }
     swapchain_info.format = selected_format;
     swapchain_info.sampleCount = config.recommendedSwapchainSampleCount;
     swapchain_info.width = swapchain.width;
@@ -45362,7 +45205,7 @@ bool create_openxr_swapchains() {
 
     result = pfn_xrCreateSwapchain(g_xr_session, &swapchain_info, &swapchain.handle);
     g_xr_eye_swapchains[1].handle = swapchain.handle;
-    log_line("OpenXR xrCreateSwapchain stereo-array result=%s (%d) size=%ux%u recommended=%ux%u requested=%ux%u presentation=final_submit_only selected_source_fixed_resolution=%d clean_mono=%d max=%ux%u format=%u samples=%u",
+    log_line("OpenXR xrCreateSwapchain stereo-array result=%s (%d) size=%ux%u recommended=%ux%u requested=%ux%u presentation=producer_fov_full_image selected_source_fixed_resolution=%d clean_mono=%d max=%ux%u format=%u samples=%u",
         xr_result_name(result),
         result,
         swapchain.width,
@@ -45441,19 +45284,6 @@ bool create_openxr_swapchains() {
         log_line(
             "Cinema anchored stereo projection unavailable; mono quad bootstrap retained");
     }
-    if (g_config.presentation_black_resize &&
-        swapchain_info.sampleCount == 1) {
-        g_xr_presentation_window_ready =
-            initialize_presentation_window_pipeline(
-                selected_format, swapchain.width, swapchain.height);
-    }
-    if (g_config.presentation_black_resize &&
-        !g_xr_presentation_window_ready) {
-        log_line(
-            "V1522 presentation black-resize unavailable; standard imageRect presenter retained samples=%u",
-            swapchain_info.sampleCount);
-    }
-
     // [FIX:XR-ALLOCATOR-PIPELINING 2/4] One command list is still enough: a
     // list may be reset onto another allocator immediately after submission.
     // Only the allocators have to be rotated.
@@ -45484,6 +45314,7 @@ bool create_openxr_swapchains() {
 
     g_xr_fence_event = CreateEventA(nullptr, FALSE, FALSE, nullptr);
     g_xr_views.assign(2, {XR_TYPE_VIEW});
+
     g_xr_resources_ready = true;
     log_line("OpenXR stereo swapchains ready rotating_allocators=%zu",
         kXrCommandAllocatorCount);
@@ -48149,9 +47980,6 @@ void render_openxr_test_frame(
     std::array<bool, 2> asymmetric_submit_source_desc_valid{};
     std::array<UINT, 2> asymmetric_submit_copy_width{};
     std::array<UINT, 2> asymmetric_submit_copy_height{};
-    w3vr::openxr_eye_geometry::BlackResizePresentation
-        black_resize_presentations[2]{};
-    bool presentation_black_resize_active{};
     // Until REDengine exposes its GUI manager, startup/frontend frames are menus.
     // Treating the unknown state as gameplay presents them as two world projections.
     const auto current_present = g_present_count.load(std::memory_order_relaxed);
@@ -50289,9 +50117,10 @@ void render_openxr_test_frame(
                         bool candidates_valid = true;
                         for (uint32_t eye = 0;
                              eye < 2 && candidates_valid; ++eye) {
-                            const XrFovf target_fov =
-                                g_xr_views[eye].fov;
+                            XrFovf target_fov{};
                             candidates_valid =
+                                scaled_runtime_presentation_fov(
+                                    eye, target_fov) &&
                                 w3vr::openxr_eye_geometry::
                                     derive_symmetric_eye_subimage(
                                         content_fov, target_fov,
@@ -50549,9 +50378,10 @@ void render_openxr_test_frame(
                         bool candidates_valid = true;
                         for (uint32_t eye = 0;
                              eye < 2 && candidates_valid; ++eye) {
-                            const XrFovf target_fov =
-                                g_xr_views[eye].fov;
+                            XrFovf target_fov{};
                             candidates_valid =
+                                scaled_runtime_presentation_fov(
+                                    eye, target_fov) &&
                                 w3vr::openxr_eye_geometry::
                                     derive_symmetric_eye_subimage(
                                         content_fov, target_fov,
@@ -50967,46 +50797,13 @@ void render_openxr_test_frame(
                 }
                 mono_cyclopean_pose_valid = true;
             }
-            // [FIX:FINAL-OPENXR-PRESENTATION-SIZE V1417 1/2] Presentation Size is
-            // read once after every producer and transport decision is final.
-            // Mono, AER and Stereo all consume this same value at the final
-            // projection boundary; no upstream buffer or route sees it.
+            // [TRIAL:STANDARD-PRODUCER-FOV-RESCALE V23038 3/5] Presentation
+            // Size already owns producer geometry. The route-derived base FOV
+            // therefore describes the pixels exactly, and the standard path
+            // must retain its complete base imageRect instead of selecting a
+            // second central crop at the final boundary.
             const float final_presentation_scale = std::clamp(
                 g_config.presentation_scale, 0.5f, 1.0f);
-            const bool presentation_black_resize_requested =
-                g_config.presentation_black_resize &&
-                final_presentation_scale < 1.0f &&
-                !spatial_panel_active &&
-                g_xr_presentation_window_ready;
-            bool black_resize_eye_valid[2]{};
-            const auto apply_standard_final_presentation =
-                [&](uint32_t eye) {
-                    const XrRect2Di base_presentation_rect =
-                        projection_views[eye].subImage.imageRect;
-                    const XrFovf base_presentation_fov =
-                        projection_views[eye].fov;
-                    XrFovf requested_presentation_fov{};
-                    w3vr::openxr_eye_geometry::SymmetricEyeSubimage
-                        final_presentation{};
-                    if (w3vr::openxr_eye_geometry::
-                            scale_asymmetric_projection_fov(
-                                base_presentation_fov,
-                                final_presentation_scale,
-                                requested_presentation_fov) &&
-                        w3vr::openxr_eye_geometry::
-                            derive_symmetric_eye_subimage(
-                                base_presentation_fov,
-                                requested_presentation_fov,
-                                base_presentation_rect,
-                                final_presentation)) {
-                        projection_views[eye].subImage.imageRect =
-                            final_presentation.image_rect;
-                        projection_views[eye].fov =
-                            final_presentation.represented_fov;
-                        return true;
-                    }
-                    return false;
-                };
             for (uint32_t eye = 0; eye < 2; ++eye) {
                 const uint32_t render_source_eye = g_engine_dual_render_active.load() &&
                         g_config.engine_sync_swap_eyes
@@ -51231,33 +51028,8 @@ void render_openxr_test_frame(
                         projection_views[eye].fov = exact_fov;
                     }
                 }
-                // [FIX:FINAL-OPENXR-PRESENTATION-SIZE V1417 2/2] The route-proven
-                // imageRect and FOV are one reciprocal pixel/ray mapping. For
-                // values below 1, select the exact optical-centred tangent
-                // subimage and publish the FOV represented by its integer pixel
-                // boundaries. This narrows the visible window without
-                // resampling the completed image, so fixed foveated rendering
-                // retains its native center and scale 1 remains bit-exact.
-                if (final_presentation_scale < 1.0f &&
-                    !presentation_black_resize_requested) {
-                    apply_standard_final_presentation(eye);
-                } else if (presentation_black_resize_requested) {
-                    // The source pixels already carry the producer-coupled
-                    // FOV. Submit their reduced placement inside the runtime's
-                    // raw eye FOV so OpenXR receives the headset geometry.
-                    const XrFovf runtime_submission_fov =
-                        eye < g_xr_views.size()
-                        ? g_xr_views[eye].fov
-                        : projection_views[eye].fov;
-                    black_resize_eye_valid[eye] =
-                        w3vr::openxr_eye_geometry::
-                            derive_black_resize_presentation(
-                                runtime_submission_fov,
-                                projection_views[eye].subImage.imageRect,
-                                swapchain.width, swapchain.height,
-                                final_presentation_scale,
-                                black_resize_presentations[eye]);
-                }
+                // The full imageRect and submitted FOV describe the same
+                // producer-scaled image; no final resize or black canvas.
                 if (g_config.hmd_freelook &&
                     g_hmd_render_fov_valid.load() &&
                     !g_hmd_fov_pair_logged.exchange(true)) {
@@ -51375,14 +51147,12 @@ void render_openxr_test_frame(
                 }
                 projection_views[eye].subImage.imageArrayIndex = eye;
             }
-            presentation_black_resize_active =
-                presentation_black_resize_requested &&
-                black_resize_eye_valid[0] &&
-                black_resize_eye_valid[1];
-            if (presentation_black_resize_requested &&
-                !presentation_black_resize_active) {
-                for (uint32_t eye = 0; eye < 2; ++eye) {
-                    apply_standard_final_presentation(eye);
+            if (final_presentation_scale < 1.0f) {
+                static std::atomic<bool> route_logged{};
+                if (!route_logged.exchange(true)) {
+                    log_line(
+                        "V23038 presentation route=standard_full_image producer_coupled=1 image_rect=base submitted_fov=producer scale=%.3f",
+                        final_presentation_scale);
                 }
             }
         }
@@ -51449,36 +51219,6 @@ void render_openxr_test_frame(
                 if (take_bounded_log_slot(transient_hud_miss_logs, 8)) {
                     log_line(
                         "Mode 3 projection HUD composite transient miss image=%u present=%llu; retrying next frame",
-                        image_index,
-                        static_cast<unsigned long long>(current_present));
-                }
-            }
-        }
-
-        // [TRIAL:ALT-RESIZE-PRODUCER-COUPLING V1525 4/4] This pass deliberately
-        // runs after retained-HUD composition. It therefore replaces the
-        // imageRect presenter for the complete eye image instead of shrinking
-        // only the scene underneath an unscaled HUD.
-        if (command_list_recording && submitted &&
-            presentation_black_resize_active) {
-            if (render_presentation_black_resize(
-                    swapchain, image_index,
-                    black_resize_presentations)) {
-                for (uint32_t eye = 0; eye < 2; ++eye) {
-                    projection_views[eye].fov =
-                        black_resize_presentations[eye].submitted_fov;
-                }
-                static std::atomic<bool> route_logged{};
-                if (!route_logged.exchange(true)) {
-                    log_line(
-                        "V1525 presentation route=black_resize full_image=1 post_hud=1 producer_coupled=1 submitted_fov=runtime image_rect=base");
-                }
-            } else {
-                presentation_black_resize_active = false;
-                static std::atomic<uint32_t> failure_logs{};
-                if (take_bounded_log_slot(failure_logs, 8)) {
-                    log_line(
-                        "V1522 presentation black-resize render unavailable image=%u present=%llu; scale-1 frame retained",
                         image_index,
                         static_cast<unsigned long long>(current_present));
                 }
@@ -51973,15 +51713,18 @@ void try_log_dlss_output_luminance_readback() {
 }
 
 void handle_puredark_afw_visual_debug_hotkey() {
-    // [DEBUG:PUREDARK-AFW-VISUAL-F6 V1414] F6 owns only the PureDark ABI debug
-    // bit and is independent from every logging/recorder configuration.
-    if ((GetAsyncKeyState(VK_F6) & 1) == 0) {
+    // [DEBUG:PUREDARK-AFW-VISUAL-F6 V1414] The diagnostic remains available;
+    // V23011 changes only its chord so the add-on owns plain F6.
+    // [TRIAL:RESHADE-OPAQUE-SUBMIT-CLEANUP V23011] Plain F6 belongs to the
+    // DLSS5 add-on while this independent PureDark diagnostic uses Ctrl+F6.
+    if ((GetAsyncKeyState(VK_CONTROL) & 0x8000) == 0 ||
+        (GetAsyncKeyState(VK_F6) & 1) == 0) {
         return;
     }
     const bool enabled = !g_puredark_afw_visual_debug.load(
         std::memory_order_relaxed);
     g_puredark_afw_visual_debug.store(enabled, std::memory_order_relaxed);
-    log_line("PureDark AFW visual debug=%u hotkey=F6 present=%llu",
+    log_line("PureDark AFW visual debug=%u hotkey=Ctrl+F6 present=%llu",
         enabled ? 1u : 0u,
         static_cast<unsigned long long>(
             g_present_count.load(std::memory_order_relaxed)));
@@ -53063,16 +52806,200 @@ void hook_factory(void* factory) {
     }
 }
 
+bool make_executable_adjacent_path(
+    const wchar_t* filename,
+    wchar_t* path,
+    size_t path_count) {
+    if (filename == nullptr || path == nullptr || path_count == 0) {
+        return false;
+    }
+    const DWORD length = GetModuleFileNameW(
+        nullptr, path, static_cast<DWORD>(path_count));
+    if (length == 0 || length >= path_count) {
+        return false;
+    }
+    wchar_t* slash = wcsrchr(path, L'\\');
+    if (slash == nullptr) {
+        return false;
+    }
+    const size_t prefix_length = static_cast<size_t>(slash + 1 - path);
+    return wcscpy_s(
+        slash + 1, path_count - prefix_length, filename) == 0;
+}
+
+bool current_process_is_witcher3() {
+    wchar_t executable[MAX_PATH]{};
+    const DWORD length = GetModuleFileNameW(
+        nullptr, executable, static_cast<DWORD>(std::size(executable)));
+    if (length == 0 || length >= std::size(executable)) {
+        return false;
+    }
+    const wchar_t* slash = wcsrchr(executable, L'\\');
+    const wchar_t* filename = slash != nullptr ? slash + 1 : executable;
+    return _wcsicmp(filename, L"witcher3.exe") == 0;
+}
+
+// [FIX:RESHADE-OVERLAY-MENU-ISOLATION V23036 2/4] Subscribe to ReShade's
+// official overlay transition instead of inferring it from a fixed keyboard
+// binding. The registration is optional and leaves non-ReShade routes intact.
+bool register_reshade_overlay_event(HMODULE reshade_module) {
+    constexpr uint32_t kReShadeApiVersion = 20;
+    constexpr uint32_t kReShadeOpenOverlayEvent = 86;
+    using RegisterAddonFn = bool (*)(void*, uint32_t);
+    using RegisterEventForAddonFn = void (*)(void*, uint32_t, void*);
+
+    if (reshade_module == nullptr || g_proxy_module == nullptr) {
+        return false;
+    }
+    auto register_addon = reinterpret_cast<RegisterAddonFn>(
+        GetProcAddress(reshade_module, "ReShadeRegisterAddon"));
+    auto register_event = reinterpret_cast<RegisterEventForAddonFn>(
+        GetProcAddress(reshade_module, "ReShadeRegisterEventForAddon"));
+    if (register_addon == nullptr || register_event == nullptr ||
+        !register_addon(g_proxy_module, kReShadeApiVersion)) {
+        return false;
+    }
+    register_event(
+        g_proxy_module,
+        kReShadeOpenOverlayEvent,
+        reinterpret_cast<void*>(&on_reshade_open_overlay));
+    g_reshade_overlay_event_registered = true;
+    return true;
+}
+
+void unregister_reshade_overlay_event() {
+    using UnregisterAddonFn = void (*)(void*);
+    if (!g_reshade_overlay_event_registered ||
+        g_reshade_secondary_module == nullptr || g_proxy_module == nullptr) {
+        return;
+    }
+    auto unregister_addon = reinterpret_cast<UnregisterAddonFn>(
+        GetProcAddress(g_reshade_secondary_module, "ReShadeUnregisterAddon"));
+    if (unregister_addon != nullptr) {
+        unregister_addon(g_proxy_module);
+    }
+    g_reshade_overlay_event_registered = false;
+}
+
+// [TRIAL:RESHADE-SECONDARY-BOOTSTRAP V23000 2/4] Install our hooks on a
+// throwaway real factory before loading ReShade. ReShade 6.8 subsequently
+// unwraps its D3D12 queue before invoking this raw factory method, then wraps
+// the raw swap chain only after our hook_present() has attached underneath it.
+// Per-frame order is therefore ReShade::Present -> Witcher3VR::Present -> XR.
+bool prepare_secondary_reshade_runtime() {
+    std::call_once(g_reshade_secondary_once, []() {
+        if (!current_process_is_witcher3()) {
+            return;
+        }
+
+        wchar_t reshade_path[MAX_PATH]{};
+        wchar_t config_path[MAX_PATH]{};
+        if (!make_executable_adjacent_path(
+                L"ReShade64.dll", reshade_path,
+                std::size(reshade_path)) ||
+            !make_executable_adjacent_path(
+                L"ReShade.ini", config_path,
+                std::size(config_path)) ||
+            GetFileAttributesW(reshade_path) == INVALID_FILE_ATTRIBUTES ||
+            GetFileAttributesW(config_path) == INVALID_FILE_ATTRIBUTES) {
+            return;
+        }
+
+        g_reshade_secondary_attempted = true;
+        // This first isolated trial deliberately has one capture owner. Mixing
+        // RenderDoc and ReShade would make the outer factory order ambiguous.
+        if (g_renderdoc_api != nullptr) {
+            log_line(
+                "V23000 ReShade secondary skipped because RenderDoc is active");
+            return;
+        }
+
+        initialize_real_dxgi_exports();
+        auto create_bootstrap_factory =
+            reinterpret_cast<CreateDXGIFactory2Fn>(
+                g_real_create_dxgi_factory2);
+        IDXGIFactory2* bootstrap_factory{};
+        const HRESULT bootstrap_result = create_bootstrap_factory != nullptr
+            ? create_bootstrap_factory(
+                0, IID_PPV_ARGS(&bootstrap_factory))
+            : E_FAIL;
+        if (FAILED(bootstrap_result) || bootstrap_factory == nullptr) {
+            log_line(
+                "V23000 ReShade raw factory bootstrap failed hr=0x%08X",
+                static_cast<unsigned>(bootstrap_result));
+            return;
+        }
+
+        hook_factory(bootstrap_factory);
+        bootstrap_factory->Release();
+        if (g_create_swapchain_for_hwnd == nullptr) {
+            log_line(
+                "V23000 ReShade raw factory bootstrap missing ForHwnd hook");
+            return;
+        }
+        g_reshade_secondary_factory_bootstrapped = true;
+
+        // Freeze the System32 device export while it is still unmodified. The
+        // stock ReShade runtime is loaded immediately afterward, before the
+        // game or Streamline creates the real D3D12 device.
+        initialize_real_d3d12_create_device_export();
+        HMODULE module = LoadLibraryExW(
+            reshade_path, nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+        if (module == nullptr) {
+            log_line(
+                "V23000 ReShade secondary load failed gle=%lu",
+                GetLastError());
+            return;
+        }
+        if (GetProcAddress(module, "ReShadeVersion") == nullptr) {
+            log_line(
+                "V23000 ReShade secondary rejected missing ReShadeVersion");
+            FreeLibrary(module);
+            return;
+        }
+
+        g_reshade_secondary_module = module;
+        const bool overlay_event_registered =
+            register_reshade_overlay_event(module);
+        log_line(
+            "V23000 ReShade secondary active module=%p "
+            "factory_bootstrapped=1 order=reshade_present_then_w3vr_openxr "
+            "v23036_overlay_event=%d",
+            module, overlay_event_registered ? 1 : 0);
+    });
+    return g_reshade_secondary_module != nullptr;
+}
+
+// [TRIAL:RESHADE-SECONDARY-BOOTSTRAP V23000 3/4] Invoke the official generic
+// ReShade export directly. Its registered System32 trampoline creates the raw
+// factory whose methods were already hooked above, without making ReShade the
+// on-disk dxgi.dll or registering this proxy as a downstream library.
+FARPROC secondary_reshade_dxgi_proc(const char* name) {
+    if (g_reshade_secondary_module != nullptr) {
+        if (FARPROC reshade_proc =
+                GetProcAddress(g_reshade_secondary_module, name);
+            reshade_proc != nullptr) {
+            return reshade_proc;
+        }
+    }
+    return real_proc(name);
+}
+
 } // namespace
 
 extern "C" HRESULT WINAPI CreateDXGIFactory(REFIID riid, void** factory) {
     ensure_initialized();
+    const bool reshade_outer = prepare_secondary_reshade_runtime();
     const bool reentry = g_renderdoc_dxgi_forward_reentry;
-    auto fn = reinterpret_cast<CreateDXGIFactoryFn>(real_proc("CreateDXGIFactory"));
+    auto fn = reinterpret_cast<CreateDXGIFactoryFn>(
+        secondary_reshade_dxgi_proc("CreateDXGIFactory"));
     g_renderdoc_dxgi_forward_reentry = true;
     const auto hr = fn != nullptr ? fn(riid, factory) : E_FAIL;
     g_renderdoc_dxgi_forward_reentry = reentry;
-    if (!reentry && SUCCEEDED(hr) && factory != nullptr) {
+    // [TRIAL:RESHADE-SECONDARY-BOOTSTRAP V23000 4/4] Never hook the outer
+    // ReShade factory. The real factory implementation below it was hooked by
+    // the bootstrap call, preserving ReShade -> Witcher3VR -> OpenXR order.
+    if (!reentry && !reshade_outer && SUCCEEDED(hr) && factory != nullptr) {
         if (g_config.runtime_diagnostics) {
             log_line("CreateDXGIFactory riid ok factory=%p", *factory);
         }
@@ -53083,12 +53010,14 @@ extern "C" HRESULT WINAPI CreateDXGIFactory(REFIID riid, void** factory) {
 
 extern "C" HRESULT WINAPI CreateDXGIFactory1(REFIID riid, void** factory) {
     ensure_initialized();
+    const bool reshade_outer = prepare_secondary_reshade_runtime();
     const bool reentry = g_renderdoc_dxgi_forward_reentry;
-    auto fn = reinterpret_cast<CreateDXGIFactory1Fn>(real_proc("CreateDXGIFactory1"));
+    auto fn = reinterpret_cast<CreateDXGIFactory1Fn>(
+        secondary_reshade_dxgi_proc("CreateDXGIFactory1"));
     g_renderdoc_dxgi_forward_reentry = true;
     const auto hr = fn != nullptr ? fn(riid, factory) : E_FAIL;
     g_renderdoc_dxgi_forward_reentry = reentry;
-    if (!reentry && SUCCEEDED(hr) && factory != nullptr) {
+    if (!reentry && !reshade_outer && SUCCEEDED(hr) && factory != nullptr) {
         if (g_config.runtime_diagnostics) {
             log_line("CreateDXGIFactory1 riid ok factory=%p", *factory);
         }
@@ -53099,12 +53028,14 @@ extern "C" HRESULT WINAPI CreateDXGIFactory1(REFIID riid, void** factory) {
 
 extern "C" HRESULT WINAPI CreateDXGIFactory2(UINT flags, REFIID riid, void** factory) {
     ensure_initialized();
+    const bool reshade_outer = prepare_secondary_reshade_runtime();
     const bool reentry = g_renderdoc_dxgi_forward_reentry;
-    auto fn = reinterpret_cast<CreateDXGIFactory2Fn>(real_proc("CreateDXGIFactory2"));
+    auto fn = reinterpret_cast<CreateDXGIFactory2Fn>(
+        secondary_reshade_dxgi_proc("CreateDXGIFactory2"));
     g_renderdoc_dxgi_forward_reentry = true;
     const auto hr = fn != nullptr ? fn(flags, riid, factory) : E_FAIL;
     g_renderdoc_dxgi_forward_reentry = reentry;
-    if (!reentry && SUCCEEDED(hr) && factory != nullptr) {
+    if (!reentry && !reshade_outer && SUCCEEDED(hr) && factory != nullptr) {
         if (g_config.runtime_diagnostics) {
             log_line("CreateDXGIFactory2 flags=%u factory=%p", flags, *factory);
         }
@@ -53115,8 +53046,10 @@ extern "C" HRESULT WINAPI CreateDXGIFactory2(UINT flags, REFIID riid, void** fac
 
 extern "C" HRESULT WINAPI DXGIDeclareAdapterRemovalSupport() {
     ensure_initialized();
+    prepare_secondary_reshade_runtime();
     const bool reentry = g_renderdoc_dxgi_forward_reentry;
-    auto fn = reinterpret_cast<DXGIDeclareAdapterRemovalSupportFn>(real_proc("DXGIDeclareAdapterRemovalSupport"));
+    auto fn = reinterpret_cast<DXGIDeclareAdapterRemovalSupportFn>(
+        secondary_reshade_dxgi_proc("DXGIDeclareAdapterRemovalSupport"));
     g_renderdoc_dxgi_forward_reentry = true;
     const auto hr = fn != nullptr ? fn() : E_FAIL;
     g_renderdoc_dxgi_forward_reentry = reentry;
@@ -53125,8 +53058,10 @@ extern "C" HRESULT WINAPI DXGIDeclareAdapterRemovalSupport() {
 
 extern "C" HRESULT WINAPI DXGIGetDebugInterface1(UINT flags, REFIID riid, void** debug) {
     ensure_initialized();
+    prepare_secondary_reshade_runtime();
     const bool reentry = g_renderdoc_dxgi_forward_reentry;
-    auto fn = reinterpret_cast<DXGIGetDebugInterface1Fn>(real_proc("DXGIGetDebugInterface1"));
+    auto fn = reinterpret_cast<DXGIGetDebugInterface1Fn>(
+        secondary_reshade_dxgi_proc("DXGIGetDebugInterface1"));
     g_renderdoc_dxgi_forward_reentry = true;
     const auto hr = fn != nullptr ? fn(flags, riid, debug) : E_FAIL;
     g_renderdoc_dxgi_forward_reentry = reentry;
@@ -53135,8 +53070,10 @@ extern "C" HRESULT WINAPI DXGIGetDebugInterface1(UINT flags, REFIID riid, void**
 
 extern "C" HRESULT WINAPI DXGIDisableVBlankVirtualization() {
     ensure_initialized();
+    prepare_secondary_reshade_runtime();
     const bool reentry = g_renderdoc_dxgi_forward_reentry;
-    auto fn = reinterpret_cast<DXGIDisableVBlankVirtualizationFn>(real_proc("DXGIDisableVBlankVirtualization"));
+    auto fn = reinterpret_cast<DXGIDisableVBlankVirtualizationFn>(
+        secondary_reshade_dxgi_proc("DXGIDisableVBlankVirtualization"));
     g_renderdoc_dxgi_forward_reentry = true;
     const auto hr = fn != nullptr ? fn() : E_FAIL;
     g_renderdoc_dxgi_forward_reentry = reentry;
@@ -53145,6 +53082,7 @@ extern "C" HRESULT WINAPI DXGIDisableVBlankVirtualization() {
 
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, void* reserved) {
     if (reason == DLL_PROCESS_ATTACH) {
+        g_proxy_module = module;
         DisableThreadLibraryCalls(module);
     } else if (reason == DLL_PROCESS_DETACH) {
         // At process termination dependency teardown order is unspecified and
@@ -53155,6 +53093,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, void* reserved) {
         if (reserved != nullptr) {
             return TRUE;
         }
+        unregister_reshade_overlay_event();
         if (g_xr_session != XR_NULL_HANDLE && pfn_xrDestroySession != nullptr) {
             pfn_xrDestroySession(g_xr_session);
         }

@@ -33,7 +33,7 @@ foreach(fragment IN ITEMS
 endforeach()
 
 foreach(fragment IN ITEMS
-    "constexpr int kCurrentConfigVersion = 18;"
+    "constexpr int kCurrentConfigVersion = 19;"
     "ReadFloat(*vr, \"openxr\", \"world_detail_range\", 1.0f)"
     "vr_ini.Set(\"openxr\", \"world_detail_range\", FloatString("
     "std::clamp(state.world_detail_range, 0.4f, 1.0f)")
@@ -44,7 +44,7 @@ foreach(fragment IN ITEMS
 endforeach()
 
 foreach(fragment IN ITEMS
-    "config_version=18"
+    "config_version=19"
     "world_detail_range=1.000")
     string(FIND "${default_ini}" "${fragment}" found)
     if(found EQUAL -1)

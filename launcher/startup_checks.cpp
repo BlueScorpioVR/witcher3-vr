@@ -37,6 +37,7 @@ const auto kKnownDx12Dlls = std::to_array<std::wstring_view>({
     L"nvngx_dlss.dll",
     L"nvngx_dlssd.dll",
     L"nvngx_dlssg.dll",
+    L"nvngx_dlssnr.dll",
     L"PhysX3Common_x64.dll",
     L"PhysX3Gpu_x64.dll",
     L"PhysXDevice64.dll",
@@ -56,9 +57,13 @@ const auto kKnownDx12Dlls = std::to_array<std::wstring_view>({
     L"openxr_loader.dll",
     L"PDAFWPlugin.dll",
     L"OptiScaler.dll",
+    // [FIX:DLSS5-RUNTIME-WHITELIST V23024 1/1] This root file belongs to
+    // the managed modified-OptiScaler DLSSNR route.
+    L"nvngx.dll_dlssnr.dll",
     L"amd_fidelityfx_dx12.dll",
     L"amd_fidelityfx_upscaler_dx12.dll",
     L"renderdoc.dll",
+    L"ReShade64.dll",
     // [FIX:OFXR-STARTUP-WHITELIST V1512 1/2] Root-owned XRFG-V041 layer.
     L"XR_APILAYER_XRFrameBridge_diagnostic.dll",
 });

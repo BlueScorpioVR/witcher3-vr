@@ -23,7 +23,8 @@ foreach(required_fragment IN ITEMS
         "accepted_predecessor_pair <= current_accepted_scene_pair"
         "accepted_predecessor_tag.pair_id ="
         "candidate.pending.strict_eye_valid"
-        "candidate.scene_only_draw_recorded"
+        "strict_hud_capture_publishable("
+        "candidate.hud_draw_recorded"
         "record_mode3_scene_only_hud_output("
         "V1494 strict Stereo HUD accepted-predecessor join"
         "current_accepted_scene=validation_only"
@@ -37,6 +38,7 @@ foreach(required_fragment IN ITEMS
 endforeach()
 
 foreach(forbidden_fragment IN ITEMS
+        "!candidate.scene_only_draw_recorded"
         "STRICT-STEREO-HUD-ACCEPTED-SCENE-JOIN V1492"
         "accepted_scene_tag"
         "strict_stereo_full_vr_hud=accepted_packed_scene_pair"

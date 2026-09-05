@@ -16,8 +16,10 @@ set(required_fragments
     "PERF:NOAA-EXECUTE-ROUTES V1441"
     "if (taau_execute_tracking && command_lists != nullptr)"
     "if (!native_temporal_terrain_motion_route_active() ||"
-    "D3D12_GPU_DESCRIPTOR_HANDLE base_descriptor) {\n    if (dlss_graphics_state_tracking_active() &&"
-    "D3D12_GPU_VIRTUAL_ADDRESS buffer_location) {\n    if (native_temporal_terrain_motion_route_active() &&")
+    "D3D12_GPU_DESCRIPTOR_HANDLE base_descriptor) {\n    if (is_reshade_immediate_command_list(command_list))"
+    "return;\n    }\n    if (dlss_graphics_state_tracking_active() &&"
+    "D3D12_GPU_VIRTUAL_ADDRESS buffer_location) {\n    if (is_reshade_immediate_command_list(command_list))"
+    "return;\n    }\n    if (native_temporal_terrain_motion_route_active() &&")
 
 foreach(fragment IN LISTS required_fragments)
     string(FIND "${source}" "${fragment}" position)

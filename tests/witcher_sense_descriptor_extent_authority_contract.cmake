@@ -11,7 +11,6 @@ set(required_fragments
     "t0.width, t0.height, t3.width, t3.height);"
     "witcher_sense_extent=paired_descriptor_authority"
     "live_requested_extent=diagnostic_only"
-    "alt_resize_early_publication=isolated"
     "pso_draw_root_formats_descriptors=V1501_unchanged")
 
 foreach(required_fragment IN LISTS required_fragments)

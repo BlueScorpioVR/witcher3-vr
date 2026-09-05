@@ -1,6 +1,7 @@
 /build/
 /dist/
 /external/*
+/runtime/
 !/external/README.md
 /.vs/
 *.dll

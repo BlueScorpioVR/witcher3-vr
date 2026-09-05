@@ -290,15 +290,33 @@ constexpr bool afw_queued_producer_expired(
         present - ready_present >= kAfwStaleProducerMaxAgePresents;
 }
 
-// Gameplay owns the validated continuously scene-only contract. Cinema and
-// automatic Full VR can cross their activation boundary between the two AER
-// renders, so their late HUD is safe only when the exact published pair proves
-// that both final eyes were rendered without a baked native HUD.
+// [FIX:GAMEPLAY-HUD-CURRENT-SCENE-PROOF V23035 1/3] The scene-only decision is
+// made while REDengine records the HUD draw, whereas retained-pair freshness
+// can advance before the later OpenXR submit. An overlay can expose that race:
+// the backbuffer keeps its baked HUD, then the late path adds the retained HUD
+// again. Every route must therefore prove that the exact published scene pair
+// was rendered scene-only before it may composite the late HUD.
 constexpr bool late_hud_composite_source_ready(
-    HudProjectionRoute route,
+    HudProjectionRoute /*route*/,
     bool scene_only_pair_ready) noexcept {
-    return route == HudProjectionRoute::Gameplay ||
-        scene_only_pair_ready;
+    return scene_only_pair_ready;
+}
+
+// Strict Stereo labels the retained HUD texture with the accepted predecessor,
+// but that texture label is not the identity of the backbuffer carrying the HUD
+// draw. The ownership proof belongs to the current accepted scene. Keep the two
+// identities separate so the scene-only ledger can authorize the exact image
+// later submitted to OpenXR without breaking the native-HUD bootstrap.
+constexpr uint64_t strict_stereo_scene_only_output_pair_id(
+    uint64_t current_accepted_scene_pair,
+    uint64_t accepted_predecessor_pair) noexcept {
+    return current_accepted_scene_pair != 0 &&
+        current_accepted_scene_pair != UINT64_MAX &&
+        accepted_predecessor_pair != 0 &&
+        accepted_predecessor_pair != UINT64_MAX &&
+        accepted_predecessor_pair <= current_accepted_scene_pair
+        ? current_accepted_scene_pair
+        : 0;
 }
 
 // Automatic AER Full VR owns a sequential Cinema pair. Its baked HUD may be

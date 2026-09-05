@@ -30,6 +30,7 @@ int wmain() {
         Touch(root / L"steam_api64.dll");
         Touch(root / L"DXGI.DLL");
         Touch(root / L"OptiScaler.dll");
+        Touch(root / L"nvngx.dll_dlssnr.dll");
         Touch(root / L"renderdoc.dll");
         // [FIX:OFXR-STARTUP-WHITELIST V1512 2/2]
         Touch(root / L"XR_APILAYER_XRFrameBridge_diagnostic.dll");
@@ -38,22 +39,23 @@ int wmain() {
         Touch(root / L"not-a-library.txt");
 
         const auto foreign = w3vr::FindForeignDx12Dlls(root);
-        Require(foreign.size() == 2,
+        Require(foreign.size() == 1,
             "foreign DLL scan did not exclude game/mod-owned DLLs");
-        Require(foreign[0] == L"d3d12.dll" &&
-                foreign[1] == L"ReShade64.dll",
+        Require(foreign[0] == L"d3d12.dll",
             "foreign DLL scan did not return the expected sorted names");
         Require(w3vr::IsKnownDx12Dll(L"NvNgX_DlSs.DlL"),
             "known DLL matching is not case-insensitive");
         Require(w3vr::IsKnownDx12Dll(
                 L"xr_apilayer_xrframebridge_DIAGNOSTIC.DLL"),
             "OFXR layer DLL matching is not case-insensitive");
+        Require(w3vr::IsKnownDx12Dll(L"NVNGX.DLL_DLSSNR.DLL"),
+            "managed DLSSNR DLL matching is not case-insensitive");
         Require(!w3vr::IsKnownDx12Dll(L"version.dll"),
             "foreign proxy DLL was incorrectly allowlisted");
 
         const auto forward = w3vr::ForeignDllWarningSignature(foreign);
         const auto reversed = w3vr::ForeignDllWarningSignature(
-            {L"RESHade64.DLL", L"D3D12.DLL"});
+            {L"D3D12.DLL"});
         Require(!forward.empty() && forward == reversed,
             "foreign DLL signature is not stable and order-insensitive");
 

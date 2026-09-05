@@ -848,71 +848,6 @@ void test_strict_stereo_final_presentation_scale() {
         "strict-Stereo exact FOV rejects rectangle outside content");
 }
 
-void test_black_resize_presentation() {
-    constexpr uint32_t surface_width = 3072;
-    constexpr uint32_t surface_height = 3216;
-    constexpr float scale = 0.8f;
-    const XrRect2Di base_rect{{211, 173}, {2450, 2710}};
-    const XrFovf base_fov{
-        -0.942478f, 0.698132f, 0.767945f, -0.959931f};
-    eye_geometry::BlackResizePresentation presentation{};
-    require(eye_geometry::derive_black_resize_presentation(
-        base_fov, base_rect, surface_width, surface_height, scale,
-        presentation),
-        "black resize mapping accepts asymmetric eye");
-
-    const float base_tangents[4]{
-        std::tan(base_fov.angleLeft),
-        std::tan(base_fov.angleRight),
-        std::tan(base_fov.angleUp),
-        std::tan(base_fov.angleDown)};
-    require(presentation.submitted_fov.angleLeft == base_fov.angleLeft &&
-        presentation.submitted_fov.angleRight == base_fov.angleRight &&
-        presentation.submitted_fov.angleUp == base_fov.angleUp &&
-        presentation.submitted_fov.angleDown == base_fov.angleDown,
-        "black resize submits the established route FOV unchanged");
-
-    const float optical_fraction_x = -base_tangents[0] /
-        (base_tangents[1] - base_tangents[0]);
-    const float optical_fraction_y = base_tangents[2] /
-        (base_tangents[2] - base_tangents[3]);
-    const float optical_x = base_rect.offset.x +
-        optical_fraction_x * base_rect.extent.width;
-    const float optical_y = base_rect.offset.y +
-        optical_fraction_y * base_rect.extent.height;
-    require(std::fabs((presentation.target_left_px - optical_x) -
-            scale * (base_rect.offset.x - optical_x)) < 0.001f &&
-        std::fabs((presentation.target_right_px - optical_x) -
-            scale * (base_rect.offset.x + base_rect.extent.width -
-                optical_x)) < 0.001f &&
-        std::fabs((presentation.target_top_px - optical_y) -
-            scale * (base_rect.offset.y - optical_y)) < 0.001f &&
-        std::fabs((presentation.target_bottom_px - optical_y) -
-            scale * (base_rect.offset.y + base_rect.extent.height -
-                optical_y)) < 0.001f,
-        "black resize contracts the image about the optical axis");
-
-    require(std::fabs(
-            (presentation.target_right_px - presentation.target_left_px) -
-            scale * base_rect.extent.width) < 0.001f &&
-        std::fabs(
-            (presentation.target_bottom_px - presentation.target_top_px) -
-            scale * base_rect.extent.height) < 0.001f,
-        "black resize scales the completed eye image on the full surface");
-
-    require(std::fabs(presentation.source_left_uv -
-            static_cast<float>(base_rect.offset.x) / surface_width) <
-            1.0e-6f &&
-        std::fabs(presentation.source_bottom_uv -
-            static_cast<float>(base_rect.offset.y +
-                base_rect.extent.height) / surface_height) < 1.0e-6f,
-        "black resize samples exactly the established imageRect");
-    require(!eye_geometry::derive_black_resize_presentation(
-        base_fov, base_rect, surface_width, surface_height, 0.0f,
-        presentation),
-        "black resize rejects zero scale");
-}
-
 void test_asymmetric_hud_source_shift() {
     constexpr uint32_t width = 3072;
     constexpr uint32_t height = 3216;
@@ -965,7 +900,6 @@ int main() {
     test_asymmetric_projection_descriptor();
     test_asymmetric_presentation_scale();
     test_strict_stereo_final_presentation_scale();
-    test_black_resize_presentation();
     test_asymmetric_hud_source_shift();
     if (failures != 0) {
         std::fprintf(stderr, "%d eye-geometry test(s) failed\n", failures);

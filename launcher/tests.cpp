@@ -211,13 +211,12 @@ void TestAllModes(const w3vr::ConfigPaths& paths) {
         state.width = 2496 + index;
         state.height = 2592 + index;
         state.dlss_quality = index % 5;
-        state.optiscaler_enabled = true;
+        state.integration_mode = w3vr::IntegrationMode::Optiscaler;
         state.frame_generation_backend =
             static_cast<w3vr::FrameGenerationBackend>(index %
                 static_cast<int>(w3vr::FrameGenerationBackend::Count));
         state.hud_convergence_delta = 7;
         state.presentation_scale = 0.85f;
-        state.presentation_black_resize = index % 2 == 0;
         state.world_detail_range = 0.65f;
         state.menu_scale = 0.75f;
         state.cinema_scale = 1.1f;
@@ -295,9 +294,6 @@ void TestAllModes(const w3vr::ConfigPaths& paths) {
         Require(vr.Get("openxr", "presentation_scale") ==
             "0.850",
             "presentation scale must be preserved in every render mode");
-        Require(vr.Get("openxr", "presentation_black_resize") ==
-            std::string(state.presentation_black_resize ? "1" : "0"),
-            "presentation black-resize mode must be preserved in every render mode");
         Require(vr.Get("openxr", "world_detail_range") == "0.650",
             "world-detail range must be preserved in every render mode");
         Require(vr.Get("openxr", "native_stereo") == "1",
@@ -356,7 +352,7 @@ void TestAllModes(const w3vr::ConfigPaths& paths) {
             vr.Get("openxr", "cinema_5x4") ==
                 std::string(expected_five_four ? "1" : "0"),
             "Cinema aspect and compatibility mirror mismatch");
-        Require(vr.Get("meta", "config_version") == "18",
+        Require(vr.Get("meta", "config_version") == "19",
             "configuration version marker missing");
         Require(vr.Get("openxr", "resolution_auto") ==
             std::string(state.resolution_auto ? "1" : "0"),
@@ -459,12 +455,12 @@ void TestAllModes(const w3vr::ConfigPaths& paths) {
             "round-trip resolution mismatch");
         Require(loaded.state.resolution_auto == state.resolution_auto,
             "round-trip OpenXR AUTO resolution mismatch");
-        Require(loaded.state.presentation_black_resize ==
-                state.presentation_black_resize,
-            "round-trip presentation black-resize mismatch");
         Require(loaded.state.fullscreen_projection,
             "round-trip fullscreen projection mismatch");
-        Require(loaded.state.optiscaler_enabled == expected_optiscaler,
+        Require(loaded.state.integration_mode ==
+                (expected_optiscaler
+                    ? w3vr::IntegrationMode::Optiscaler
+                    : w3vr::IntegrationMode::Off),
             "round-trip OptiScaler sidecar mismatch");
         Require(loaded.state.frame_generation_backend ==
                 state.frame_generation_backend,
@@ -539,7 +535,7 @@ void TestOptiscalerAndAlwaysAsym(
     state.mode = w3vr::RenderMode::StereoTaau;
     state.presentation_scale = 0.85f;
     state.fullscreen_projection = false;
-    state.optiscaler_enabled = false;
+    state.integration_mode = w3vr::IntegrationMode::Off;
     w3vr::IniDocument vr;
     w3vr::IniDocument game;
     std::wstring error;
@@ -558,7 +554,7 @@ void TestOptiscalerAndAlwaysAsym(
             paths, state, optiscaler, error) &&
             optiscaler.Get("optiscaler", "enabled") == "0",
         "OptiScaler must default to disabled");
-    state.optiscaler_enabled = true;
+    state.integration_mode = w3vr::IntegrationMode::Optiscaler;
     Require(w3vr::BuildUpdatedOptiscalerDocument(
             paths, state, optiscaler, error) &&
             optiscaler.Get("optiscaler", "enabled") == "0",
@@ -566,7 +562,8 @@ void TestOptiscalerAndAlwaysAsym(
     Write(paths.vr_ini, vr.Serialize());
     Write(paths.game_settings, game.Serialize());
     Write(paths.optiscaler_bridge_ini, optiscaler.Serialize());
-    Require(!w3vr::LoadConfiguration(paths).state.optiscaler_enabled,
+    Require(w3vr::LoadConfiguration(paths).state.integration_mode ==
+            w3vr::IntegrationMode::Off,
         "non-DLSS profile exposed an enabled OptiScaler state");
 
     state.mode = w3vr::RenderMode::StereoDlssSequential;
@@ -605,8 +602,6 @@ void TestReleaseDefaults() {
         "AER DLSS Performance and resolution release defaults changed");
     Require(defaults.presentation_scale == 1.0f,
         "Presentation Size must default to 1.00");
-    Require(!defaults.presentation_black_resize,
-        "SteamVR presentation compatibility mode must default off");
     Require(defaults.world_detail_range == 1.0f,
         "World Detail Range must default to 100%");
     Require(defaults.full_vr_hud_scale == 1.0f &&
@@ -620,7 +615,7 @@ void TestReleaseDefaults() {
         "Cinema aspect must default to 5:4");
     Require(!defaults.steady_icons,
         "steady icons must default to disabled");
-    Require(!defaults.optiscaler_enabled,
+    Require(defaults.integration_mode == w3vr::IntegrationMode::Off,
         "OptiScaler must default to disabled");
     Require(defaults.frame_generation_backend ==
             w3vr::FrameGenerationBackend::Off,
@@ -681,11 +676,11 @@ void TestEmbeddedLauncherDefaults() {
     const auto defaults = w3vr::IniDocument::Load(defaults_path, error);
     Require(defaults.has_value(),
         "embedded launcher INI defaults could not be loaded");
-    Require(defaults->Get("meta", "config_version") == "18" &&
+    Require(defaults->Get("meta", "config_version") == "19" &&
         defaults->Get("openxr", "mode3_aer_presentation") == "1" &&
         defaults->Get("openxr", "resolution_auto") == "1" &&
         defaults->Get("openxr", "presentation_scale") == "1.000" &&
-        defaults->Get("openxr", "presentation_black_resize") == "0" &&
+        !defaults->Get("openxr", "presentation_black_resize").has_value() &&
         defaults->Get("openxr", "world_detail_range") == "1.000" &&
         defaults->Get("openxr", "native_stereo") == "1" &&
         !defaults->Get(
@@ -695,9 +690,54 @@ void TestEmbeddedLauncherDefaults() {
         defaults->Get("engine", "raytracing_history_buffers") == "8" &&
         defaults->Get("renderdoc", "enabled") == "0" &&
         defaults->Get("renderdoc", "streamline_device_bridge") == "0" &&
+        defaults->Get("launcher", "integration_mode") == "off" &&
         defaults->Get("debug", "pipeline_flight_recorder") == "0" &&
         defaults->Get("debug", "route_flight_recorder") == "0",
-        "embedded launcher defaults do not match schema 18 release policy");
+        "embedded launcher defaults do not match schema 19 release policy");
+}
+
+void TestIntegrationModeContract() {
+    constexpr std::array<const wchar_t*, 7> expected_display{{
+        L"Off", L"OptiScaler", L"ReShade", L"OptiScaler + ReShade",
+        L"OptiScaler DLSS5", L"ReShade DLSS5 RenoDX", L"ReShade DLSS5 Cheeky"}};
+    constexpr std::array<const char*, 7> expected_ini{{
+        "off", "optiscaler", "reshade", "optiscaler_reshade",
+        "optiscaler_dlss5", "reshade_dlss5", "reshade_dlss5_cheeky"}};
+    for (size_t index = 0; index < expected_display.size(); ++index) {
+        const auto mode = static_cast<w3vr::IntegrationMode>(index);
+        Require(std::wstring_view(w3vr::IntegrationModeDisplayName(mode)) ==
+                expected_display[index],
+            "integration display ordering changed");
+        Require(std::string_view(w3vr::IntegrationModeIniValue(mode)) ==
+                expected_ini[index] &&
+            w3vr::ParseIntegrationMode(expected_ini[index]) == mode,
+            "integration INI round-trip changed");
+    }
+    Require(!w3vr::IntegrationModeUsesOptiscaler(
+                w3vr::IntegrationMode::Off) &&
+            w3vr::IntegrationModeUsesOptiscaler(
+                w3vr::IntegrationMode::Optiscaler) &&
+            w3vr::IntegrationModeUsesOptiscaler(
+                w3vr::IntegrationMode::OptiscalerReshade) &&
+            w3vr::IntegrationModeUsesOptiscaler(
+                w3vr::IntegrationMode::OptiscalerDlss5),
+        "OptiScaler integration membership changed");
+    Require(w3vr::IntegrationModeUsesReshade(
+                w3vr::IntegrationMode::Reshade) &&
+            w3vr::IntegrationModeUsesReshade(
+                w3vr::IntegrationMode::OptiscalerReshade) &&
+            w3vr::IntegrationModeUsesReshade(
+                w3vr::IntegrationMode::ReshadeDlss5) &&
+            !w3vr::IntegrationModeUsesReshade(
+                w3vr::IntegrationMode::OptiscalerDlss5),
+        "ReShade integration membership changed");
+    Require(w3vr::IntegrationModeUsesDlss5(
+                w3vr::IntegrationMode::OptiscalerDlss5) &&
+            w3vr::IntegrationModeUsesDlss5(
+                w3vr::IntegrationMode::ReshadeDlss5) &&
+            !w3vr::IntegrationModeUsesDlss5(
+                w3vr::IntegrationMode::OptiscalerReshade),
+        "DLSS5 integration membership changed");
 }
 
 void TestHudEditorSetup(const fs::path& root) {
@@ -1121,7 +1161,7 @@ void TestFirstRunConfiguration(const fs::path& root) {
     std::wstring error;
     const std::string defaults =
         "[meta]\r\n"
-        "config_version=18\r\n"
+        "config_version=19\r\n"
         "[openxr]\r\n"
         "mode=3\r\n"
         "mode3_aer_presentation=1\r\n"
@@ -1181,7 +1221,7 @@ void TestFirstRunConfiguration(const fs::path& root) {
     Require(!created, "migrated INI must not be reported as newly created");
     auto migrated = w3vr::IniDocument::Load(paths.vr_ini, error);
     Require(migrated.has_value(), "migrated INI could not be read");
-    Require(migrated->Get("meta", "config_version") == "18",
+    Require(migrated->Get("meta", "config_version") == "19",
         "old INI was not versioned");
     Require(migrated->Get("openxr", "resolution_auto") == "1",
         "old INI did not receive the OpenXR AUTO default");
@@ -1266,33 +1306,23 @@ void TestFirstRunConfiguration(const fs::path& root) {
     const auto migrated_v16_range =
         w3vr::IniDocument::Load(paths.vr_ini, error);
     Require(migrated_v16_range.has_value() &&
-            migrated_v16_range->Get("meta", "config_version") == "18" &&
+            migrated_v16_range->Get("meta", "config_version") == "19" &&
             migrated_v16_range->Get(
                 "openxr", "world_detail_range") == "0.500",
         "V17 migration reset the existing world-detail range");
 
-    // V18 introduces the SteamVR-specific transport as an opt-in. A V17
-    // installation must retain its Presentation Size while starting on the
-    // established imageRect presenter.
+    // Retire the old resize switch without changing the user's scale.
     Write(paths.vr_ini,
-        "[meta]\r\n"
-        "config_version=17\r\n"
-        "[openxr]\r\n"
-        "presentation_scale=0.750\r\n"
+        "[meta]\r\nconfig_version=17\r\n"
+        "[openxr]\r\npresentation_scale=0.750\r\n"
         "presentation_black_resize=1\r\n");
-    Require(w3vr::EnsureVrConfiguration(
-        paths, defaults, created, error),
-        "V17-to-V18 presentation migration failed");
-    const auto migrated_v17_presentation =
-        w3vr::IniDocument::Load(paths.vr_ini, error);
-    Require(migrated_v17_presentation.has_value() &&
-            migrated_v17_presentation->Get(
-                "meta", "config_version") == "18" &&
-            migrated_v17_presentation->Get(
-                "openxr", "presentation_scale") == "0.750" &&
-            migrated_v17_presentation->Get(
-                "openxr", "presentation_black_resize") == "0",
-        "V18 migration did not seed the SteamVR presenter safely off");
+    Require(w3vr::EnsureVrConfiguration(paths, defaults, created, error),
+        "retired resize migration failed");
+    const auto migrated_presentation = w3vr::IniDocument::Load(paths.vr_ini, error);
+    Require(migrated_presentation &&
+            migrated_presentation->Get("openxr", "presentation_scale") == "0.750" &&
+            !migrated_presentation->Get("openxr", "presentation_black_resize"),
+        "retired resize survived or changed the presentation scale");
 
     // V15 assigns the clean Mono transport to Mode 1. Migrate each retired
     // pre-V15 numeric route according to V1357's effective runtime meaning,
@@ -1312,7 +1342,7 @@ void TestFirstRunConfiguration(const fs::path& root) {
     const auto migrated_v14_mode1 =
         w3vr::IniDocument::Load(paths.vr_ini, error);
     Require(migrated_v14_mode1.has_value() &&
-            migrated_v14_mode1->Get("meta", "config_version") == "18" &&
+            migrated_v14_mode1->Get("meta", "config_version") == "19" &&
             migrated_v14_mode1->Get("openxr", "mode") == "3" &&
             migrated_v14_mode1->Get(
                 "openxr", "mode3_aer_presentation") == "1" &&
@@ -1342,7 +1372,7 @@ void TestFirstRunConfiguration(const fs::path& root) {
     const auto migrated_v14_mode2 =
         w3vr::IniDocument::Load(paths.vr_ini, error);
     Require(migrated_v14_mode2.has_value() &&
-            migrated_v14_mode2->Get("meta", "config_version") == "18" &&
+            migrated_v14_mode2->Get("meta", "config_version") == "19" &&
             migrated_v14_mode2->Get("openxr", "mode") == "1" &&
             migrated_v14_mode2->Get(
                 "openxr", "mode3_aer_presentation") == "0" &&
@@ -1373,7 +1403,7 @@ void TestFirstRunConfiguration(const fs::path& root) {
     const auto migrated_v14_mode4 =
         w3vr::IniDocument::Load(paths.vr_ini, error);
     Require(migrated_v14_mode4.has_value() &&
-            migrated_v14_mode4->Get("meta", "config_version") == "18" &&
+            migrated_v14_mode4->Get("meta", "config_version") == "19" &&
             migrated_v14_mode4->Get("openxr", "mode") == "3" &&
             migrated_v14_mode4->Get(
                 "openxr", "mode3_aer_presentation") == "0" &&
@@ -1421,7 +1451,7 @@ void TestFirstRunConfiguration(const fs::path& root) {
         paths, defaults, created, error), "V11-to-V12 normalization failed");
     const auto normalized_v12 = w3vr::IniDocument::Load(paths.vr_ini, error);
     Require(normalized_v12.has_value() &&
-        normalized_v12->Get("meta", "config_version") == "18" &&
+        normalized_v12->Get("meta", "config_version") == "19" &&
         normalized_v12->Get("openxr", "enabled") == "1" &&
         normalized_v12->Get("openxr", "mode") == "3" &&
         normalized_v12->Get("openxr", "mode3_aer_presentation") == "0" &&
@@ -1464,7 +1494,7 @@ void TestFirstRunConfiguration(const fs::path& root) {
         paths, defaults, created, error), "V2-to-V11 migration failed");
     auto migrated_v4 = w3vr::IniDocument::Load(paths.vr_ini, error);
     Require(migrated_v4.has_value() &&
-        migrated_v4->Get("meta", "config_version") == "18" &&
+        migrated_v4->Get("meta", "config_version") == "19" &&
         migrated_v4->Get("openxr", "cinema_hud_stereo_shift_px") == "-91" &&
         migrated_v4->Get("openxr", "cinema_hud_scale") == "1.100" &&
         migrated_v4->Get("openxr", "full_vr_hud_stereo_shift_px") == "-26" &&
@@ -1491,7 +1521,7 @@ void TestFirstRunConfiguration(const fs::path& root) {
         paths, defaults, created, error), "V3-to-V11 migration failed");
     auto migrated_from_v3 = w3vr::IniDocument::Load(paths.vr_ini, error);
     Require(migrated_from_v3.has_value() &&
-        migrated_from_v3->Get("meta", "config_version") == "18" &&
+        migrated_from_v3->Get("meta", "config_version") == "19" &&
         migrated_from_v3->Get("openxr", "hud_horizontal_scale") == "1.000" &&
         migrated_from_v3->Get("openxr", "hud_vertical_scale") == "1.000" &&
         migrated_from_v3->Get("openxr", "custom_user_value") == "keep",
@@ -1508,7 +1538,7 @@ void TestFirstRunConfiguration(const fs::path& root) {
         paths, defaults, created, error), "V6-to-V11 migration failed");
     auto migrated_from_v6 = w3vr::IniDocument::Load(paths.vr_ini, error);
     Require(migrated_from_v6.has_value() &&
-        migrated_from_v6->Get("meta", "config_version") == "18" &&
+        migrated_from_v6->Get("meta", "config_version") == "19" &&
         migrated_from_v6->Get("openxr", "native_stereo") == "1" &&
         migrated_from_v6->Get("openxr", "fullscreen_projection") == "0" &&
         !migrated_from_v6->Get(
@@ -1530,7 +1560,7 @@ void TestFirstRunConfiguration(const fs::path& root) {
         paths, defaults, created, error), "V9-to-V11 migration failed");
     auto migrated_from_v9 = w3vr::IniDocument::Load(paths.vr_ini, error);
     Require(migrated_from_v9.has_value() &&
-        migrated_from_v9->Get("meta", "config_version") == "18" &&
+        migrated_from_v9->Get("meta", "config_version") == "19" &&
         !migrated_from_v9->Get(
             "engine", "first_person_stationary_turn").has_value() &&
         migrated_from_v9->Get("engine", "first_person_strafe") == "0" &&
@@ -1551,7 +1581,7 @@ void TestFirstRunConfiguration(const fs::path& root) {
         paths, defaults, created, error), "V8-to-V11 migration failed");
     auto migrated_from_v8 = w3vr::IniDocument::Load(paths.vr_ini, error);
     Require(migrated_from_v8.has_value() &&
-        migrated_from_v8->Get("meta", "config_version") == "18" &&
+        migrated_from_v8->Get("meta", "config_version") == "19" &&
         migrated_from_v8->Get("openxr", "cinema_aspect") == "4x3" &&
         migrated_from_v8->Get("openxr", "cinema_5x4") == "0",
         "V8 Cinema framing choice was not migrated to 4:3");
@@ -1564,6 +1594,26 @@ void TestFirstRunConfiguration(const fs::path& root) {
     Require(loaded_four_three.state.cinema_aspect ==
             w3vr::CinemaAspect::FourThree,
         "migrated 4:3 Cinema aspect was not loaded");
+
+    Write(paths.vr_ini,
+        "[meta]\r\n"
+        "config_version=18\r\n"
+        "[launcher]\r\n"
+        "reshade_enabled=1\r\n"
+        "dlss5_enabled=1\r\n");
+    Require(w3vr::EnsureVrConfiguration(paths, defaults, created, error),
+        "V18 integration selector migration failed");
+    const auto migrated_integration =
+        w3vr::IniDocument::Load(paths.vr_ini, error);
+    Require(migrated_integration.has_value() &&
+            migrated_integration->Get("meta", "config_version") == "19" &&
+            migrated_integration->Get(
+                "launcher", "integration_mode") == "reshade_dlss5" &&
+            !migrated_integration->Get(
+                "launcher", "reshade_enabled").has_value() &&
+            !migrated_integration->Get(
+                "launcher", "dlss5_enabled").has_value(),
+        "V18 independent integration booleans survived V19 migration");
 }
 
 void TestVrBaselineAndRestore(const w3vr::ConfigPaths& paths) {
@@ -1704,6 +1754,111 @@ void TestOfxrLaunchEnvironment(const fs::path& root) {
     SetEnvironmentVariableW(L"XRFG_FLOW_BACKEND", nullptr);
 }
 
+void TestOfxrBackendOnlySave() {
+    TempDirectory temporary;
+    const auto paths = MakePaths(temporary.path);
+    WriteBaseFixtures(paths);
+    std::wstring error;
+
+    // Exercise the real Save Only / Save & Launch configuration path, including
+    // a manual recorder change made after the launcher loaded its UI state.
+    for (const auto backend : {w3vr::FrameGenerationBackend::Off,
+            w3vr::FrameGenerationBackend::FidelityFx,
+            w3vr::FrameGenerationBackend::Nvidia}) {
+        for (const bool mod_logging : {false, true}) {
+            for (const bool ofxr_logging : {false, true}) {
+                for (const bool supplied_profile : {false, true}) {
+                    Write(paths.ofxr_bridge_ini,
+                        "[ofxr]\nbackend=off\n[diagnostics]\nlogging_enabled=" +
+                        std::string(ofxr_logging ? "0" : "1") + "\n");
+                    auto state = w3vr::LoadConfiguration(paths).state;
+                    state.frame_generation_backend = backend;
+                    state.diagnostic_logging = mod_logging;
+
+                    // Deliberately mixed line endings, comments, unknown keys,
+                    // a separate backend key and no trailing newline.
+                    const std::string before =
+                        "; OFXR configuration belongs to the DLL\r\n"
+                        "[diagnostics]\n  logging_enabled=" +
+                        std::string(ofxr_logging ? "1" : "0") +
+                        "\nmax_file_mb=17\r\nflush_each_event=1\n\n"
+                        "[ofxr]\r\n  backend =fidelityfx\r\n" +
+                        (supplied_profile
+                            ? "nvidia_preset=medium\nnvidia_input_scale=50\n"
+                            : "nvidia_preset=slow\nnvidia_input_scale=100\n") +
+                        "nvidia_bidirectional=1\r\n; keep this comment\n"
+                        "future_option=keep\r\n[unrelated]\nbackend=untouched";
+                    Write(paths.ofxr_bridge_ini, before);
+                    std::string expected = before;
+                    const char* backend_value =
+                        backend == w3vr::FrameGenerationBackend::Off ? "off" :
+                        backend == w3vr::FrameGenerationBackend::Nvidia
+                            ? "nvidia" : "fidelityfx";
+                    expected.replace(expected.find("backend =fidelityfx"),
+                        std::string("backend =fidelityfx").size(),
+                        "backend =" + std::string(backend_value));
+                    Require(w3vr::SaveConfiguration(paths, state, error),
+                        "OFXR backend-only save failed");
+                    Require(Read(paths.ofxr_bridge_ini) == expected,
+                        "OFXR save changed bytes outside the backend value");
+                    Require(w3vr::SaveConfiguration(paths, state, error) &&
+                            Read(paths.ofxr_bridge_ini) == expected,
+                        "repeated save changed the independent OFXR settings");
+                }
+            }
+        }
+    }
+
+    // Missing backend is inserted without recreating the user's configuration.
+    Write(paths.ofxr_bridge_ini,
+        "[ofxr]\r\nnvidia_preset=medium\r\nnvidia_input_scale=50\r\n"
+        "[diagnostics]\r\nlogging_enabled=1\r\n");
+    w3vr::LauncherState state;
+    state.frame_generation_backend = w3vr::FrameGenerationBackend::Nvidia;
+    w3vr::IniDocument ofxr;
+    Require(w3vr::BuildUpdatedOfxrDocument(paths, state, ofxr, error) &&
+            ofxr.Get("ofxr", "backend") == "nvidia" &&
+            ofxr.Get("ofxr", "nvidia_preset") == "medium" &&
+            ofxr.Get("ofxr", "nvidia_input_scale") == "50" &&
+            ofxr.Get("diagnostics", "logging_enabled") == "1",
+        "inserting the missing OFXR backend lost existing settings");
+
+    // Fixed release settings are supplied once, not imposed during saves.
+    const auto defaults = w3vr::IniDocument::Load(
+        fs::path(__FILE__).parent_path().parent_path() / "ofxr_bridge.ini", error);
+    Require(defaults && defaults->Get("ofxr", "nvidia_preset") == "medium" &&
+            defaults->Get("ofxr", "nvidia_input_scale") == "50" &&
+            defaults->Get("diagnostics", "logging_enabled") == "0",
+        "supplied OFXR profile must remain Medium/50 with logging off");
+}
+
+void TestNonblockingVersion() {
+    TempDirectory temporary;
+    const auto paths = MakePaths(temporary.path);
+    WriteBaseFixtures(paths);
+    std::wstring error;
+    const auto defaults = Read(fs::path(__FILE__).parent_path() /
+        "witcher3vr.default.ini");
+    Write(paths.vr_ini, defaults);
+    auto ini = w3vr::IniDocument::Load(paths.vr_ini, error);
+    Require(ini.has_value(), "version fixture failed");
+    ini->Set("meta", "config_version", "99999");
+    ini->Set("meta", "mod_version", "V99999");
+    ini->Set("openxr", "presentation_scale", "0.750");
+    ini->Set("openxr", "presentation_black_resize", "1");
+    Write(paths.vr_ini, ini->Serialize());
+    bool created{};
+    Require(w3vr::EnsureVrConfiguration(paths, defaults, created, error),
+        "configuration version became a blocking build requirement");
+    const auto loaded = w3vr::LoadConfiguration(paths);
+    w3vr::IniDocument vr, game;
+    Require(w3vr::BuildUpdatedDocuments(paths, loaded.state, vr, game, error) &&
+            vr.Get("openxr", "presentation_scale") == "0.750" &&
+            !vr.Get("openxr", "presentation_black_resize") &&
+            vr.Get("meta", "mod_version") == "V99999",
+        "version-independent save failed or altered unrelated metadata");
+}
+
 } // namespace
 
 int main() {
@@ -1714,6 +1869,7 @@ int main() {
         TestProportionalCutsceneConvergence();
         TestReleaseDefaults();
         TestEmbeddedLauncherDefaults();
+        TestIntegrationModeContract();
         TestVrProfileHighShadows();
         TestHudEditorSetup(temporary.path);
         TestAllModes(paths);
@@ -1725,6 +1881,8 @@ int main() {
         TestVrBaselineAndRestore(paths);
         TestFailurePaths(temporary.path);
         TestOfxrLaunchEnvironment(temporary.path);
+        TestOfxrBackendOnlySave();
+        TestNonblockingVersion();
         std::cout << "All launcher configuration tests passed.\n";
         return 0;
     } catch (const std::exception& exception) {

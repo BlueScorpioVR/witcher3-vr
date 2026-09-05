@@ -43,21 +43,21 @@ if ([string]::IsNullOrWhiteSpace($PureDarkPlugin)) {
     $PureDarkPlugin = [System.IO.Path]::GetFullPath($PureDarkPlugin)
 }
 $ofxrLayerDefault = Join-Path $repositoryRoot `
-    'external/ofxr/XR_APILAYER_XRFrameBridge_diagnostic.dll'
+    'runtime/XR_APILAYER_XRFrameBridge_diagnostic.dll'
 if ([string]::IsNullOrWhiteSpace($OfxrLayer)) {
     $OfxrLayer = $ofxrLayerDefault
 } else {
     $OfxrLayer = [System.IO.Path]::GetFullPath($OfxrLayer)
 }
 $optiscalerDllDefault = Join-Path $repositoryRoot `
-    'external/optiscaler/OptiScaler.dll'
+    'runtime/witcher3vr-optiscaler-reference/OptiScaler.dll'
 if ([string]::IsNullOrWhiteSpace($OptiScalerDll)) {
     $OptiScalerDll = $optiscalerDllDefault
 } else {
     $OptiScalerDll = [System.IO.Path]::GetFullPath($OptiScalerDll)
 }
 $optiscalerIniDefault = Join-Path $repositoryRoot `
-    'external/optiscaler/OptiScaler.ini'
+    'runtime/witcher3vr-optiscaler-reference/OptiScaler.ini'
 if ([string]::IsNullOrWhiteSpace($OptiScalerIni)) {
     $OptiScalerIni = $optiscalerIniDefault
 } else {
@@ -103,6 +103,11 @@ $exampleIni = Join-Path $repositoryRoot 'witcher3vr.example.ini'
 $readme = Join-Path $repositoryRoot 'README.md'
 $license = Join-Path $repositoryRoot 'LICENSE'
 $thirdPartyNotices = Join-Path $repositoryRoot 'THIRD_PARTY_NOTICES.md'
+$releaseNotes = Join-Path $repositoryRoot 'RELEASE_NOTES.md'
+$componentLicenses = Join-Path $repositoryRoot 'licenses'
+$reshadeReference = Join-Path $repositoryRoot 'runtime/witcher3vr-reshade-reference'
+$reshadeDlss5Reference = Join-Path $repositoryRoot 'runtime/witcher3vr-reshade-dlss5-reference'
+$modifiedOptiscalerReference = Join-Path $repositoryRoot 'runtime/witcher3vr-optiscaler-dlss5-reference'
 $stateBridgeRoot = Join-Path $repositoryRoot 'support/modWitcher3VRStateBridge'
 $stateBridgeScript = Join-Path $stateBridgeRoot `
     'content/scripts/local/witcher3vr/first_person_state_bridge.ws'
@@ -160,6 +165,19 @@ foreach ($requiredFile in @(
         $readme,
         $license,
         $thirdPartyNotices,
+        $releaseNotes,
+        (Join-Path $componentLicenses 'GPL-3.0.txt'),
+        (Join-Path $componentLicenses 'OFXR-LGPL-3.0.txt'),
+        (Join-Path $componentLicenses 'AMD-FidelityFX-MIT.txt'),
+        (Join-Path $componentLicenses 'NVIDIA-Optical-Flow-Headers.txt'),
+        (Join-Path $componentLicenses 'RenoDX-MIT.txt'),
+        (Join-Path $componentLicenses 'Dear-ImGui-MIT.txt'),
+        (Join-Path $reshadeReference 'ReShade64.dll'),
+        (Join-Path $reshadeDlss5Reference 'renodx-dlss5-v2.5.addon64'),
+        (Join-Path $reshadeDlss5Reference 'CheekyFoveatedDLSS.addon64'),
+        (Join-Path $modifiedOptiscalerReference 'OptiScaler.dll'),
+        (Join-Path $modifiedOptiscalerReference 'OptiScaler.ini'),
+        (Join-Path $modifiedOptiscalerReference 'nvngx.dll_dlssnr.dll'),
         $stateBridgeScript,
         $firstPersonAimScript,
         $firstPersonHeadScript,
@@ -177,7 +195,7 @@ foreach ($requiredFile in @(
 New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
 $stagingRoot = Join-Path $OutputDirectory '.staging'
 if (Test-Path -LiteralPath $stagingRoot) {
-    Remove-Item -LiteralPath $stagingRoot -Recurse -Force
+    throw "Staging directory already exists; use a fresh OutputDirectory: $stagingRoot"
 }
 New-Item -ItemType Directory -Path $stagingRoot | Out-Null
 
@@ -202,8 +220,6 @@ try {
 
     $binaryStage = Join-Path $releaseStage 'bin/x64_dx12'
     New-Item -ItemType Directory -Path $binaryStage | Out-Null
-    Copy-Item -LiteralPath $releaseDll `
-        -Destination (Join-Path $binaryStage 'dxgi.dll')
     Copy-Item -LiteralPath $launcher -Destination $binaryStage
     Copy-Item -LiteralPath $openXrLoader -Destination $binaryStage
     Copy-Item -LiteralPath $PureDarkPlugin `
@@ -213,6 +229,31 @@ try {
         (Join-Path $binaryStage 'XR_APILAYER_XRFrameBridge_diagnostic.dll')
     Copy-Item -LiteralPath $ofxrManifest -Destination $binaryStage
     Copy-Item -LiteralPath $ofxrIni -Destination $binaryStage
+
+    # Reference sources only: the launcher creates active root aliases.
+    $modReferenceStage = Join-Path $binaryStage 'witcher3vr-mod-reference'
+    $canonicalReferenceStage = Join-Path $binaryStage 'witcher3vr-optiscaler-reference'
+    $modifiedReferenceStage = Join-Path $binaryStage 'witcher3vr-optiscaler-dlss5-reference'
+    $reshadeReferenceStage = Join-Path $binaryStage 'witcher3vr-reshade-reference'
+    $addonReferenceStage = Join-Path $binaryStage 'witcher3vr-reshade-dlss5-reference'
+    $dlss5ReferenceStage = Join-Path $binaryStage 'witcher3vr-dlss5-reference'
+    foreach ($directory in @($modReferenceStage, $canonicalReferenceStage,
+            $modifiedReferenceStage, $reshadeReferenceStage,
+            $addonReferenceStage, $dlss5ReferenceStage)) {
+        New-Item -ItemType Directory -Path $directory | Out-Null
+    }
+    Copy-Item -LiteralPath $releaseDll -Destination (Join-Path $modReferenceStage 'dxgi.dll')
+    Copy-Item -LiteralPath $OptiScalerDll -Destination (Join-Path $canonicalReferenceStage 'OptiScaler.dll')
+    Copy-Item -LiteralPath $OptiScalerIni -Destination (Join-Path $canonicalReferenceStage 'OptiScaler.ini')
+    Copy-Item -LiteralPath $optiscalerBridgeIni -Destination $binaryStage
+    Copy-Item -LiteralPath (Join-Path $reshadeReference 'ReShade64.dll') -Destination $reshadeReferenceStage
+    foreach ($name in @('renodx-dlss5-v2.5.addon64', 'CheekyFoveatedDLSS.addon64')) {
+        Copy-Item -LiteralPath (Join-Path $reshadeDlss5Reference $name) -Destination $addonReferenceStage
+    }
+    foreach ($name in @('OptiScaler.dll', 'OptiScaler.ini', 'nvngx.dll_dlssnr.dll')) {
+        Copy-Item -LiteralPath (Join-Path $modifiedOptiscalerReference $name) -Destination $modifiedReferenceStage
+    }
+    # Never read or copy a private NVIDIA source: the DLSS5 folder stays empty.
 
     $modsStage = Join-Path $releaseStage 'mods'
     New-Item -ItemType Directory -Path $modsStage | Out-Null
@@ -241,39 +282,21 @@ try {
     Copy-Item -LiteralPath $readme -Destination $documentationStage
     Copy-Item -LiteralPath $license -Destination $documentationStage
     Copy-Item -LiteralPath $thirdPartyNotices -Destination $documentationStage
+    Copy-Item -LiteralPath $releaseNotes -Destination $documentationStage
+    Copy-Item -LiteralPath $componentLicenses -Destination $documentationStage -Recurse
     Set-Content -LiteralPath (Join-Path $documentationStage 'BUILD.txt') `
         -Value @(
             $normalizedVersion,
             'One optimized DLL for gaming and diagnostics.',
-            'Use Diagnostic Logging in the launcher when support logs are needed.'
+            'Use Diagnostic Logging in the launcher when support logs are needed.',
+            'Start Witcher3VRLauncher.exe and Save before launching the game.',
+            'DLSS5 files are not bundled. Put only nvngx_dlss.dll, nvngx_dlssg.dll and nvngx_dlssnr.dll from your separately obtained package in bin/x64_dx12/witcher3vr-dlss5-reference.'
         ) -Encoding utf8
 
-    $optiscalerStage = Join-Path $stagingRoot 'optiscaler-addon'
-    $optiscalerBinaryStage = Join-Path $optiscalerStage 'bin/x64_dx12'
-    $optiscalerDocumentationStage = Join-Path $optiscalerStage 'Witcher3VR'
-    New-Item -ItemType Directory -Path $optiscalerBinaryStage -Force | Out-Null
-    New-Item -ItemType Directory -Path $optiscalerDocumentationStage `
-        -Force | Out-Null
-    Copy-Item -LiteralPath $OptiScalerDll -Destination $optiscalerBinaryStage
-    Copy-Item -LiteralPath $OptiScalerIni -Destination $optiscalerBinaryStage
-    Copy-Item -LiteralPath $optiscalerBridgeIni `
-        -Destination $optiscalerBinaryStage
-    Copy-Item -LiteralPath $optiscalerPayload `
-        -Destination $optiscalerDocumentationStage
-    $optiscalerLicensesStage = Join-Path $optiscalerDocumentationStage `
-        'OptiScaler-Licenses'
+    Copy-Item -LiteralPath $optiscalerPayload -Destination $documentationStage
+    $optiscalerLicensesStage = Join-Path $documentationStage 'OptiScaler-Licenses'
     New-Item -ItemType Directory -Path $optiscalerLicensesStage | Out-Null
-    Copy-Item -LiteralPath $OptiScalerLicense -Destination `
-        (Join-Path $optiscalerLicensesStage 'OptiScaler-GPL-3.0.txt')
-    Set-Content -LiteralPath `
-        (Join-Path $optiscalerDocumentationStage `
-            'README-OPTISCALER-ADDON.txt') -Value @(
-            "OptiScaler Addon for $ArtifactName",
-            '',
-            'Install the main Witcher3VR package first.',
-            'Extract this archive into the Witcher 3 game folder.',
-            'Enable OptiScaler in the VR Launcher and disable DLSS Override.'
-        ) -Encoding utf8
+    Copy-Item -LiteralPath $OptiScalerLicense -Destination (Join-Path $optiscalerLicensesStage 'OptiScaler-GPL-3.0.txt')
 
     $renderDocStage = Join-Path $stagingRoot 'renderdoc-addon'
     $renderDocBinaryStage = Join-Path $renderDocStage 'bin/x64_dx12'
@@ -295,22 +318,24 @@ try {
             'Extract this archive into the Witcher 3 game folder.'
         ) -Encoding utf8
 
+    # Fail closed if any NVIDIA DLSS runtime was accidentally added elsewhere.
+    $nvidiaNames = @('nvngx_dlss.dll', 'nvngx_dlssg.dll', 'nvngx_dlssnr.dll')
+    $forbidden = @(Get-ChildItem -LiteralPath $releaseStage -File -Recurse |
+        Where-Object { $_.Name -in $nvidiaNames })
+    if ($forbidden.Count -ne 0 -or
+        @(Get-ChildItem -LiteralPath $dlss5ReferenceStage -Force).Count -ne 0) {
+        throw 'NVIDIA DLSS5 runtimes must not be distributed; its reference must be empty.'
+    }
+
     $archivePath = Join-Path $OutputDirectory "$ArtifactName.zip"
     if (Test-Path -LiteralPath $archivePath) {
-        Remove-Item -LiteralPath $archivePath -Force
+        throw "Archive already exists; use a fresh OutputDirectory: $archivePath"
     }
     Compress-Archive -Path (Join-Path $releaseStage '*') -DestinationPath $archivePath
-    $optiscalerArchivePath = Join-Path $OutputDirectory `
-        "$ArtifactName-OptiScaler-Addon.zip"
-    if (Test-Path -LiteralPath $optiscalerArchivePath) {
-        Remove-Item -LiteralPath $optiscalerArchivePath -Force
-    }
-    Compress-Archive -Path (Join-Path $optiscalerStage '*') `
-        -DestinationPath $optiscalerArchivePath
     $renderDocArchivePath = Join-Path $OutputDirectory `
         "$ArtifactName-RenderDoc-Addon.zip"
     if (Test-Path -LiteralPath $renderDocArchivePath) {
-        Remove-Item -LiteralPath $renderDocArchivePath -Force
+        throw "Archive already exists; use a fresh OutputDirectory: $renderDocArchivePath"
     }
     Compress-Archive -Path (Join-Path $renderDocStage '*') `
         -DestinationPath $renderDocArchivePath
@@ -354,8 +379,6 @@ try {
     $firstPersonVisibilityHash =
         (Get-FileHash -LiteralPath $firstPersonVisibilityScript -Algorithm SHA256).Hash
     $archiveHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash
-    $optiscalerArchiveHash =
-        (Get-FileHash -LiteralPath $optiscalerArchivePath -Algorithm SHA256).Hash
     $renderDocArchiveHash =
         (Get-FileHash -LiteralPath $renderDocArchivePath -Algorithm SHA256).Hash
     $manifestLines += "dll.sha256=$dllHash"
@@ -379,7 +402,6 @@ try {
     $manifestLines += "first_person_strafe.sha256=$firstPersonStrafeHash"
     $manifestLines += "first_person_visibility.sha256=$firstPersonVisibilityHash"
     $manifestLines += "main_archive.sha256=$archiveHash"
-    $manifestLines += "optiscaler_addon_archive.sha256=$optiscalerArchiveHash"
     $manifestLines += "renderdoc_addon_archive.sha256=$renderDocArchiveHash"
 
     $manifestPath = Join-Path $OutputDirectory "$ArtifactName-SHA256.txt"
@@ -387,6 +409,13 @@ try {
     Write-Host "Release packages written to $OutputDirectory"
 } finally {
     if (Test-Path -LiteralPath $stagingRoot) {
+        $resolvedStaging = (Resolve-Path -LiteralPath $stagingRoot).Path
+        if (-not $resolvedStaging.StartsWith($OutputDirectory.TrimEnd('\') + '\',
+                [System.StringComparison]::OrdinalIgnoreCase) -or
+            (Get-Item -LiteralPath $stagingRoot -Force).Attributes -band
+                [System.IO.FileAttributes]::ReparsePoint) {
+            throw 'Refusing staging cleanup outside the package output directory.'
+        }
         Remove-Item -LiteralPath $stagingRoot -Recurse -Force
     }
 }

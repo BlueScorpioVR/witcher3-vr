@@ -170,15 +170,70 @@ No NVIDIA game DLL or standalone SDK package is distributed by Witcher 3 VR.
 Users must rely on the DLSS/NGX runtime supplied with their legally installed
 game and compatible NVIDIA driver.
 
-## Optional OptiScaler Addon
+## Bundled OptiScaler integrations
 
-OptiScaler v0.9.4 is distributed only in the separate OptiScaler Addon under
-GPL-3.0. The addon includes the upstream OptiScaler license. It relies on the
+OptiScaler v0.9.4 is bundled in its own reference folder under GPL-3.0.
+The package includes the upstream OptiScaler license. It relies on the
 FidelityFX runtime files already supplied with The Witcher 3 and does not
 redistribute or replace them.
 
 - Source repository: https://github.com/optiscaler/OptiScaler
 - Release: https://github.com/optiscaler/OptiScaler/releases/tag/v0.9.4
+
+The alternative DLSS Neural Rendering integration is based on
+[Dagherbou / OptiScaler_DLSSNR](https://github.com/Dagherbou/OptiScaler_DLSSNR).
+The bundled stereo-compatible sources and NGX forwarder are available from
+[OptiScaler_DLSSNR_VR, v0.1.1-dlssnr-vr1](https://github.com/tig3rmast3r/OptiScaler_DLSSNR_VR/tree/v0.1.1-dlssnr-vr1).
+The custom `nvngx.dll_dlssnr.dll` is a forwarding component, not NVIDIA's
+`nvngx_dlssnr.dll`. NVIDIA DLSS5 DLLs are not included.
+
+## Cheeky Foveated DLSS
+
+Credit: ClarkCheekyKent and contributors. The bundled add-on is our
+Streamline 1.5 compatibility build, with the upstream GPL-3.0 license retained
+in `licenses/GPL-3.0.txt`.
+
+- Upstream: https://github.com/ClarkCheekyKent/CheekyFoveatedDLSS
+- Corresponding fork source: https://github.com/tig3rmast3r/CheekyFoveatedDLSS/tree/208d39bfd8c51f6cc6cae6b44214d31043d1df21
+
+## RenoDX and DLSS5 Neural Rendering add-on
+
+Credit: clshortfuse and the RenoDX contributors for the framework, and the
+DLSS5 Neural Rendering add-on authors for the generic neural-rendering
+integration distributed through the RenoDX community. The bundled
+`renodx-dlss5-v2.5.addon64` uses the NGX-only configuration required by the
+game's older Streamline integration. NVIDIA's neural-rendering DLLs must be
+obtained separately and are not relicensed by this project.
+
+- Framework source: https://github.com/clshortfuse/renodx
+- Framework license: MIT, Copyright (c) 2025 Carlos Lopez Jr.; retained in
+  `licenses/RenoDX-MIT.txt`.
+- Add-on community: https://discord.com/invite/renodx
+
+## OFXR Bridge
+
+OFXR Bridge V059 is included as a separate, replaceable OpenXR layer DLL under
+LGPL-3.0-or-later. No tray application is included or required.
+
+- Corresponding source: https://github.com/tig3rmast3r/OFXR-Bridge/tree/v0.1.0
+- License texts: `licenses/OFXR-LGPL-3.0.txt` and `licenses/GPL-3.0.txt`.
+- AMD FidelityFX optical flow is linked under the notice in
+  `licenses/AMD-FidelityFX-MIT.txt`.
+- NVIDIA Optical Flow interface notices are retained in
+  `licenses/NVIDIA-Optical-Flow-Headers.txt`. The driver supplies its runtime;
+  no NVIDIA Optical Flow SDK binary is distributed.
+
+## Dear ImGui
+
+Credit: Omar Cornut and contributors. Overlay UI components retain their MIT
+license in `licenses/Dear-ImGui-MIT.txt`.
+Source: https://github.com/ocornut/imgui
+
+## PureDark AFW
+
+Credit: PureDark for the separately loaded `PDAFWPlugin.dll` used by AER + AFW.
+This third-party component is not relicensed under the Witcher3VR MIT license.
+Project: https://github.com/PureDark
 
 ## RenderDoc in-application API and optional runtime
 
@@ -191,6 +246,28 @@ header. The separate optional RenderDoc Addon contains the custom V1273
 RenderDoc 1.45 runtime derived from upstream commit
 `2fc0bc04cb95499635f63986a55bc6f67849dd9f`. The addon includes the upstream
 MIT license and is not required to play Witcher 3 VR.
+
+## ReShade VR
+
+The bundled ReShade runtime is an unofficial build of ReShade 6.8.0 with the
+V1530 DirectX 11/12 interoperability correction. Credit for ReShade belongs to
+Patrick Mours and the upstream contributors.
+
+- Upstream: https://github.com/crosire/reshade
+- Fork: https://github.com/tig3rmast3r/ReShade_VR
+- Source tag: `v6.8.0-vr-v1530`
+- License: BSD 3-Clause; original terms reproduced below.
+
+Copyright 2014 Patrick Mours. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
+
+  * Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
+  * Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.
+  * Neither the name of the copyright holder nor the names of its contributors may be used to endorse or promote products derived from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
 
 ## CD PROJEKT RED fan content
 

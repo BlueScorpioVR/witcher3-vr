@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(witcher3vr VERSION 0.1526.0 LANGUAGES C CXX)
+project(witcher3vr VERSION 0.1534.0 LANGUAGES C CXX)
 
 include(CTest)
 
@@ -42,6 +42,7 @@ target_include_directories(minhook PUBLIC
 
 add_library(witcher3vr_dxgi SHARED
     src/aer_scheduler.cpp
+    src/command_list_identity.cpp
     src/dxgi_proxy.cpp
     src/dxgi_proxy.def
     src/openxr_eye_geometry.cpp
@@ -72,6 +73,25 @@ set_target_properties(witcher3vr_dxgi PROPERTIES OUTPUT_NAME dxgi)
 target_link_options(witcher3vr_dxgi PRIVATE /MAP)
 
 if(BUILD_TESTING)
+    add_executable(w3vr_command_list_identity_tests
+        tests/command_list_identity_tests.cpp
+        src/command_list_identity.cpp)
+    target_include_directories(w3vr_command_list_identity_tests PRIVATE src)
+    target_compile_definitions(w3vr_command_list_identity_tests PRIVATE
+        WIN32_LEAN_AND_MEAN NOMINMAX)
+    add_test(NAME renderer_command_list_identity
+        COMMAND w3vr_command_list_identity_tests)
+
+    # Optional standalone smoke probe: argv supplies an offline ReShade DLL.
+    # Deliberately not a CTest dependency for source-only/product builds.
+    add_executable(w3vr_command_list_identity_gpu
+        tests/command_list_identity_gpu.cpp
+        src/command_list_identity.cpp)
+    target_include_directories(w3vr_command_list_identity_gpu PRIVATE src)
+    target_compile_definitions(w3vr_command_list_identity_gpu PRIVATE
+        WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_link_libraries(w3vr_command_list_identity_gpu PRIVATE d3d12 dxgi dxguid)
+
     add_executable(w3vr_world_detail_range_policy_tests
         tests/world_detail_range_policy_tests.cpp
     )
@@ -248,6 +268,12 @@ if(BUILD_TESTING)
         NAME renderer_mode3_transport_policy
         COMMAND w3vr_mode3_transport_policy_tests
     )
+
+    add_executable(w3vr_mode3_hud_ownership_tests
+        tests/mode3_hud_ownership_tests.cpp)
+    target_include_directories(w3vr_mode3_hud_ownership_tests PRIVATE src)
+    add_test(NAME renderer_mode3_hud_ownership
+        COMMAND w3vr_mode3_hud_ownership_tests)
 
     add_executable(w3vr_mode3_dlss_constants_policy_tests
         tests/mode3_dlss_constants_policy_tests.cpp
@@ -451,23 +477,12 @@ if(BUILD_TESTING)
     )
 
     add_test(
-        NAME renderer_presentation_size_final_only_contract
+        NAME renderer_presentation_size_producer_fov_contract
         COMMAND "${CMAKE_COMMAND}"
             "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
-            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/presentation_size_final_only_contract.cmake"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/presentation_size_producer_fov_contract.cmake"
     )
 
-    add_test(
-        NAME renderer_presentation_black_resize_contract
-        COMMAND "${CMAKE_COMMAND}"
-            "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
-            "-DOPENXR_GEOMETRY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/openxr_eye_geometry.cpp"
-            "-DLAUNCHER_MAIN=${CMAKE_CURRENT_SOURCE_DIR}/launcher/main.cpp"
-            "-DLAUNCHER_CONFIG=${CMAKE_CURRENT_SOURCE_DIR}/launcher/config.cpp"
-            "-DLAUNCHER_HEADER=${CMAKE_CURRENT_SOURCE_DIR}/launcher/config.h"
-            "-DLAUNCHER_DEFAULTS=${CMAKE_CURRENT_SOURCE_DIR}/launcher/witcher3vr.default.ini"
-            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/presentation_black_resize_contract.cmake"
-    )
 
     add_test(
         NAME renderer_mode3_native_reused_camera_fallback_contract
@@ -671,10 +686,68 @@ if(BUILD_TESTING)
     )
 
     add_test(
-        NAME launcher_v1523_copy_contract
+        NAME canonical_v1528_integration_contract
         COMMAND "${CMAKE_COMMAND}"
-            "-DLAUNCHER_MAIN_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/launcher/main.cpp"
-            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/launcher_v1523_copy_contract.cmake"
+            "-DSOURCE_ROOT=${CMAKE_CURRENT_SOURCE_DIR}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/canonical_v1528_integration_contract.cmake"
+    )
+
+    add_test(
+        NAME renderer_v23000_reshade_secondary_bootstrap_contract
+        COMMAND "${CMAKE_COMMAND}"
+            "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/reshade_secondary_bootstrap_contract.cmake"
+    )
+
+    add_test(
+        NAME renderer_v23033_reshade_immediate_command_list_isolation_contract
+        COMMAND "${CMAKE_COMMAND}"
+            "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/reshade_immediate_command_list_isolation_contract.cmake"
+    )
+
+    add_executable(w3vr_reshade_overlay_policy_tests
+        tests/reshade_overlay_policy_tests.cpp
+    )
+    target_include_directories(w3vr_reshade_overlay_policy_tests PRIVATE src)
+    add_test(
+        NAME renderer_v23036_reshade_overlay_policy
+        COMMAND w3vr_reshade_overlay_policy_tests
+    )
+
+    add_test(
+        NAME renderer_v23036_reshade_overlay_menu_isolation_contract
+        COMMAND "${CMAKE_COMMAND}"
+            "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/reshade_overlay_menu_isolation_contract.cmake"
+    )
+
+    add_test(
+        NAME renderer_v23011_reshade_opaque_submit_cleanup_contract
+        COMMAND "${CMAKE_COMMAND}"
+            "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/reshade_opaque_submit_cleanup_contract.cmake"
+    )
+
+    add_test(
+        NAME renderer_command_list_identity_contract
+        COMMAND "${CMAKE_COMMAND}"
+            "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/command_list_identity_contract.cmake"
+    )
+
+    add_test(
+        NAME launcher_v23032_exact_composition_contract
+        COMMAND "${CMAKE_COMMAND}"
+            "-DSOURCE_ROOT=${CMAKE_CURRENT_SOURCE_DIR}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/launcher_v23032_exact_composition_contract.cmake"
+    )
+
+    add_test(
+        NAME launcher_v23032_dlss5_payload_whitelist_contract
+        COMMAND "${CMAKE_COMMAND}"
+            "-DSOURCE_ROOT=${CMAKE_CURRENT_SOURCE_DIR}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/launcher_v23032_dlss5_payload_whitelist_contract.cmake"
     )
 
 endif()

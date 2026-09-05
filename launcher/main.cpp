@@ -2,6 +2,7 @@
 #include "ofxr_launch_environment.h"
 #include "openxr_resolution.h"
 #include "resources.h"
+#include "managed_runtime.h"
 #include "startup_checks.h"
 
 #include <Windows.h>
@@ -26,6 +27,7 @@ using w3vr::RenderMode;
 using w3vr::CinemaAspect;
 using w3vr::CameraFollowPolicy;
 using w3vr::FrameGenerationBackend;
+using w3vr::IntegrationMode;
 
 constexpr wchar_t kWindowClass[] = L"Witcher3VRLauncherWindow";
 constexpr int kClientWidth = 1180;
@@ -40,13 +42,12 @@ enum ControlId {
     IdWidth,
     IdHeight,
     IdDlssQuality,
-    IdOptiscaler,
+    IdIntegrationMode,
     IdOfxrBridge,
     IdConvergence,
     IdConvergenceValue,
     IdPresentationScale,
     IdPresentationScaleValue,
-    IdPresentationBlackResize,
     IdWorldDetailRange,
     IdWorldDetailRangeValue,
     IdMenuScale,
@@ -297,9 +298,22 @@ void UpdateModeControls() {
     const bool dlss = selected_valid && w3vr::ModeUsesDlss(selected_mode);
     EnableWindow(Item(IdDlssQuality), dlss);
     if (!dlss) {
-        SendMessageW(Item(IdOptiscaler), BM_SETCHECK, BST_UNCHECKED, 0);
+        const int selected_integration = static_cast<int>(SendMessageW(
+            Item(IdIntegrationMode), CB_GETCURSEL, 0, 0));
+        auto normalized = selected_integration >= 0 &&
+                selected_integration < static_cast<int>(IntegrationMode::Count)
+            ? static_cast<IntegrationMode>(selected_integration)
+            : IntegrationMode::Off;
+        if (normalized == IntegrationMode::OptiscalerReshade ||
+            normalized == IntegrationMode::ReshadeDlss5 ||
+            normalized == IntegrationMode::ReshadeDlss5Cheeky) {
+            normalized = IntegrationMode::Reshade;
+        } else if (w3vr::IntegrationModeUsesOptiscaler(normalized)) {
+            normalized = IntegrationMode::Off;
+        }
+        SendMessageW(Item(IdIntegrationMode), CB_SETCURSEL,
+            static_cast<int>(normalized), 0);
     }
-    EnableWindow(Item(IdOptiscaler), dlss);
     EnableWindow(Item(IdPresentationScale), TRUE);
     UpdateTrackLabels();
 }
@@ -409,8 +423,20 @@ bool CaptureState(LauncherState& state, std::wstring& error) {
     }
     state.dlss_quality = std::clamp(static_cast<int>(SendMessageW(
         Item(IdDlssQuality), CB_GETCURSEL, 0, 0)), 0, 4);
-    state.optiscaler_enabled = w3vr::ModeUsesDlss(state.mode) &&
-        SendMessageW(Item(IdOptiscaler), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    const int integration_mode = static_cast<int>(SendMessageW(
+        Item(IdIntegrationMode), CB_GETCURSEL, 0, 0));
+    if (integration_mode < 0 || integration_mode >=
+            static_cast<int>(IntegrationMode::Count)) {
+        error = L"Select an integration mode.";
+        return false;
+    }
+    state.integration_mode = static_cast<IntegrationMode>(integration_mode);
+    if (!w3vr::ModeUsesDlss(state.mode) &&
+        (w3vr::IntegrationModeUsesOptiscaler(state.integration_mode) ||
+            w3vr::IntegrationModeUsesDlss5(state.integration_mode))) {
+        error = L"The selected integration mode requires a DLSS render mode.";
+        return false;
+    }
     const int frame_generation_backend = static_cast<int>(SendMessageW(
         Item(IdOfxrBridge), CB_GETCURSEL, 0, 0));
     if (frame_generation_backend < 0 ||
@@ -425,8 +451,6 @@ bool CaptureState(LauncherState& state, std::wstring& error) {
         Item(IdConvergence), TBM_GETPOS, 0, 0));
     state.presentation_scale = static_cast<float>(SendMessageW(
         Item(IdPresentationScale), TBM_GETPOS, 0, 0)) / 100.0f;
-    state.presentation_black_resize = SendMessageW(
-        Item(IdPresentationBlackResize), BM_GETCHECK, 0, 0) == BST_CHECKED;
     state.world_detail_range = static_cast<float>(SendMessageW(
         Item(IdWorldDetailRange), TBM_GETPOS, 0, 0)) / 100.0f;
     state.menu_scale = static_cast<float>(SendMessageW(
@@ -831,16 +855,14 @@ void RestoreLauncherDefaults() {
     SetEditInteger(Item(IdHeight), defaults.height);
     UpdateResolutionControls();
     SendMessageW(Item(IdDlssQuality), CB_SETCURSEL, defaults.dlss_quality, 0);
-    SendMessageW(Item(IdOptiscaler), BM_SETCHECK,
-        defaults.optiscaler_enabled ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(Item(IdIntegrationMode), CB_SETCURSEL,
+        static_cast<int>(defaults.integration_mode), 0);
     SendMessageW(Item(IdOfxrBridge), CB_SETCURSEL,
         static_cast<int>(defaults.frame_generation_backend), 0);
     SendMessageW(Item(IdConvergence), TBM_SETPOS, TRUE,
         defaults.hud_convergence_delta);
     SendMessageW(Item(IdPresentationScale), TBM_SETPOS, TRUE,
         static_cast<int>(std::lround(defaults.presentation_scale * 100.0f)));
-    SendMessageW(Item(IdPresentationBlackResize), BM_SETCHECK,
-        defaults.presentation_black_resize ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(Item(IdWorldDetailRange), TBM_SETPOS, TRUE,
         static_cast<int>(std::lround(defaults.world_detail_range * 100.0f)));
     SendMessageW(Item(IdMenuScale), TBM_SETPOS, TRUE,
@@ -945,9 +967,24 @@ void Save(bool launch) {
         SetStatus(L"DLSS resolution adjusted. Nothing was saved; press Save again.");
         return;
     }
+    const LauncherState previous_state = g_app.loaded;
     if (!w3vr::SaveConfiguration(g_app.paths, state, error)) {
         MessageBoxW(g_app.window, error.c_str(), L"Save failed",
             MB_OK | MB_ICONERROR);
+        return;
+    }
+    if (!w3vr::ApplyManagedIntegrationMode(
+            g_app.paths.launcher_directory,
+            state.integration_mode, error)) {
+        std::wstring rollback_error;
+        if (!w3vr::SaveConfiguration(
+                g_app.paths, previous_state, rollback_error)) {
+            error += L"\n\nThe previous launcher settings also could not be "
+                L"restored:\n" + rollback_error;
+        }
+        MessageBoxW(g_app.window, error.c_str(),
+            L"Runtime integration failed", MB_OK | MB_ICONERROR);
+        SetStatus(L"Integration transition failed; prior launcher settings were restored. Close the game and retry.");
         return;
     }
     g_app.loaded = state;
@@ -972,6 +1009,13 @@ void PopulateControls() {
     for (int i = 0; i < static_cast<int>(RenderMode::Count); ++i) ComboAdd(mode,
         w3vr::ModeDisplayName(static_cast<RenderMode>(i)));
 
+    HWND integration_mode = Item(IdIntegrationMode);
+    for (int i = 0; i < static_cast<int>(IntegrationMode::Count); ++i) {
+        ComboAdd(integration_mode,
+            w3vr::IntegrationModeDisplayName(
+                static_cast<IntegrationMode>(i)));
+    }
+
     HWND resolution = Item(IdResolution);
     ComboAdd(resolution, L"High - 2496 x 2592");
     ComboAdd(resolution, L"Ultra - 2688 x 2784");
@@ -988,7 +1032,7 @@ void PopulateControls() {
     HWND ofxr_bridge = Item(IdOfxrBridge);
     ComboAdd(ofxr_bridge, L"Off");
     ComboAdd(ofxr_bridge, L"FidelityFX");
-    ComboAdd(ofxr_bridge, L"NVIDIA");
+    ComboAdd(ofxr_bridge, L"NVIDIA med. 50%");
 
     HWND cinema_aspect = Item(IdCinemaAspect);
     ComboAdd(cinema_aspect, L"5:4");
@@ -1018,17 +1062,14 @@ void PopulateControls() {
     SetEditInteger(Item(IdHeight), loaded.state.height);
     UpdateResolutionControls();
     SendMessageW(quality, CB_SETCURSEL, loaded.state.dlss_quality, 0);
-    SendMessageW(Item(IdOptiscaler), BM_SETCHECK,
-        loaded.state.optiscaler_enabled ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(Item(IdIntegrationMode), CB_SETCURSEL,
+        static_cast<int>(loaded.state.integration_mode), 0);
     SendMessageW(ofxr_bridge, CB_SETCURSEL,
         static_cast<int>(loaded.state.frame_generation_backend), 0);
     SendMessageW(Item(IdConvergence), TBM_SETPOS, TRUE,
         loaded.state.hud_convergence_delta);
     SendMessageW(Item(IdPresentationScale), TBM_SETPOS, TRUE,
         static_cast<int>(std::lround(loaded.state.presentation_scale * 100.0f)));
-    SendMessageW(Item(IdPresentationBlackResize), BM_SETCHECK,
-        loaded.state.presentation_black_resize ? BST_CHECKED : BST_UNCHECKED,
-        0);
     SendMessageW(Item(IdWorldDetailRange), TBM_SETPOS, TRUE,
         static_cast<int>(std::lround(
             loaded.state.world_detail_range * 100.0f)));
@@ -1136,27 +1177,24 @@ void CreateInterface(HWND window) {
          AddLabel(L"x", 451, 80, 12, 22, 0, SS_CENTER),
          AddControl(L"EDIT", L"", WS_BORDER | ES_NUMBER | ES_CENTER |
              WS_TABSTOP, 466, 76, 70, 25, IdHeight, WS_EX_CLIENTEDGE)});
-    AddTooltip(AddControl(L"BUTTON", L"OptiScaler",
-        BS_AUTOCHECKBOX | WS_TABSTOP, 38, 112, 150, 28, IdOptiscaler),
-        L"OptiScaler (download the dedicated package from the release page). Uses the game's DLSS route to run FSR through OptiScaler. Useful for AMD Radeon graphics cards.");
     AddTooltips(
-        L"OFXR is frame generation for VR using optical flow. FidelityFX generally increases FPS by about 50% but produces more artifacts. NVIDIA generally increases FPS by about 25% with fewer artifacts. Off disables it.",
-        {AddLabel(L"OFXR Bridge", 202, 116, 96, 22),
-         AddCombo(300, 108, 258, IdOfxrBridge)});
+        L"Select one complete integration state. OptiScaler modes require a DLSS render route. Active DLLs are copied from separate reference folders; the DLSS5 reference contains only the three user-supplied NVIDIA DLLs.",
+        {AddLabel(L"Integration", 38, 116, 95, 22),
+         AddCombo(135, 108, 230, IdIntegrationMode)});
+    AddTooltips(
+        L"OFXR generates intermediate VR frames using optical flow. NVIDIA selects the Medium preset at 50% optical-flow calculation resolution; the displayed image remains full resolution. Off disables OFXR.",
+        {AddLabel(L"OFXR", 375, 116, 55, 22),
+         AddCombo(428, 108, 132, IdOfxrBridge)});
 
     AddTooltip(AddControl(L"BUTTON", L"Comfort and interface", BS_GROUPBOX,
         20, 174, 560, 448),
         L"Tune headset presentation, HUD, cinema framing, and comfort options. Hover any setting name or control for details.");
     AddTooltips(
-        L"Adjusts the image size in the headset. Lower values make the image smaller and may show black borders.",
+        L"Adjusts angular image size in the headset using matching producer and OpenXR FOV. No final image resampling or black-canvas pass.",
         {AddLabel(L"Presentation size", 38, 200, 155, 22),
-         AddTrack(193, 194, 202, IdPresentationScale, 50, 100),
-         AddLabel(L"1.00", 398, 200, 42, 22,
+         AddTrack(193, 194, 310, IdPresentationScale, 50, 100),
+         AddLabel(L"1.00", 510, 200, 50, 22,
               IdPresentationScaleValue, SS_RIGHT)});
-    AddTooltip(AddControl(L"BUTTON", L"Alt. resize",
-        BS_AUTOCHECKBOX | WS_TABSTOP, 444, 194, 116, 28,
-        IdPresentationBlackResize),
-        L"Required for Presentation Size to work correctly with SteamVR. Image quality is slightly reduced. Leave it off if Presentation Size already works with your OpenXR runtime.");
 
     AddTooltips(
         L"Controls REDengine render-proxy culling and downstream world-detail distance. 100% preserves the full corrected range; lower values can recover performance at the cost of earlier object, texture-detail, and shadow transitions.",
@@ -1318,9 +1356,9 @@ void CreateInterface(HWND window) {
         L"F7  Toggle Layout A/B", 618, 420, 524, 24),
         L"Toggle the HUD Editor preview between layout A and layout B.");
 
-    AddTooltip(AddControl(L"BUTTON", L"Debug", BS_GROUPBOX,
-        600, 462, 560, 120),
-        L"Independent diagnostic controls. Keep heavy diagnostics off unless a targeted investigation requires them.");
+    AddTooltip(AddControl(L"BUTTON", L"Debug and integrations", BS_GROUPBOX,
+        600, 462, 560, 160),
+        L"Independent diagnostic controls. ReShade, OptiScaler and DLSS5 are selected through the single Integration control above. The DLSS5 reference is read-only.");
     AddTooltip(AddControl(L"BUTTON", L"Diagnostic Logging",
         BS_AUTOCHECKBOX | WS_TABSTOP, 618, 486, 150, 24,
         IdDiagnosticLogging),
@@ -1345,13 +1383,25 @@ void CreateInterface(HWND window) {
         L"Diagnostic Logging is heavy and can contaminate results while investigating a problem.",
         618, 534, 524, 20);
     ApplySmallFont(diagnostic_note);
+    HWND menu_bindings = AddLabel(
+        L"Menus:  F4 ReShade / Cheeky   |   F6 RenoDX   |   DEL OptiScaler",
+        618, 558, 524, 20);
+    ApplySmallFont(menu_bindings);
+    AddTooltip(menu_bindings,
+        L"Launcher defaults for the three integration overlays. The immutable DLSS5 reference is never edited; the active OptiScaler copy receives DEL.");
+    HWND optiscaler_bindings = AddLabel(
+        L"OptiScaler:  Page Up FPS   |   Page Down FPS view   |   End Frame Generation",
+        618, 578, 524, 20);
+    ApplySmallFont(optiscaler_bindings);
+    AddTooltip(optiscaler_bindings,
+        L"Native OptiScaler auxiliary bindings retained alongside the DEL menu binding.");
     AddTooltip(AddLabel(
         L"F3  Fast capture: Route / Performance / RenderDoc",
-        618, 558, 318, 20),
+        618, 598, 318, 20),
         L"Dump each enabled lightweight recorder and request a RenderDoc frame capture when RenderDoc is enabled.");
     AddTooltip(AddLabel(
-        L"F6  AFW visual debug", 945, 558, 197, 20),
-        L"Toggle the PureDark AFW visual diagnostic at any time.");
+        L"Ctrl+F6  AFW visual debug", 925, 598, 217, 20),
+        L"Toggle the PureDark AFW visual diagnostic without consuming DLSS5's plain F6 toggle.");
 
     AddTooltip(AddLabel(L"", 20, 636, 1140, 22, IdStatus, SS_LEFT),
         L"Shows validation results, saved changes, and launch status.");
@@ -1504,7 +1554,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     }
     bounds = FitWindowToWorkArea(bounds);
     HWND window = CreateWindowExW(0, kWindowClass,
-        L"Witcher 3 VR Launcher v0.9.6",
+        L"Witcher 3 VR Launcher - V1534",
         kWindowStyle,
         bounds.left, bounds.top, bounds.right - bounds.left,
         bounds.bottom - bounds.top, nullptr, nullptr, instance, nullptr);

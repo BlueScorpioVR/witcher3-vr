@@ -27,7 +27,7 @@ constexpr std::array<ModeSettings, 8> kModes{{
     {3, true, false, "dlss", 6, true},
 }};
 
-constexpr int kCurrentConfigVersion = 18;
+constexpr int kCurrentConfigVersion = 19;
 constexpr float kCinemaHudReferenceScale = 1.30f;
 constexpr int kCinemaHudReferenceShift = -72;
 constexpr float kFullVrHudReferenceScale = 1.00f;
@@ -74,6 +74,7 @@ float ReadFloat(const IniDocument& doc, const char* section, const char* key,
     float fallback);
 
 void RemoveObsoleteSettings(IniDocument& ini) {
+    ini.Remove("openxr", "presentation_black_resize");
     ini.Remove("openxr", "snap_turn_enabled");
     ini.Remove("openxr", "snap_turn_angle");
     ini.Remove("openxr", "hud_convergence_offset_px");
@@ -420,6 +421,11 @@ void NormalizeLauncherOwnedConfiguration(IniDocument& ini) {
     for (const auto* key : kEngineDiagnosticKeys) {
         ini.Set("engine", key, "0");
     }
+    // V19 has one authoritative integration selector. The old independent
+    // booleans could encode impossible combinations and must not survive as a
+    // second state path.
+    ini.Remove("launcher", "reshade_enabled");
+    ini.Remove("launcher", "dlss5_enabled");
     RemoveObsoleteSettings(ini);
 }
 
@@ -495,12 +501,23 @@ void MigrateConfigurationToV17(IniDocument& ini) {
     ini.Set("meta", "config_version", "17");
 }
 
-void MigrateConfigurationToV18(IniDocument& ini) {
-    // V18 exposes an explicit SteamVR compatibility presenter. Existing
-    // runtimes retain V1417 because the new black-canvas resize is opt-in.
-    ini.Set("openxr", "presentation_black_resize", "0");
+
+void MigrateConfigurationToV19(IniDocument& ini) {
+    // Collapse the two former launcher booleans into one mutually exclusive
+    // selection. Live managed ownership is still the authority when loading;
+    // this value merely preserves the closest old UI choice.
+    if (!ini.Get("launcher", "integration_mode").has_value()) {
+        const bool reshade = ReadBool(
+            ini, "launcher", "reshade_enabled", false);
+        const bool dlss5 = ReadBool(
+            ini, "launcher", "dlss5_enabled", false);
+        ini.Set("launcher", "integration_mode",
+            dlss5 ? "reshade_dlss5" : (reshade ? "reshade" : "off"));
+    }
+    ini.Remove("launcher", "reshade_enabled");
+    ini.Remove("launcher", "dlss5_enabled");
     RemoveObsoleteSettings(ini);
-    ini.Set("meta", "config_version", std::to_string(kCurrentConfigVersion));
+    ini.Set("meta", "config_version", "19");
 }
 
 std::string FloatString(float value) {
@@ -1090,6 +1107,66 @@ const wchar_t* ModeDisplayName(RenderMode mode) {
     return names[static_cast<size_t>(mode)];
 }
 
+const wchar_t* IntegrationModeDisplayName(IntegrationMode mode) {
+    constexpr const wchar_t* names[]{
+        L"Off",
+        L"OptiScaler",
+        L"ReShade",
+        L"OptiScaler + ReShade",
+        L"OptiScaler DLSS5",
+        L"ReShade DLSS5 RenoDX",
+        L"ReShade DLSS5 Cheeky",
+    };
+    const auto index = static_cast<size_t>(mode);
+    return index < std::size(names) ? names[index] : L"Off";
+}
+
+const char* IntegrationModeIniValue(IntegrationMode mode) noexcept {
+    switch (mode) {
+    case IntegrationMode::Off: return "off";
+    case IntegrationMode::Optiscaler: return "optiscaler";
+    case IntegrationMode::Reshade: return "reshade";
+    case IntegrationMode::OptiscalerReshade: return "optiscaler_reshade";
+    case IntegrationMode::OptiscalerDlss5: return "optiscaler_dlss5";
+    case IntegrationMode::ReshadeDlss5: return "reshade_dlss5";
+    case IntegrationMode::ReshadeDlss5Cheeky: return "reshade_dlss5_cheeky";
+    default: return "off";
+    }
+}
+
+IntegrationMode ParseIntegrationMode(const std::string& value) noexcept {
+    if (value == "reshade_dlss5_cheeky") return IntegrationMode::ReshadeDlss5Cheeky;
+    if (value == "optiscaler") return IntegrationMode::Optiscaler;
+    if (value == "reshade") return IntegrationMode::Reshade;
+    if (value == "optiscaler_reshade") {
+        return IntegrationMode::OptiscalerReshade;
+    }
+    if (value == "optiscaler_dlss5") {
+        return IntegrationMode::OptiscalerDlss5;
+    }
+    if (value == "reshade_dlss5") return IntegrationMode::ReshadeDlss5;
+    return IntegrationMode::Off;
+}
+
+bool IntegrationModeUsesOptiscaler(IntegrationMode mode) noexcept {
+    return mode == IntegrationMode::Optiscaler ||
+        mode == IntegrationMode::OptiscalerReshade ||
+        mode == IntegrationMode::OptiscalerDlss5;
+}
+
+bool IntegrationModeUsesReshade(IntegrationMode mode) noexcept {
+    if (mode == IntegrationMode::ReshadeDlss5Cheeky) return true;
+    return mode == IntegrationMode::Reshade ||
+        mode == IntegrationMode::OptiscalerReshade ||
+        mode == IntegrationMode::ReshadeDlss5;
+}
+
+bool IntegrationModeUsesDlss5(IntegrationMode mode) noexcept {
+    if (mode == IntegrationMode::ReshadeDlss5Cheeky) return true;
+    return mode == IntegrationMode::OptiscalerDlss5 ||
+        mode == IntegrationMode::ReshadeDlss5;
+}
+
 bool ModeUsesDlss(RenderMode mode) {
     return mode == RenderMode::AerAfwDlss ||
         mode == RenderMode::StereoDlssSequential ||
@@ -1263,8 +1340,8 @@ bool EnsureVrConfiguration(const ConfigPaths& paths,
         if (existing_version < 17) {
             MigrateConfigurationToV17(migrated);
         }
-        if (existing_version < 18) {
-            MigrateConfigurationToV18(migrated);
+        if (existing_version < 19) {
+            MigrateConfigurationToV19(migrated);
         }
         // This is deliberately independent from version migration: extending
         // the default template must heal a partial current-version INI on the
@@ -1457,10 +1534,11 @@ LoadResult LoadConfiguration(const ConfigPaths& paths) {
         dlss_dlaa && ModeUsesDlss(result.state.mode)
         ? 0
         : std::clamp(saved_dlss_quality, 1, 4);
+    bool optiscaler_bridge_enabled = false;
     std::wstring optiscaler_error;
     if (const auto optiscaler = IniDocument::Load(
             paths.optiscaler_bridge_ini, optiscaler_error)) {
-        result.state.optiscaler_enabled = ModeUsesDlss(result.state.mode) &&
+        optiscaler_bridge_enabled =
             ReadBool(*optiscaler, "optiscaler", "enabled", false);
     }
     std::wstring ofxr_error;
@@ -1473,8 +1551,6 @@ LoadResult LoadConfiguration(const ConfigPaths& paths) {
         ReadInt(*vr, "openxr", "hud_stereo_shift_px", -36) + 16, -64, 64);
     result.state.presentation_scale = std::clamp(
         ReadFloat(*vr, "openxr", "presentation_scale", 1.0f), 0.5f, 1.0f);
-    result.state.presentation_black_resize = ReadBool(
-        *vr, "openxr", "presentation_black_resize", false);
     result.state.world_detail_range = std::clamp(
         ReadFloat(*vr, "openxr", "world_detail_range", 1.0f), 0.4f, 1.0f);
     result.state.menu_scale = std::clamp(
@@ -1550,6 +1626,19 @@ LoadResult LoadConfiguration(const ConfigPaths& paths) {
         *vr, "debug", "pipeline_flight_recorder", false);
     result.state.renderdoc_enabled = ReadBool(
         *vr, "renderdoc", "enabled", false);
+    result.state.integration_mode = ParseIntegrationMode(ReadString(
+        *vr, "launcher", "integration_mode", "off"));
+    if (!ModeUsesDlss(result.state.mode)) {
+        if (result.state.integration_mode ==
+                IntegrationMode::OptiscalerReshade ||
+            result.state.integration_mode == IntegrationMode::ReshadeDlss5 ||
+            result.state.integration_mode == IntegrationMode::ReshadeDlss5Cheeky) {
+            result.state.integration_mode = IntegrationMode::Reshade;
+        } else if (IntegrationModeUsesOptiscaler(
+                       result.state.integration_mode)) {
+            result.state.integration_mode = IntegrationMode::Off;
+        }
+    }
     return result;
 }
 
@@ -1591,8 +1680,6 @@ bool BuildUpdatedDocuments(const ConfigPaths& paths, const LauncherState& state,
         std::to_string(std::clamp(state.hud_convergence_delta - 16, -256, 256)));
     vr_ini.Set("openxr", "presentation_scale", FloatString(
         state.presentation_scale));
-    vr_ini.Set("openxr", "presentation_black_resize",
-        state.presentation_black_resize ? "1" : "0");
     vr_ini.Set("openxr", "world_detail_range", FloatString(
         std::clamp(state.world_detail_range, 0.4f, 1.0f)));
     vr_ini.Set("openxr", "menu_scale", FloatString(state.menu_scale));
@@ -1682,6 +1769,8 @@ bool BuildUpdatedDocuments(const ConfigPaths& paths, const LauncherState& state,
         state.performance_logging ? "1" : "0");
     vr_ini.Set("renderdoc", "enabled",
         state.renderdoc_enabled ? "1" : "0");
+    vr_ini.Set("launcher", "integration_mode",
+        IntegrationModeIniValue(state.integration_mode));
     // Repair stale route fragments and diagnostic probes while preserving all
     // unrelated advanced tuning.
     NormalizeLauncherOwnedConfiguration(vr_ini);
@@ -1727,7 +1816,9 @@ bool BuildUpdatedOptiscalerDocument(const ConfigPaths& paths,
             "[optiscaler]\r\nenabled=0\r\n");
     }
     optiscaler.Set("optiscaler", "enabled",
-        state.optiscaler_enabled && ModeUsesDlss(state.mode) ? "1" : "0");
+        IntegrationModeUsesOptiscaler(state.integration_mode) &&
+            ModeUsesDlss(state.mode)
+        ? "1" : "0");
     return true;
 }
 
@@ -1751,6 +1842,9 @@ bool BuildUpdatedOfxrDocument(const ConfigPaths& paths,
         }
         ofxr = IniDocument::FromText("[ofxr]\r\nbackend=off\r\n");
     }
+    // Read the DLL-local INI at save time and own only this key. NVIDIA tuning
+    // comes from the supplied INI; OFXR diagnostics are independent of the
+    // mod's Diagnostic Logging checkbox and must survive every launch.
     ofxr.Set("ofxr", "backend",
         FrameGenerationBackendIniValue(state.frame_generation_backend));
     return true;

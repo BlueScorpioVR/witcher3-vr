@@ -1,6 +1,6 @@
 # The Witcher 3 VR
 
-Play The Witcher 3 Next-Gen in VR with configurable stereo rendering, a movable VR HUD, first-person gameplay, cinema modes, DLSS, DLAA and TAAU support, optional frame generation and native OptiScaler support.
+Play The Witcher 3 Next-Gen in VR with configurable stereo rendering, a movable VR HUD, first-person gameplay, cinema modes, DLSS, DLAA and TAAU support, optional frame generation, ReShade and OptiScaler integration.
 
 Its DX12 and VR architecture was informed by
 [REFramework](https://github.com/praydog/REFramework) and
@@ -10,6 +10,9 @@ as a runtime dependency.
 > [!WARNING]
 > This project is under active development. Features may be incomplete,
 > unstable, or incompatible with some hardware and game configurations.
+> Intermittent crashes, hangs and black-screen starts may occur when using
+> the new features, such as OFXR and integrations; the included fixes do not
+> resolve every case.
 
 > [!IMPORTANT]
 > Gameplay currently requires a mouse and keyboard or a gamepad. VR motion
@@ -32,15 +35,26 @@ Asymmetric projection is enabled by default. Press `F2` to switch temporarily to
 OFXR is a VR frame-generation system based on optical flow. It can improve smoothness when the game cannot reach the headset refresh rate on its own.
 
 - It has been tested with VDXR and partially tested with SteamVR OpenXR.
-- FidelityFX is faster and can provide around a 50% frame-rate increase, but usually produces more artifacts.
-- NVIDIA Optical Flow is cleaner, but generally provides a smaller increase of around 25%.
+- Both FidelityFX and NVIDIA Optical Flow can provide around a 40% frame-rate increase, based on current testing.
+- NVIDIA Optical Flow generally produces a cleaner image, while FidelityFX usually shows more artifacts.
 - Results vary by GPU, scene, resolution and headset refresh rate.
 - Some overlays, including xrFPS, may report half the perceived frame rate while OFXR is active.
 - The game must be started through `Witcher3VRLauncher.exe` for OFXR to load.
 
-### Native OptiScaler Support
+### ReShade, DLSS5 and OptiScaler
 
-OptiScaler can now be used directly with the mod. It relies on NVIDIA NGX, so disable DLSS Override before using it.
+Choose the integration you want directly from the launcher:
+
+- **ReShade support**, on its own or alongside ordinary OptiScaler.
+- **ReShade DLSS5 support through RenoDX.**
+- **ReShade DLSS5 support through Cheeky Foveated DLSS**, with optional fixed foveated processing.
+- **OptiScaler DLSS5 support**, using our stereo-compatible fork.
+
+Cheeky's fixed foveation concentrates processing around a configurable region of each eye's image; it does not require eye tracking. Enable and adjust it from the Cheeky add-on panel in ReShade.
+
+The bundled ReShade is [our unofficial ReShade VR fork](https://github.com/tig3rmast3r/ReShade_VR), based on ReShade 6.8.0. It includes a targeted fix for a startup crash when SteamVR uses DirectX 11 and 12 together. This fix has been validated with Witcher3VR; it is not a claim of compatibility with every game or VR setup.
+
+Ordinary OptiScaler remains available. Disable DLSS Override before using it. DLSS5 modes are community integrations and require compatible NVIDIA DLLs supplied separately; these files are not included with the mod.
 
 ### Cinema Modes
 
@@ -60,7 +74,7 @@ HUD elements can be positioned in VR and saved from inside the game. Separate pr
 | --- | --- |
 | OpenXR | Supported |
 | VDXR | Supported and recommended for Quest headsets |
-| SteamVR OpenXR | Supported; Alternative Resize may be required for Presentation Size |
+| SteamVR OpenXR | Supported; standard Presentation Size |
 | Mouse and keyboard / gamepad | Supported |
 | VR motion controllers | Not supported |
 | AER + AFW | Supported |
@@ -68,6 +82,10 @@ HUD elements can be positioned in VR and saved from inside the game. Separate pr
 | Mono rendering | Preliminary |
 | No AA / FXAA / TAAU / DLSS / DLAA | Supported, depending on render mode |
 | OptiScaler | Supported |
+| ReShade | Supported through our fork with the validated SteamVR startup crash fix |
+| DLSS5 via ReShade / RenoDX | Supported; other configurations may still need compatibility fixes |
+| DLSS5 via ReShade / Cheeky | Supported, with optional fixed foveation; other configurations may still need compatibility fixes |
+| DLSS5 via OptiScaler | Supported through the stereo-compatible fork |
 | OFXR frame generation | Experimental; tested with VDXR and partially with SteamVR OpenXR |
 
 The most frequently tested configurations are Quest 3 through VDXR and Pimax headsets through SteamVR OpenXR. Other OpenXR runtimes may work but need more user feedback.
@@ -94,13 +112,15 @@ DLSS and DLAA require a compatible NVIDIA GPU. OptiScaler and OFXR have their ow
 
 ## Installation
 
-1. Extract the release archive into the Witcher 3 game folder, the directory containing `bin`, `content` and `mods`.
-2. Allow the folders from the archive to merge with the existing game folders.
-3. If you want to use OptiScaler, extract the separate **OptiScaler Addon** into the same folder.
-4. Run `bin\x64_dx12\Witcher3VRLauncher.exe`.
-5. Choose your settings, then select **Save & Launch**.
+**Everything needed for the integrations is already included except the NVIDIA DLSS5 DLLs:** ReShade, the RenoDX and Cheeky add-ons, OptiScaler, OFXR and the launcher are supplied in the package. You do not need to run the ReShade installer or install a separate integration add-on package.
 
-The main package includes the VR DLL, launcher, OFXR, configuration, scripts and bundled mod files inside the correct `bin\x64_dx12`, `mods`, `dlc` and `Witcher3VR` folders. Install the whole main package when changing release versions; replacing only the DLL can leave incompatible files behind.
+1. Extract the release archive into the Witcher 3 game folder, the directory containing `bin`, `content` and `mods`.
+2. Merge the folders and overwrite the package files when prompted.
+3. For DLSS5 modes, download a compatible DLSS5 package separately from another source, choosing the files for your GPU (**RTX 50xx or RTX 40xx**). Copy only `nvngx_dlss.dll`, `nvngx_dlssg.dll` and `nvngx_dlssnr.dll` into `The Witcher 3\bin\x64_dx12\witcher3vr-dlss5-reference`. This folder is empty in the release; do not put other files or folders in it. Ordinary ReShade and OptiScaler do not need this separate DLSS5 package.
+4. Run `bin\x64_dx12\Witcher3VRLauncher.exe`.
+5. Choose your desired integration from the dropdown, then select **Save & Launch**. DLSS5 integrations also need a DLSS/DLAA rendering mode. The launcher handles the file copies and add-on selection automatically; choose **Off** and save to disable the integrations.
+
+The package layout includes the VR DLL, launcher, OFXR, ReShade, OptiScaler references, configuration, scripts and bundled mod files inside the correct `bin\x64_dx12`, `mods`, `dlc` and `Witcher3VR` folders. The launcher copies the selected integration from its reference folders into the DX12 directory; it never modifies the references. NVIDIA DLSS5 DLLs are not bundled. Install the whole package when changing release versions; replacing only the DLL can leave incompatible files behind.
 
 The separate **RenderDoc Addon** is only for diagnostic captures. It is not required to play.
 
@@ -120,9 +140,11 @@ Lower resolutions improve performance but reduce clarity. Very high resolutions 
 
 ### Presentation Size
 
-`1.00` uses the full presentation area. Lower values zoom the view out and add unused space around it. On Quest 3, `0.85` is a useful starting point for increasing visible pixel density without normally seeing the black borders.
+Presentation Size now preserves the complete image instead of cropping it. Lowering the slider presents the same rendered pixel resolution in a smaller area of your view, increasing visible pixel density and improving perceived clarity without raising the render resolution.
 
-Enable **Alt. Resize** only if changing Presentation Size does not work correctly with your OpenXR bridge. It is required for this feature on SteamVR in the configurations tested so far, but can slightly reduce image quality. Leave it disabled when normal resize already works.
+`1.00` keeps the normal presentation unchanged. Lower values can leave unused space around the image; choose a value that is comfortable for your headset.
+
+**Alt resize is no longer needed and has been removed.** The standard slider works with both VDXR and SteamVR.
 
 ### World Detail Range
 
@@ -136,15 +158,27 @@ Asymmetric projection is enabled by default and provides the intended image and 
 
 ### OFXR Frame Generation
 
-- **FidelityFX:** higher performance, more visible artifacts.
-- **NVIDIA:** lower performance gain, fewer artifacts.
+- **FidelityFX:** frame generation with more visible artifacts than NVIDIA Optical Flow.
+- **NVIDIA med. 50%:** uses OFXR V059 with the medium preset and 50% optical-flow input resolution. The final output remains full resolution.
 - **Off:** native game frames only.
 
 Start the game from the VR Launcher whenever OFXR is enabled.
 
-### OptiScaler
+OFXR uses the DLL and `ofxr_bridge.ini` inside `bin\x64_dx12`; no tray application
+is needed. The launcher changes only `[ofxr] backend`. Medium/50% are the supplied
+NVIDIA defaults; all other OFXR settings are preserved. To collect OFXR logs, set
+`[diagnostics] logging_enabled=1` in that INI before starting the game. Files named
+`ofxr-bridge-flight-*.log` appear beside the DLL. This is independent of the
+launcher's Diagnostic Logging checkbox. Logging is off by default; return the
+value to `0` after collecting the run.
 
-Disable DLSS Override before enabling OptiScaler.
+### ReShade and OptiScaler
+
+The integration dropdown offers Off, OptiScaler, ReShade, OptiScaler + ReShade, OptiScaler DLSS5, ReShade DLSS5 RenoDX and ReShade DLSS5 Cheeky. The default is Off.
+
+The two DLSS5 add-ons are mutually exclusive: both remain in `witcher3vr-reshade-dlss5-reference`, but only the selected add-on is copied beside the game executable. Existing unrelated add-ons and ReShade settings are preserved. OptiScaler settings use Delete; ReShade and Cheeky use F4; RenoDX uses F6. AFW debug uses Ctrl+F6.
+
+Disable DLSS Override before enabling OptiScaler. DLSS5 selections need a DLSS/DLAA render route. The INI `config_version` is a settings-format migration marker, not a required mod build version; a different value does not block launch.
 
 ### Cinema
 
@@ -215,6 +249,7 @@ The editor can separately position gameplay and cutscene subtitles, dialogue tex
 
 ## Known Issues
 
+- Intermittent crashes, hangs and black-screen starts when using OFXR and integrations remain under investigation, including with ReShade/AER. The bundled ReShade fork fixes one reproduced SteamVR startup crash, not every failure. If affected, try disabling OFXR and selecting **Off** in the integration dropdown, and report your exact settings and diagnostic logs.
 - OFXR has been tested with VDXR and partially with SteamVR OpenXR. Other runtimes need validation.
 - Some FPS overlays report half frame rate while OFXR is active.
 - Mono mode is preliminary. Some cutscenes may not retain DLSS/DLAA or TAAU.
@@ -234,6 +269,12 @@ a restriction on using mods.
 
 ## Troubleshooting
 
+### The game crashes when ReShade is enabled
+
+- Select **Off** in the launcher's integration dropdown and save.
+- Use the ReShade build supplied with this package: it includes the validated SteamVR startup crash fix. An unmodified ReShade installation does not include our change. Other crashes may have a different cause.
+- When reporting it, include your selected integration, GPU/driver, headset/runtime, and the ReShade and Witcher3VR logs.
+
 ### The game does not enter VR
 
 - Confirm that the correct OpenXR runtime is active.
@@ -246,8 +287,6 @@ a restriction on using mods.
 ### The image is distorted after changing Presentation Size
 
 - Restore Presentation Size to `1.00`.
-- If you use SteamVR OpenXR, enable **Alt. Resize** and test again.
-- If resize already works normally, keep **Alt. Resize** disabled for the best image quality.
 
 ### Performance is poor in cities
 
@@ -270,7 +309,7 @@ When reporting a problem, include:
 - Headset and OpenXR runtime
 - GPU and driver version
 - Render mode and anti-aliasing/upscaler mode
-- Resolution, Presentation Size, Alt. Resize and World Detail Range settings
+- Resolution, Presentation Size and World Detail Range settings
 - Whether OFXR or OptiScaler is active
 - A short description of where the issue occurs
 - A diagnostic log only when requested or when it clearly captures the problem
@@ -286,6 +325,21 @@ top of the repository.
 
 ## Credits
 
+### ReShade, DLSS5 and upscaling
+
+- [Patrick Mours (crosire) and ReShade contributors](https://github.com/crosire/reshade) — post-processing runtime, overlay and add-on API. The package uses [our unofficial ReShade VR fork](https://github.com/tig3rmast3r/ReShade_VR), based on 6.8.0, with a targeted DirectX 11/12 compatibility fix for the reproduced SteamVR startup crash. Original copyright and license notices are retained.
+- [clshortfuse and contributors / RenoDX](https://github.com/clshortfuse/renodx) — the RenoDX framework. Separate thanks to the authors and contributors of the **DLSS5 Neural Rendering add-on**, distributed through the [RenoDX community](https://discord.com/invite/renodx), for the generic neural-rendering integration used here.
+- [ClarkCheekyKent / Cheeky Foveated DLSS](https://github.com/ClarkCheekyKent/CheekyFoveatedDLSS) — fixed foveated DLSS and experimental neural-rendering support. Witcher3VR uses [our compatibility fork](https://github.com/tig3rmast3r/CheekyFoveatedDLSS) for the game's older Streamline integration.
+- [The OptiScaler team and contributors](https://github.com/optiscaler/OptiScaler) — the original upscaling integration.
+- [Dagherbou / OptiScaler_DLSSNR](https://github.com/Dagherbou/OptiScaler_DLSSNR) — DLSS Neural Rendering support in OptiScaler. [Our VR fork](https://github.com/tig3rmast3r/OptiScaler_DLSSNR_VR) adds separate processing for each eye to prevent flickering and unstable colours.
+- [NVIDIA / Streamline and NGX](https://github.com/NVIDIA-RTX/Streamline) — DLSS technologies and integration interfaces. NVIDIA DLSS5 runtime DLLs are not distributed with Witcher3VR.
+- [AMD / FidelityFX](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK) — upscaling and optical-flow technology used by the integrations.
+- [Omar Cornut and contributors / Dear ImGui](https://github.com/ocornut/imgui) — interface components used by the overlays and add-ons.
+
+### VR, frame generation and other components
+
+- [PureDark](https://github.com/PureDark) — the AFW component used by AER + AFW.
+- [OFXR Bridge](https://github.com/tig3rmast3r/OFXR-Bridge) — optical-flow-based VR frame generation, with AMD and NVIDIA backends.
 - [praydog / REFramework](https://github.com/praydog/REFramework) — DX12
   hooking and VR architecture reference
 - [praydog / UEVR](https://github.com/praydog/UEVR) — additional VR
@@ -298,8 +352,7 @@ top of the repository.
   library
 - [Khronos OpenXR SDK](https://github.com/KhronosGroup/OpenXR-SDK)
 - [Microsoft DirectX-Headers](https://github.com/microsoft/DirectX-Headers)
-- [NVIDIA NGX SDK](https://github.com/NVIDIA-RTX/Streamline/blob/main/external/ngx-sdk/license.txt)
-- The authors of the bundled movement and frame-generation components
+- [baldurk and contributors / RenderDoc](https://github.com/baldurk/renderdoc) — graphics diagnostics and capture tooling.
 - Testers who provided headset-specific feedback, logs and performance comparisons
 
 See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for copyright notices and

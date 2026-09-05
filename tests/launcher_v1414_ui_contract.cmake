@@ -19,10 +19,10 @@ file(READ "${STARTUP_CHECKS}" startup_checks)
 file(READ "${DXGI_PROXY_SOURCE}" dxgi_proxy)
 
 foreach(required IN ITEMS
-        "IdOptiscaler"
-        "OptiScaler (download the dedicated package from the release page)"
-        "Uses the game's DLSS route to run FSR through OptiScaler"
-        "Useful for AMD Radeon graphics cards"
+        "IdIntegrationMode"
+        "L\"Integration\""
+        "Select one complete integration state."
+        "DLSS5 reference is read-only"
         "F2  Toggle between Symmetric and Asymmetric projection"
         "Toggle between symmetric and asymmetric projection."
         "HUD Editor bindings"
@@ -34,10 +34,8 @@ foreach(required IN ITEMS
         "Reset the complete active HUD profile"
         "F7  Toggle Layout A/B"
         "Toggle the HUD Editor preview between layout A and layout B."
-        "EnableWindow(Item(IdOptiscaler), dlss)"
-        "SendMessageW(Item(IdOptiscaler), BM_SETCHECK, BST_UNCHECKED, 0)"
-        "state.optiscaler_enabled = w3vr::ModeUsesDlss(state.mode)"
-        "L\"Debug\""
+        "state.integration_mode = static_cast<IntegrationMode>(integration_mode)"
+        "L\"Debug and integrations\""
         "Diagnostic Logging"
         "L\"Route Log\""
         "Performance Log"
@@ -45,18 +43,18 @@ foreach(required IN ITEMS
         "L\"RenderDoc\""
         "dedicated package on the release page"
         "F3  Fast capture: Route / Performance / RenderDoc"
-        "F6  AFW visual debug"
+        "Ctrl+F6  AFW visual debug"
         "do not impact performance"
         "can contaminate results"
         "Additional cutscene-only HUD and subtitle scale applied on top of the HUD Editor profile"
         "Additional cutscene-only Cinema3D depth correction applied on top of the HUD Editor profile"
         "Additional cutscene-only Full VR depth correction applied on top of the HUD Editor profile"
-        "Witcher 3 VR Launcher v0.9.6"
+        "Witcher 3 VR Launcher - V"
         "ShowStartupWarnings();"
         "constexpr int kClientWidth = 1180;"
     "constexpr int kClientHeight = 746;"
         "600, 18, 560, 178"
-        "600, 462, 560, 120"
+        "600, 462, 560, 160"
         "https://ko-fi.com/tig3rmast3r")
     string(FIND "${main}" "${required}" found)
     if(found EQUAL -1)
@@ -65,6 +63,10 @@ foreach(required IN ITEMS
 endforeach()
 
 foreach(forbidden IN ITEMS
+        "IdOptiscaler"
+        "IdEnableReshade"
+        "IdEnableDlss5"
+        "UpdateManagedIntegrationControls"
         "IdRayTracing"
         "IdNativeStereo"
         "Ray Tracing (AER + AFW)"
@@ -93,7 +95,7 @@ foreach(forbidden_default_phrase IN ITEMS
 endforeach()
 
 foreach(required IN ITEMS
-        "bool optiscaler_enabled{};"
+        "IntegrationMode integration_mode{IntegrationMode::Off};"
         "bool route_logging{};"
         "bool performance_logging{};"
         "bool renderdoc_enabled{};")
@@ -106,8 +108,8 @@ endforeach()
 foreach(required IN ITEMS
         "vr_ini.Set(\"openxr\", \"native_stereo\", \"1\")"
         "paths.optiscaler_bridge_ini"
-        "result.state.optiscaler_enabled = ModeUsesDlss(result.state.mode)"
-        "state.optiscaler_enabled && ModeUsesDlss(state.mode) ? \"1\" : \"0\""
+        "IntegrationModeUsesOptiscaler(state.integration_mode)"
+        "vr_ini.Set(\"launcher\", \"integration_mode\""
         "state.route_logging ? \"1\" : \"0\""
         "state.performance_logging ? \"1\" : \"0\""
         "vr_ini.Set(\"renderdoc\", \"enabled\""
@@ -119,7 +121,9 @@ foreach(required IN ITEMS
 endforeach()
 
 foreach(required IN ITEMS
-    "config_version=18"
+        "config_version=19"
+        "[launcher]"
+        "integration_mode=off"
         "[renderdoc]"
         "streamline_device_bridge=0"
         "route_flight_recorder=0"
@@ -147,8 +151,9 @@ foreach(required IN ITEMS
 endforeach()
 
 foreach(required IN ITEMS
-        "[DEBUG:PUREDARK-AFW-VISUAL-F6 V1414]"
-        "if ((GetAsyncKeyState(VK_F6) & 1) == 0)")
+        "[TRIAL:RESHADE-OPAQUE-SUBMIT-CLEANUP V23011]"
+        "if ((GetAsyncKeyState(VK_CONTROL) & 0x8000) == 0 ||"
+        "(GetAsyncKeyState(VK_F6) & 1) == 0)")
     string(FIND "${dxgi_proxy}" "${required}" found)
     if(found EQUAL -1)
         message(FATAL_ERROR "Missing V1414 always-available AFW debug contract: ${required}")
@@ -158,7 +163,7 @@ endforeach()
 string(FIND "${dxgi_proxy}"
     "if (!(g_config.runtime_diagnostics ||" stale_afw_gate)
 if(NOT stale_afw_gate EQUAL -1)
-    message(FATAL_ERROR "AFW F6 still depends on Diagnostic or Performance logging")
+    message(FATAL_ERROR "AFW Ctrl+F6 still depends on Diagnostic or Performance logging")
 endif()
 
 message(STATUS "V1414 launcher UI/config/startup guard contract verified")

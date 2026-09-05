@@ -23,6 +23,7 @@ int main() {
     using w3vr::mode3_transport::final_color_submission_backend;
     using w3vr::mode3_transport::immutable_pair_view_ready;
     using w3vr::mode3_transport::late_hud_composite_source_ready;
+    using w3vr::mode3_transport::strict_stereo_scene_only_output_pair_id;
     using w3vr::mode3_transport::aer_full_vr_scene_only_admission_ready;
     using w3vr::mode3_transport::retained_hud_scene_lifecycle_active;
     using w3vr::mode3_transport::native_hud_source_bootstrap_active;
@@ -230,11 +231,11 @@ int main() {
     assert(afw_queued_producer_expired(108, 100));
     assert(afw_queued_producer_expired(1000, 100));
 
-    // Gameplay continuously removes the baked HUD. A cutscene or Cinema
-    // boundary must fail open on its native HUD until the exact final pair
+    // Recording and OpenXR submission can straddle an overlay transition.
+    // Every route must fail open on its native HUD until the exact final pair
     // proves both eyes were rendered scene-only; otherwise the late layer
-    // would draw the same subtitle a second time.
-    assert(late_hud_composite_source_ready(
+    // would draw the same HUD a second time over a baked backbuffer.
+    assert(!late_hud_composite_source_ready(
         HudProjectionRoute::Gameplay, false));
     assert(late_hud_composite_source_ready(
         HudProjectionRoute::Gameplay, true));
@@ -246,6 +247,14 @@ int main() {
         HudProjectionRoute::Cinema, false));
     assert(late_hud_composite_source_ready(
         HudProjectionRoute::Cinema, true));
+
+    // The retained texture keeps the predecessor label, while scene-only
+    // ownership follows the current scene submitted to OpenXR.
+    assert(strict_stereo_scene_only_output_pair_id(42, 41) == 42);
+    assert(strict_stereo_scene_only_output_pair_id(42, 42) == 42);
+    assert(strict_stereo_scene_only_output_pair_id(0, 41) == 0);
+    assert(strict_stereo_scene_only_output_pair_id(42, 0) == 0);
+    assert(strict_stereo_scene_only_output_pair_id(41, 42) == 0);
 
     // AER automatic Full VR may never inherit AFW gameplay readiness. It
     // removes the baked HUD only when both its sequential scene and retained
