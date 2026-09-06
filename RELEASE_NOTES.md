@@ -50,6 +50,10 @@ Thanks to [crosire / ReShade](https://github.com/crosire/reshade),
 the [DLSS5 Neural Rendering add-on authors](https://discord.com/invite/renodx),
 the [OptiScaler team](https://github.com/optiscaler/OptiScaler), and
 [Dagherbou / OptiScaler_DLSSNR](https://github.com/Dagherbou/OptiScaler_DLSSNR).
+Special thanks to [sadbee166](https://github.com/sadbee166), author of
+[OptiScaler_DLSSNR PR #6](https://github.com/Dagherbou/OptiScaler_DLSSNR/pull/6),
+for the change that runs DLSS Neural Rendering before DLSS upscaling and forms
+the basis of the VR v2 pre-DLSS path.
 Our compatibility changes are available in the
 [ReShade VR fork](https://github.com/tig3rmast3r/ReShade_VR),
 [OptiScaler VR fork](https://github.com/tig3rmast3r/OptiScaler_DLSSNR_VR).

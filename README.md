@@ -332,6 +332,7 @@ top of the repository.
 - [clshortfuse and contributors / RenoDX](https://github.com/clshortfuse/renodx) — the RenoDX framework. Separate thanks to the authors and contributors of the **DLSS5 Neural Rendering add-on**, distributed through the [RenoDX community](https://discord.com/invite/renodx), for the generic neural-rendering integration used here.
 - [The OptiScaler team and contributors](https://github.com/optiscaler/OptiScaler) — the original upscaling integration.
 - [Dagherbou / OptiScaler_DLSSNR](https://github.com/Dagherbou/OptiScaler_DLSSNR) — DLSS Neural Rendering support in OptiScaler. [Our VR fork](https://github.com/tig3rmast3r/OptiScaler_DLSSNR_VR) adds separate processing for each eye to prevent flickering and unstable colours.
+- [sadbee166](https://github.com/sadbee166) — author of [OptiScaler_DLSSNR PR #6](https://github.com/Dagherbou/OptiScaler_DLSSNR/pull/6), which introduced running DLSS Neural Rendering before DLSS upscaling and is the basis of the VR v2 pre-DLSS path.
 - [NVIDIA / Streamline and NGX](https://github.com/NVIDIA-RTX/Streamline) — DLSS technologies and integration interfaces. NVIDIA DLSS5 runtime DLLs are not distributed with Witcher3VR.
 - [AMD / FidelityFX](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK) — upscaling and optical-flow technology used by the integrations.
 - [Omar Cornut and contributors / Dear ImGui](https://github.com/ocornut/imgui) — interface components used by the overlays and add-ons.

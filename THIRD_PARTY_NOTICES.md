@@ -186,6 +186,9 @@ The bundled stereo-compatible sources and NGX forwarder are available from
 [OptiScaler_DLSSNR_VR, v0.1.1-dlssnr-vr2](https://github.com/tig3rmast3r/OptiScaler_DLSSNR_VR/tree/v0.1.1-dlssnr-vr2).
 This revision performs neural rendering before DLSS and preserves separate
 per-eye history and render-subrect authority.
+The pre-DLSS implementation is adapted from
+[sadbee166's OptiScaler_DLSSNR PR #6](https://github.com/Dagherbou/OptiScaler_DLSSNR/pull/6),
+head commit `914963ffb641943fba8f19f3c8654f0620fc68ac`.
 The custom `nvngx.dll_dlssnr.dll` is a forwarding component, not NVIDIA's
 `nvngx_dlssnr.dll`. NVIDIA DLSS5 DLLs are not included.
 
