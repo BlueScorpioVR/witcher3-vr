@@ -305,8 +305,7 @@ void UpdateModeControls() {
             ? static_cast<IntegrationMode>(selected_integration)
             : IntegrationMode::Off;
         if (normalized == IntegrationMode::OptiscalerReshade ||
-            normalized == IntegrationMode::ReshadeDlss5 ||
-            normalized == IntegrationMode::ReshadeDlss5Cheeky) {
+            normalized == IntegrationMode::ReshadeDlss5) {
             normalized = IntegrationMode::Reshade;
         } else if (w3vr::IntegrationModeUsesOptiscaler(normalized)) {
             normalized = IntegrationMode::Off;
@@ -1384,7 +1383,7 @@ void CreateInterface(HWND window) {
         618, 534, 524, 20);
     ApplySmallFont(diagnostic_note);
     HWND menu_bindings = AddLabel(
-        L"Menus:  F4 ReShade / Cheeky   |   F6 RenoDX   |   DEL OptiScaler",
+        L"Menus:  F4 ReShade   |   F6 RenoDX   |   DEL OptiScaler",
         618, 558, 524, 20);
     ApplySmallFont(menu_bindings);
     AddTooltip(menu_bindings,
@@ -1554,7 +1553,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     }
     bounds = FitWindowToWorkArea(bounds);
     HWND window = CreateWindowExW(0, kWindowClass,
-        L"Witcher 3 VR Launcher - V1534",
+        L"Witcher 3 VR Launcher - V1535",
         kWindowStyle,
         bounds.left, bounds.top, bounds.right - bounds.left,
         bounds.bottom - bounds.top, nullptr, nullptr, instance, nullptr);

@@ -61,16 +61,11 @@ endif()
 set(addon "${SOURCE_ROOT}/runtime/witcher3vr-reshade-dlss5-reference/renodx-dlss5-v2.5.addon64")
 file(SIZE "${addon}" addon_size)
 file(SHA256 "${addon}" addon_sha256)
-if(NOT addon_size EQUAL 573440 OR
-   NOT addon_sha256 STREQUAL "e1c28fde0922b12fc10734e58c3d24a36808e575247f4fd4f36226540d7ee023")
-    message(FATAL_ERROR "V23032 does not carry the pinned NGX-only add-on")
+if(NOT addon_size EQUAL 1732608 OR
+   NOT addon_sha256 STREQUAL "d5adf82eb44b065f4c590ac91fe824bab07afea0eb9f994bde936710c8593952")
+    message(FATAL_ERROR "Release does not carry the updated NGX-only add-on")
 endif()
 
-set(cheeky "${SOURCE_ROOT}/runtime/witcher3vr-reshade-dlss5-reference/CheekyFoveatedDLSS.addon64")
-file(SHA256 "${cheeky}" cheeky_sha256)
-if(NOT cheeky_sha256 STREQUAL "365e9ac76a37a5658fb5fbe83e0b145b86a73db6332f82c609bf73b122ad91d3")
-    message(FATAL_ERROR "V1528 requires the V23037 Streamline 1.5 NGX-only Cheeky addon")
-endif()
 file(SHA256 "${SOURCE_ROOT}/runtime/XR_APILAYER_XRFrameBridge_diagnostic.dll" ofxr_sha256)
 if(NOT ofxr_sha256 STREQUAL "6b6ba7c47ef191e21e01167fc712a76f3d468d23d1cae36ea976f92fe7877698")
     message(FATAL_ERROR "V1528 requires OFXR V059")
@@ -113,6 +108,15 @@ set(expected_modified_entries OptiScaler.dll OptiScaler.ini
 list(SORT expected_modified_entries)
 if(NOT modified_entries STREQUAL expected_modified_entries)
     message(FATAL_ERROR "Modified OptiScaler reference must contain exactly three files")
+endif()
+
+file(SIZE "${modified_reference}/OptiScaler.dll" modified_dll_size)
+file(SHA256 "${modified_reference}/OptiScaler.dll" modified_dll_sha256)
+file(SHA256 "${modified_reference}/OptiScaler.ini" modified_ini_sha256)
+if(NOT modified_dll_size EQUAL 25735680 OR
+   NOT modified_dll_sha256 STREQUAL "1876a8e06a4b280b41380fbb6d3f3efee5699175fd631c3d7d95102e572380a6" OR
+   NOT modified_ini_sha256 STREQUAL "7eb791934cdc2e499dd8d458dc6f5f2cf48f5b74edc771f5b13611cc6938e557")
+    message(FATAL_ERROR "Modified OptiScaler reference is not the V23040 VR v2 payload")
 endif()
 
 string(REGEX MATCH

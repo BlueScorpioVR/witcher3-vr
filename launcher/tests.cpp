@@ -697,12 +697,12 @@ void TestEmbeddedLauncherDefaults() {
 }
 
 void TestIntegrationModeContract() {
-    constexpr std::array<const wchar_t*, 7> expected_display{{
+    constexpr std::array<const wchar_t*, 6> expected_display{{
         L"Off", L"OptiScaler", L"ReShade", L"OptiScaler + ReShade",
-        L"OptiScaler DLSS5", L"ReShade DLSS5 RenoDX", L"ReShade DLSS5 Cheeky"}};
-    constexpr std::array<const char*, 7> expected_ini{{
+        L"OptiScaler DLSS5", L"ReShade DLSS5 RenoDX"}};
+    constexpr std::array<const char*, 6> expected_ini{{
         "off", "optiscaler", "reshade", "optiscaler_reshade",
-        "optiscaler_dlss5", "reshade_dlss5", "reshade_dlss5_cheeky"}};
+        "optiscaler_dlss5", "reshade_dlss5"}};
     for (size_t index = 0; index < expected_display.size(); ++index) {
         const auto mode = static_cast<w3vr::IntegrationMode>(index);
         Require(std::wstring_view(w3vr::IntegrationModeDisplayName(mode)) ==

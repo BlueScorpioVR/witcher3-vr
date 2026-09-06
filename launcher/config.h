@@ -41,7 +41,6 @@ enum class IntegrationMode {
     OptiscalerReshade,
     OptiscalerDlss5,
     ReshadeDlss5,
-    ReshadeDlss5Cheeky,
     Count,
 };
 

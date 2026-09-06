@@ -60,7 +60,6 @@ void StageReferences(const fs::path& root) {
     WriteFile(reshade / L"ReShade64.dll", "reshade-runtime");
     WriteFile(reshade_dlss5 / L"renodx-dlss5-v2.5.addon64",
         "ngx-only-addon");
-    WriteFile(reshade_dlss5 / L"CheekyFoveatedDLSS.addon64", "cheeky-ngx-only");
     WriteFile(canonical / L"OptiScaler.dll", "canonical-opti");
     WriteFile(canonical / L"OptiScaler.ini",
         "[Menu]\r\nShortcutKey=0x2E\r\n");
@@ -121,6 +120,7 @@ void TestAllModesAndReferenceImmutability() {
     WriteFile(root / L"witcher3vr_dxgi.dll", "obsolete-reversed-chain");
     WriteFile(root / L"ReShade64.dll", "obsolete-secondary-runtime");
     WriteFile(root / L"renodx-dlss5-v2.5.addon64", "obsolete-addon");
+    WriteFile(root / L"CheekyFoveatedDLSS.addon64", "retired-addon");
     WriteFile(root / L"amd_fidelityfx_dx12.dll", "game-owned-ffx");
     WriteFile(root / L"amd_fidelityfx_upscaler_dx12.dll",
         "game-owned-upscaler");
@@ -136,6 +136,7 @@ void TestAllModesAndReferenceImmutability() {
         "Off did not publish canonical OptiScaler");
     Require(!fs::exists(root / L"ReShade64.dll") &&
             !fs::exists(root / L"renodx-dlss5-v2.5.addon64") &&
+            !fs::exists(root / L"CheekyFoveatedDLSS.addon64") &&
             !fs::exists(root / L"ReShade.ini"),
         "Off left an active ReShade component");
 
@@ -330,16 +331,8 @@ void TestEveryIntegrationTransition() {
                 "target mode failed");
             Require(fs::exists(root / L"renodx-dlss5-v2.5.addon64") ==
                     (mode == w3vr::IntegrationMode::ReshadeDlss5) &&
-                fs::exists(root / L"CheekyFoveatedDLSS.addon64") ==
-                    (mode == w3vr::IntegrationMode::ReshadeDlss5Cheeky),
-                "selected add-ons are not mutually exclusive");
-            if (mode == w3vr::IntegrationMode::ReshadeDlss5Cheeky) {
-                const auto ini = ReadFile(root / L"ReShade.ini");
-                Require(ini.find("NrEnabled=1") != std::string::npos,
-                    "Cheeky mode did not enable neural rendering");
-                Require(ReadFile(root / L"CheekyFoveatedDLSS.addon64") ==
-                    "cheeky-ngx-only", "Cheeky reference not copied");
-            }
+                !fs::exists(root / L"CheekyFoveatedDLSS.addon64"),
+                "active add-on composition is wrong");
         }
     }
     for (const auto& [path, contents] : references) {
@@ -350,31 +343,12 @@ void TestEveryIntegrationTransition() {
     RequireNoStagingFiles(root);
 }
 
-void TestMissingCheekyPreservesActiveAddon() {
-    TemporaryDirectory temporary;
-    const auto& root = temporary.path;
-    StageReferences(root);
-    std::wstring error;
-    Require(w3vr::ApplyManagedIntegrationMode(root,
-        w3vr::IntegrationMode::ReshadeDlss5, error), "RenoDX setup failed");
-    fs::remove(root / L"witcher3vr-reshade-dlss5-reference" /
-        L"CheekyFoveatedDLSS.addon64");
-    Require(!w3vr::ApplyManagedIntegrationMode(root,
-        w3vr::IntegrationMode::ReshadeDlss5Cheeky, error),
-        "missing Cheeky reference was accepted");
-    Require(ReadFile(root / L"renodx-dlss5-v2.5.addon64") == "ngx-only-addon" &&
-            !fs::exists(root / L"CheekyFoveatedDLSS.addon64"),
-        "failed preflight changed the active add-on");
-    RequireNoStagingFiles(root);
-}
-
 } // namespace
 
 int main() {
     try {
         TestAllModesAndReferenceImmutability();
         TestEveryIntegrationTransition();
-        TestMissingCheekyPreservesActiveAddon();
         TestDlss5ReferenceMustBeExact();
         TestUnsafeStreamlineOverrideFailsClosed();
         TestRepeatedModeAndStaleCleanup();

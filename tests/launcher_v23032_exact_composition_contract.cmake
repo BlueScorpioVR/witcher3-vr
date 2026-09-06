@@ -19,7 +19,6 @@ foreach(required IN ITEMS
         "OptiscalerReshade,"
         "OptiscalerDlss5,"
         "ReshadeDlss5,"
-        "ReshadeDlss5Cheeky,"
         "IntegrationMode integration_mode{IntegrationMode::Off};")
     string(FIND "${header}" "${required}" found)
     if(found EQUAL -1)
@@ -34,7 +33,6 @@ foreach(required IN ITEMS
         "L\"OptiScaler + ReShade\""
         "L\"OptiScaler DLSS5\""
         "L\"ReShade DLSS5 RenoDX\""
-        "L\"ReShade DLSS5 Cheeky\""
         "integration_mode=off")
     string(FIND "${config}${defaults}" "${required}" found)
     if(found EQUAL -1)

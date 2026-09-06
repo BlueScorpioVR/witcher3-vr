@@ -39,11 +39,18 @@ foreach(required IN ITEMS "NVIDIA med. 50%" "Witcher 3 VR Launcher - V${release_
     endif()
 endforeach()
 
-foreach(required IN ITEMS "CheekyFoveatedDLSS.addon64"
-        "renodx-dlss5-v2.5.addon64" "ReshadeDlss5Cheeky"
-        "NrEnabled" "!use_cheeky_addon" "!use_dlss5_addon")
+foreach(required IN ITEMS "renodx-dlss5-v2.5.addon64"
+        "!use_dlss5_addon")
     string(FIND "${managed}" "${required}" position)
     if(position EQUAL -1)
-        message(FATAL_ERROR "Missing alternate add-on ownership: ${required}")
+        message(FATAL_ERROR "Missing ReShade add-on ownership: ${required}")
+    endif()
+endforeach()
+
+foreach(retired IN ITEMS "ReshadeDlss5Cheeky" "NrEnabled"
+        "use_cheeky_addon")
+    string(FIND "${managed}${config_header}" "${retired}" position)
+    if(NOT position EQUAL -1)
+        message(FATAL_ERROR "Retired Cheeky launcher path remains: ${retired}")
     endif()
 endforeach()

@@ -174,7 +174,6 @@ foreach ($requiredFile in @(
         (Join-Path $componentLicenses 'Dear-ImGui-MIT.txt'),
         (Join-Path $reshadeReference 'ReShade64.dll'),
         (Join-Path $reshadeDlss5Reference 'renodx-dlss5-v2.5.addon64'),
-        (Join-Path $reshadeDlss5Reference 'CheekyFoveatedDLSS.addon64'),
         (Join-Path $modifiedOptiscalerReference 'OptiScaler.dll'),
         (Join-Path $modifiedOptiscalerReference 'OptiScaler.ini'),
         (Join-Path $modifiedOptiscalerReference 'nvngx.dll_dlssnr.dll'),
@@ -247,7 +246,7 @@ try {
     Copy-Item -LiteralPath $OptiScalerIni -Destination (Join-Path $canonicalReferenceStage 'OptiScaler.ini')
     Copy-Item -LiteralPath $optiscalerBridgeIni -Destination $binaryStage
     Copy-Item -LiteralPath (Join-Path $reshadeReference 'ReShade64.dll') -Destination $reshadeReferenceStage
-    foreach ($name in @('renodx-dlss5-v2.5.addon64', 'CheekyFoveatedDLSS.addon64')) {
+    foreach ($name in @('renodx-dlss5-v2.5.addon64')) {
         Copy-Item -LiteralPath (Join-Path $reshadeDlss5Reference $name) -Destination $addonReferenceStage
     }
     foreach ($name in @('OptiScaler.dll', 'OptiScaler.ini', 'nvngx.dll_dlssnr.dll')) {

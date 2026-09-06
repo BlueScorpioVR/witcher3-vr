@@ -183,18 +183,11 @@ redistribute or replace them.
 The alternative DLSS Neural Rendering integration is based on
 [Dagherbou / OptiScaler_DLSSNR](https://github.com/Dagherbou/OptiScaler_DLSSNR).
 The bundled stereo-compatible sources and NGX forwarder are available from
-[OptiScaler_DLSSNR_VR, v0.1.1-dlssnr-vr1](https://github.com/tig3rmast3r/OptiScaler_DLSSNR_VR/tree/v0.1.1-dlssnr-vr1).
+[OptiScaler_DLSSNR_VR, v0.1.1-dlssnr-vr2](https://github.com/tig3rmast3r/OptiScaler_DLSSNR_VR/tree/v0.1.1-dlssnr-vr2).
+This revision performs neural rendering before DLSS and preserves separate
+per-eye history and render-subrect authority.
 The custom `nvngx.dll_dlssnr.dll` is a forwarding component, not NVIDIA's
 `nvngx_dlssnr.dll`. NVIDIA DLSS5 DLLs are not included.
-
-## Cheeky Foveated DLSS
-
-Credit: ClarkCheekyKent and contributors. The bundled add-on is our
-Streamline 1.5 compatibility build, with the upstream GPL-3.0 license retained
-in `licenses/GPL-3.0.txt`.
-
-- Upstream: https://github.com/ClarkCheekyKent/CheekyFoveatedDLSS
-- Corresponding fork source: https://github.com/tig3rmast3r/CheekyFoveatedDLSS/tree/208d39bfd8c51f6cc6cae6b44214d31043d1df21
 
 ## RenoDX and DLSS5 Neural Rendering add-on
 

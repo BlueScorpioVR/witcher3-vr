@@ -11,8 +11,13 @@ as a runtime dependency.
 > This project is under active development. Features may be incomplete,
 > unstable, or incompatible with some hardware and game configurations.
 > Intermittent crashes, hangs and black-screen starts may occur when using
-> the new features, such as OFXR and integrations; the included fixes do not
+> ReShade; the included fixes do not
 > resolve every case.
+
+> [!IMPORTANT]
+> Alpha 2 includes the new OptiScaler VR v2 for DLSS. It is more stable, moves neural
+> rendering before DLSS and runs 50% faster than ReShade. We strongly recommend
+> using OptiScaler for DLSS.
 
 > [!IMPORTANT]
 > Gameplay currently requires a mouse and keyboard or a gamepad. VR motion
@@ -47,10 +52,7 @@ Choose the integration you want directly from the launcher:
 
 - **ReShade support**, on its own or alongside ordinary OptiScaler.
 - **ReShade DLSS5 support through RenoDX.**
-- **ReShade DLSS5 support through Cheeky Foveated DLSS**, with optional fixed foveated processing.
 - **OptiScaler DLSS5 support**, using our stereo-compatible fork.
-
-Cheeky's fixed foveation concentrates processing around a configurable region of each eye's image; it does not require eye tracking. Enable and adjust it from the Cheeky add-on panel in ReShade.
 
 The bundled ReShade is [our unofficial ReShade VR fork](https://github.com/tig3rmast3r/ReShade_VR), based on ReShade 6.8.0. It includes a targeted fix for a startup crash when SteamVR uses DirectX 11 and 12 together. This fix has been validated with Witcher3VR; it is not a claim of compatibility with every game or VR setup.
 
@@ -84,7 +86,6 @@ HUD elements can be positioned in VR and saved from inside the game. Separate pr
 | OptiScaler | Supported |
 | ReShade | Supported through our fork with the validated SteamVR startup crash fix |
 | DLSS5 via ReShade / RenoDX | Supported; other configurations may still need compatibility fixes |
-| DLSS5 via ReShade / Cheeky | Supported, with optional fixed foveation; other configurations may still need compatibility fixes |
 | DLSS5 via OptiScaler | Supported through the stereo-compatible fork |
 | OFXR frame generation | Experimental; tested with VDXR and partially with SteamVR OpenXR |
 
@@ -112,7 +113,7 @@ DLSS and DLAA require a compatible NVIDIA GPU. OptiScaler and OFXR have their ow
 
 ## Installation
 
-**Everything needed for the integrations is already included except the NVIDIA DLSS5 DLLs:** ReShade, the RenoDX and Cheeky add-ons, OptiScaler, OFXR and the launcher are supplied in the package. You do not need to run the ReShade installer or install a separate integration add-on package.
+**Everything needed for the integrations is already included except the NVIDIA DLSS5 DLLs:** ReShade, the RenoDX add-on, OptiScaler, OFXR and the launcher are supplied in the package. You do not need to run the ReShade installer or install a separate integration add-on package.
 
 1. Extract the release archive into the Witcher 3 game folder, the directory containing `bin`, `content` and `mods`.
 2. Merge the folders and overwrite the package files when prompted.
@@ -174,9 +175,9 @@ value to `0` after collecting the run.
 
 ### ReShade and OptiScaler
 
-The integration dropdown offers Off, OptiScaler, ReShade, OptiScaler + ReShade, OptiScaler DLSS5, ReShade DLSS5 RenoDX and ReShade DLSS5 Cheeky. The default is Off.
+The integration dropdown offers Off, OptiScaler, ReShade, OptiScaler + ReShade, OptiScaler DLSS5 and ReShade DLSS5 RenoDX. The default is Off.
 
-The two DLSS5 add-ons are mutually exclusive: both remain in `witcher3vr-reshade-dlss5-reference`, but only the selected add-on is copied beside the game executable. Existing unrelated add-ons and ReShade settings are preserved. OptiScaler settings use Delete; ReShade and Cheeky use F4; RenoDX uses F6. AFW debug uses Ctrl+F6.
+The RenoDX DLSS5 add-on remains in `witcher3vr-reshade-dlss5-reference` and is copied beside the game executable only when selected. Existing unrelated add-ons and ReShade settings are preserved. OptiScaler settings use Delete; ReShade uses F4; RenoDX uses F6. AFW debug uses Ctrl+F6.
 
 Disable DLSS Override before enabling OptiScaler. DLSS5 selections need a DLSS/DLAA render route. The INI `config_version` is a settings-format migration marker, not a required mod build version; a different value does not block launch.
 
@@ -329,7 +330,6 @@ top of the repository.
 
 - [Patrick Mours (crosire) and ReShade contributors](https://github.com/crosire/reshade) — post-processing runtime, overlay and add-on API. The package uses [our unofficial ReShade VR fork](https://github.com/tig3rmast3r/ReShade_VR), based on 6.8.0, with a targeted DirectX 11/12 compatibility fix for the reproduced SteamVR startup crash. Original copyright and license notices are retained.
 - [clshortfuse and contributors / RenoDX](https://github.com/clshortfuse/renodx) — the RenoDX framework. Separate thanks to the authors and contributors of the **DLSS5 Neural Rendering add-on**, distributed through the [RenoDX community](https://discord.com/invite/renodx), for the generic neural-rendering integration used here.
-- [ClarkCheekyKent / Cheeky Foveated DLSS](https://github.com/ClarkCheekyKent/CheekyFoveatedDLSS) — fixed foveated DLSS and experimental neural-rendering support. Witcher3VR uses [our compatibility fork](https://github.com/tig3rmast3r/CheekyFoveatedDLSS) for the game's older Streamline integration.
 - [The OptiScaler team and contributors](https://github.com/optiscaler/OptiScaler) — the original upscaling integration.
 - [Dagherbou / OptiScaler_DLSSNR](https://github.com/Dagherbou/OptiScaler_DLSSNR) — DLSS Neural Rendering support in OptiScaler. [Our VR fork](https://github.com/tig3rmast3r/OptiScaler_DLSSNR_VR) adds separate processing for each eye to prevent flickering and unstable colours.
 - [NVIDIA / Streamline and NGX](https://github.com/NVIDIA-RTX/Streamline) — DLSS technologies and integration interfaces. NVIDIA DLSS5 runtime DLLs are not distributed with Witcher3VR.

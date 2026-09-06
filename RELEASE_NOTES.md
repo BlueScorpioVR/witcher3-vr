@@ -2,17 +2,21 @@
 
 > [!WARNING]
 > Intermittent crashes, hangs and black-screen starts may occur when using
-> the new features, such as OFXR and integrations.
+> ReShade.
 > This development release includes fixes, but does not resolve every case.
+
+> [!IMPORTANT]
+> Alpha 2 includes the new OptiScaler VR v2 for DLSS. It is more stable, moves neural
+> rendering before DLSS and runs 50% faster than ReShade. We strongly recommend
+> using OptiScaler for DLSS.
 
 ## New features
 
 - **ReShade support.**
 - **ReShade DLSS5 support through RenoDX.**
-- **ReShade DLSS5 support through Cheeky Foveated DLSS**, with optional fixed foveated processing.
 - **OptiScaler DLSS5 support**, using our stereo-compatible fork.
 
-All integrations are selectable from the launcher. The default is **Off**; RenoDX and Cheeky are enabled one at a time.
+All integrations are selectable from the launcher. The default is **Off**.
 
 ## Fixes and improvements
 
@@ -25,7 +29,7 @@ All integrations are selectable from the launcher. The default is **Off**; RenoD
 
 ## How to use it
 
-**Everything needed for the integrations is already in the package EXCEPT the NVIDIA DLSS5 DLLs.** ReShade, the RenoDX and Cheeky add-ons, OptiScaler, OFXR and the launcher are already included. No separate ReShade installation or integration add-on package is needed.
+**Everything needed for the integrations is already in the package EXCEPT the NVIDIA DLSS5 DLLs.** ReShade, the RenoDX add-on, OptiScaler, OFXR and the launcher are already included. No separate ReShade installation or integration add-on package is needed.
 
 1. Extract the archive into **The Witcher 3** game folder, merge the folders and overwrite the package files when prompted.
 2. **Only if you want to use DLSS5:** download the DLSS5 files separately from another source, choosing the package for your GPU (**RTX 50xx or RTX 40xx**). Copy only these three files into `The Witcher 3\bin\x64_dx12\witcher3vr-dlss5-reference`:
@@ -44,14 +48,12 @@ You do not need the separate DLSS5 files for ordinary ReShade or OptiScaler. To 
 Thanks to [crosire / ReShade](https://github.com/crosire/reshade),
 [clshortfuse and the RenoDX contributors](https://github.com/clshortfuse/renodx),
 the [DLSS5 Neural Rendering add-on authors](https://discord.com/invite/renodx),
-[ClarkCheekyKent / Cheeky Foveated DLSS](https://github.com/ClarkCheekyKent/CheekyFoveatedDLSS),
 the [OptiScaler team](https://github.com/optiscaler/OptiScaler), and
 [Dagherbou / OptiScaler_DLSSNR](https://github.com/Dagherbou/OptiScaler_DLSSNR).
 Our compatibility changes are available in the
 [ReShade VR fork](https://github.com/tig3rmast3r/ReShade_VR),
-[Cheeky fork](https://github.com/tig3rmast3r/CheekyFoveatedDLSS) and
 [OptiScaler VR fork](https://github.com/tig3rmast3r/OptiScaler_DLSSNR_VR).
 Full component credits are in the README.
 
-Internal build: **V1534**, consolidating the Special Edition integrations and
+Internal build: **V1535**, consolidating the Special Edition integrations and
 subsequent fixes into one release after the standard 0.9.6.

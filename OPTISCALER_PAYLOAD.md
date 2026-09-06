@@ -44,6 +44,16 @@ Create/Evaluate/Release through it.
 
 The DLSS5 mode instead copies the stereo-aware fork DLL, its INI and
 `nvngx.dll_dlssnr.dll` from `witcher3vr-optiscaler-dlss5-reference`.
+This is the VR v2 pre-DLSS build from tag `v0.1.1-dlssnr-vr2`:
+
+- `OptiScaler.dll`, 25,735,680 bytes, SHA-256
+  `1876A8E06A4B280B41380FBB6D3F3EFEE5699175FD631C3D7D95102E572380A6`
+- `OptiScaler.ini`, configured for the Witcher 3 DLSS route, Delete menu key,
+  100% pre-DLSS working scale and bounded capture off; 55,669 bytes, SHA-256
+  `7EB791934CDC2E499DD8D458DC6F5F2CF48F5B74EDC771F5B13611CC6938E557`
+- `nvngx.dll_dlssnr.dll`, 109,056 bytes, SHA-256
+  `BE90DBC0AA368AC1845B99A9AE5129C329F85970E83F885D4BE6E2F128FBE4E0`
+
 That last file is the custom NGX forwarder, not NVIDIA's DLSS5 runtime.
 Only user-supplied `nvngx_dlss.dll`, `nvngx_dlssg.dll` and `nvngx_dlssnr.dll`
 belong in `witcher3vr-dlss5-reference`; distribution leaves that folder empty.

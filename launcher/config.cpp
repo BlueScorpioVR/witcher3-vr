@@ -1115,7 +1115,6 @@ const wchar_t* IntegrationModeDisplayName(IntegrationMode mode) {
         L"OptiScaler + ReShade",
         L"OptiScaler DLSS5",
         L"ReShade DLSS5 RenoDX",
-        L"ReShade DLSS5 Cheeky",
     };
     const auto index = static_cast<size_t>(mode);
     return index < std::size(names) ? names[index] : L"Off";
@@ -1129,13 +1128,11 @@ const char* IntegrationModeIniValue(IntegrationMode mode) noexcept {
     case IntegrationMode::OptiscalerReshade: return "optiscaler_reshade";
     case IntegrationMode::OptiscalerDlss5: return "optiscaler_dlss5";
     case IntegrationMode::ReshadeDlss5: return "reshade_dlss5";
-    case IntegrationMode::ReshadeDlss5Cheeky: return "reshade_dlss5_cheeky";
     default: return "off";
     }
 }
 
 IntegrationMode ParseIntegrationMode(const std::string& value) noexcept {
-    if (value == "reshade_dlss5_cheeky") return IntegrationMode::ReshadeDlss5Cheeky;
     if (value == "optiscaler") return IntegrationMode::Optiscaler;
     if (value == "reshade") return IntegrationMode::Reshade;
     if (value == "optiscaler_reshade") {
@@ -1155,14 +1152,12 @@ bool IntegrationModeUsesOptiscaler(IntegrationMode mode) noexcept {
 }
 
 bool IntegrationModeUsesReshade(IntegrationMode mode) noexcept {
-    if (mode == IntegrationMode::ReshadeDlss5Cheeky) return true;
     return mode == IntegrationMode::Reshade ||
         mode == IntegrationMode::OptiscalerReshade ||
         mode == IntegrationMode::ReshadeDlss5;
 }
 
 bool IntegrationModeUsesDlss5(IntegrationMode mode) noexcept {
-    if (mode == IntegrationMode::ReshadeDlss5Cheeky) return true;
     return mode == IntegrationMode::OptiscalerDlss5 ||
         mode == IntegrationMode::ReshadeDlss5;
 }
@@ -1631,8 +1626,7 @@ LoadResult LoadConfiguration(const ConfigPaths& paths) {
     if (!ModeUsesDlss(result.state.mode)) {
         if (result.state.integration_mode ==
                 IntegrationMode::OptiscalerReshade ||
-            result.state.integration_mode == IntegrationMode::ReshadeDlss5 ||
-            result.state.integration_mode == IntegrationMode::ReshadeDlss5Cheeky) {
+            result.state.integration_mode == IntegrationMode::ReshadeDlss5) {
             result.state.integration_mode = IntegrationMode::Reshade;
         } else if (IntegrationModeUsesOptiscaler(
                        result.state.integration_mode)) {
