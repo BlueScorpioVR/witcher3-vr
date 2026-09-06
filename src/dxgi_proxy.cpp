@@ -721,6 +721,11 @@ struct Config {
 };
 
 Config g_config{};
+
+float cinema_panel_local_y() {
+    return -0.08f * g_config.cinema_scale;
+}
+
 constexpr int kOpenXrModeCleanMono = 1;
 constexpr int kOpenXrModeStereo = 3;
 
@@ -48293,7 +48298,7 @@ void render_openxr_test_frame(
                 current_panel_views[1].pose.position.z) * 0.5f};
         const auto panel_offset = rotate_vector(
             cinema_projection_anchor.orientation,
-            XrVector3f{0.0f, 0.0f, -g_config.menu_distance});
+            XrVector3f{0.0f, cinema_panel_local_y(), -g_config.menu_distance});
         cinema_projection_anchor.position = {
             head_position.x + panel_offset.x,
             head_position.y + panel_offset.y,
@@ -51381,7 +51386,11 @@ void render_openxr_test_frame(
                 anchor_views[1].pose.position.z) * 0.5f};
         const auto panel_offset = rotate_vector(
             anchored_panel_pose.orientation,
-            XrVector3f{0.0f, 0.0f, -g_config.menu_distance});
+            XrVector3f{
+                0.0f,
+                cinema_panel && !fullscreen_menu
+                    ? cinema_panel_local_y() : 0.0f,
+                -g_config.menu_distance});
         anchored_panel_pose.position = {
             head_position.x + panel_offset.x,
             head_position.y + panel_offset.y,
@@ -51410,7 +51419,10 @@ void render_openxr_test_frame(
     menu_layer.pose = anchored_panel_pose_valid
         ? anchored_panel_pose
         : XrPosef{{0.0f, 0.0f, 0.0f, 1.0f},
-            {0.0f, 0.0f, -g_config.menu_distance}};
+            {0.0f,
+                cinema_panel && !fullscreen_menu
+                    ? cinema_panel_local_y() : 0.0f,
+                -g_config.menu_distance}};
     const float spatial_panel_scale = cinema_panel && !fullscreen_menu
         ? g_config.cinema_scale
         : g_config.menu_scale;
