@@ -552,6 +552,7 @@ struct Config {
     bool hud_controller_locked{};
     float menu_scale{0.7f};
     float cinema_scale{0.7f};
+    float cinema_height{-0.20f};
     float cinema_aspect_ratio{5.0f / 4.0f};
     bool cinema_full_vr{false};
     bool steady_icons{false};
@@ -727,7 +728,7 @@ struct Config {
 Config g_config{};
 
 float cinema_panel_local_y() {
-    return -0.08f * g_config.cinema_scale;
+    return g_config.cinema_height * g_config.cinema_scale;
 }
 
 constexpr int kOpenXrModeCleanMono = 1;
@@ -14357,6 +14358,9 @@ void load_config() {
         g_config.cinema_scale = std::clamp(
             read_ini_float("openxr", "cinema_scale", g_config.menu_scale),
             0.3f, 1.5f);
+        g_config.cinema_height = std::clamp(
+            read_ini_float("openxr", "cinema_height", -0.20f),
+            -0.50f, 0.20f);
         const bool legacy_cinema_5x4 = read_ini_bool(
             "openxr", "cinema_5x4", true);
         const auto cinema_aspect = read_ini_string(
