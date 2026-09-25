@@ -239,6 +239,30 @@ int main() {
     assert(hud_scene_only_source_pair_id(true, false, 700, 1400) == 700);
     assert(hud_scene_only_source_pair_id(false, false, 0, 1400) == 1400);
 
+    // Strict gameplay and Cinema consume the completed proof of their exact
+    // retained predecessor. The delayed identity never leaks into AER,
+    // Full VR, another generation, or a malformed relation.
+    assert(strict_stereo_late_hud_proof_pair_id(
+        true, HudProjectionRoute::Gameplay, 9, 9, 42, 41) == 41);
+    assert(strict_stereo_late_hud_proof_pair_id(
+        false, HudProjectionRoute::Gameplay, 9, 9, 42, 41) == 42);
+    assert(strict_stereo_late_hud_proof_pair_id(
+        true, HudProjectionRoute::Cinema, 9, 9, 42, 41) == 41);
+    assert(strict_stereo_late_hud_proof_pair_id(
+        false, HudProjectionRoute::Cinema, 9, 9, 42, 41) == 42);
+    assert(strict_stereo_late_hud_proof_pair_id(
+        true, HudProjectionRoute::Cinema, 9, 8, 42, 41) == 42);
+    assert(strict_stereo_late_hud_proof_pair_id(
+        true, HudProjectionRoute::FullVr, 9, 9, 42, 41) == 42);
+    assert(strict_stereo_late_hud_proof_pair_id(
+        true, HudProjectionRoute::Gameplay, 9, 8, 42, 41) == 42);
+    assert(strict_stereo_late_hud_proof_pair_id(
+        true, HudProjectionRoute::Gameplay, 9, 9, 42, 42) == 42);
+    assert(strict_stereo_late_hud_proof_pair_id(
+        true, HudProjectionRoute::Gameplay, 9, 9, 42, 43) == 42);
+    assert(strict_stereo_late_hud_proof_pair_id(
+        true, HudProjectionRoute::Gameplay, 9, 9, 0, 41) == 0);
+
     // Every route still fails open on its native HUD until that selected final
     // pair proves both eyes were rendered scene-only; the fix changes the
     // queried identity, not the single-owner safety rule.

@@ -5579,6 +5579,7 @@ size_t g_rt_specular_last_write_slot{kRtInvalidHistorySlot};
 // temporal pass.
 std::atomic<bool> g_taau_force_matrix_fallback{};
 std::atomic<bool> g_close_camera_f8_latched{};
+std::atomic<bool> g_manual_cinema_f10_latched{};
 std::atomic<bool> g_first_person_f11_latched{};
 std::atomic<int> g_camera_mode{};
 // [FIX:FIRST-PERSON-AIM-GAMEPLAY-AUTHORITY 1/3] The renderer's exact native
@@ -24981,6 +24982,16 @@ bool mode3_retained_hud_pair_ready_for_active_route() {
     if (!mode3_strict_stereo_submitted_hud_join_active()) {
         return mode3_early_hud_pair_ready();
     }
+    // [FIX:STRICT-STEREO-HUD-EXACT-SOURCE V1556] The accepted fields describe
+    // the newest pair whose two eye labels have completed. With OptiScaler/
+    // DLSS, the immutable capture can already prove the requested settled
+    // predecessor while that label head is still one pair behind. Ask the
+    // same exact-source selector used by the real composite whether that
+    // predecessor is resident in the ring. No consumer slot is reserved by
+    // this readiness query.
+    ID3D12Resource* sources[2]{};
+    DXGI_FORMAT formats[2]{
+        DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN};
     const uint32_t generation =
         g_streamline_capture_generation.load(std::memory_order_acquire);
     const uint32_t target_generation =
@@ -24988,12 +24999,13 @@ bool mode3_retained_hud_pair_ready_for_active_route() {
             std::memory_order_acquire);
     const uint64_t target_pair =
         g_mode3_strict_hud_target_pair.load(std::memory_order_acquire);
-    std::scoped_lock lock{g_mode3_early_hud_mutex};
-    return w3vr::mode3_transport::
-        strict_stereo_retained_hud_pair_fresh(
-            generation, target_generation, target_pair,
-            g_mode3_early_hud_accepted_generation,
-            g_mode3_early_hud_accepted_pair);
+    const uint64_t requested_scene_pair = g_packed_accepted_pair_id;
+    uint64_t selected_pair{};
+    return target_generation == generation && target_pair != 0 &&
+        requested_scene_pair != 0 &&
+        get_mode3_early_hud_pair(
+            sources, formats, requested_scene_pair, &selected_pair) &&
+        selected_pair == target_pair;
 }
 
 // [FIX:RETAINED-EYE-HUD 6/9] Resolve native t1 from the lock-free command-list
@@ -44459,6 +44471,15 @@ bool composite_mode3_hud_into_projection_image(
             const float hud_distance = fabsf(inverse_hud_distance) > 1.0e-6f
                 ? 1.0f / inverse_hud_distance
                 : INFINITY;
+            // One bounded always-on breadcrumb proves that the launcher value
+            // reached the actual headset compositor without enabling the
+            // expensive diagnostic recorder.
+            w3vr::minimal_xr_log::hud(
+                "GEOMETRY",
+                "present=%llu route=%s reference_shift=%d size=%.3f distance_m=%.4f",
+                g_present_count.load(std::memory_order_relaxed),
+                automatic_full_vr_cutscene ? "full_vr" : "gameplay",
+                reference_left_eye_shift, hud_size, hud_distance);
             log_line(
                 "HUD Quest-reference plane active pair=%llu route=%s "
                 "reference_shift=%d size=%.3f distance_m=%.4f "
@@ -48657,14 +48678,40 @@ void render_openxr_test_frame(
     // trace here classified a genuinely scene-only output as "unknown" and
     // suppressed the retained HUD indefinitely. The proof now follows the
     // exact final source selected above.
-    const uint64_t hud_source_pair_id =
+    const uint64_t hud_final_source_pair_id =
         w3vr::mode3_transport::hud_scene_only_source_pair_id(
             sequential_cinema_pair_active,
             mode3_final_source_gameplay_pair_ready,
             hud_scene_pair_id,
             trace_pair_id);
+    // [FIX:STRICT-STEREO-HUD-PROOF-CADENCE V1557] The submitted draw proof
+    // completes one accepted stereo pair after the packed scene identity has
+    // advanced.  V1556 therefore always queried N while the ledger had just
+    // completed exact predecessor H, permanently blocking the late composite
+    // after the native HUD had already been removed.  Apply that cadence only
+    // to strict gameplay or Cinema with an exact same-generation predecessor;
+    // Full VR and final-source/AFW routes retain their existing identities.
+    const uint32_t hud_generation =
+        g_streamline_capture_generation.load(std::memory_order_acquire);
+    const uint32_t strict_hud_target_generation =
+        g_mode3_strict_hud_target_generation.load(std::memory_order_acquire);
+    const uint64_t strict_hud_target_pair =
+        g_mode3_strict_hud_target_pair.load(std::memory_order_acquire);
+    const uint64_t hud_source_pair_id =
+        w3vr::mode3_transport::strict_stereo_late_hud_proof_pair_id(
+            mode3_strict_stereo_submitted_hud_join_active(),
+            hud_projection_route,
+            hud_generation,
+            strict_hud_target_generation,
+            hud_final_source_pair_id,
+            strict_hud_target_pair);
     const bool scene_only_hud_source_ready =
         mode3_scene_only_output_pair_ready(hud_source_pair_id);
+    const bool cinema_predecessor_proof_ready =
+        hud_projection_route == Mode3HudProjectionRoute::Cinema &&
+        strict_hud_target_generation == hud_generation &&
+        strict_hud_target_pair != 0 &&
+        mode3_scene_only_output_pair_ready(strict_hud_target_pair);
     // [FIX:FULL-VR-HUD-SINGLE-OWNER V1235 1/1] Automatic Full VR can become
     // active after one asymmetric eye has already baked the native subtitle.
     // Do not add the retained HUD to that mixed pair. Fail open on the native
@@ -48676,7 +48723,7 @@ void render_openxr_test_frame(
     uint32_t hud_gate_passed{};
     uint32_t hud_gate_failed{};
     const auto hud_gate = [&](uint32_t bit, bool value) {
-        if (value) hud_gate_passed |= bit; else hud_gate_failed = bit;
+        if (value) hud_gate_passed |= bit; else hud_gate_failed |= bit;
         return value;
     };
     bool hud_composite_ready = hud_gate(1, submitted) && hud_gate(2, !fullscreen_menu) &&
@@ -48686,11 +48733,13 @@ void render_openxr_test_frame(
         hud_gate(32, mode3_retained_hud_pair_ready_for_active_route()) &&
         hud_gate(64, hud_source_ready);
     w3vr::minimal_xr_log::hud("GATE",
-        "present=%llu trace=%llu scene=%llu proof_pair=%llu generation=%u route=%u scene_only=%u ready=%u passed=%u failed=%u",
+        "present=%llu trace=%llu scene=%llu proof_pair=%llu generation=%u route=%u scene_only=%u ready=%u passed=%u failed=%u hud_target=%llu hud_target_generation=%u cinema_predecessor_proof=%u",
         current_present, trace_pair_id, hud_scene_pair_id, hud_source_pair_id,
-        g_streamline_capture_generation.load(std::memory_order_relaxed),
+        hud_generation,
         unsigned(hud_projection_route), unsigned(scene_only_hud_source_ready),
-        unsigned(hud_composite_ready), hud_gate_passed, hud_gate_failed);
+        unsigned(hud_composite_ready), hud_gate_passed, hud_gate_failed,
+        strict_hud_target_pair, strict_hud_target_generation,
+        unsigned(cinema_predecessor_proof_ready));
 
     if (submitted) {
         if (!g_xr_first_frame_logged) {
@@ -52642,7 +52691,16 @@ HRESULT STDMETHODCALLTYPE hook_present(IDXGISwapChain* swapchain, UINT sync_inte
             g_camera_mode.load(std::memory_order_relaxed),
             manual_camera_input ? 1 : 0);
     }
-    if ((GetAsyncKeyState(VK_F10) & 1) != 0) {
+    // [FIX:F10-KEY-EDGE V1564] The low "pressed since last query" bit can
+    // be consumed by another process. Sample the physical down state and
+    // latch one edge, matching the neighboring F8/F11 hotkeys.
+    const bool f10_down = (GetAsyncKeyState(VK_F10) & 0x8000) != 0;
+    const bool f10_pressed = f10_down &&
+        !g_manual_cinema_f10_latched.exchange(true, std::memory_order_relaxed);
+    if (!f10_down) {
+        g_manual_cinema_f10_latched.store(false, std::memory_order_relaxed);
+    }
+    if (f10_pressed) {
         const bool forced = !g_force_mono_cinema.load(std::memory_order_relaxed);
         g_force_mono_cinema.store(forced, std::memory_order_release);
         // [FIX:FIRST-PERSON-CINEMA-INPUT-SUSPEND 3/3] Do not wait one Present

@@ -305,6 +305,32 @@ constexpr uint64_t hud_scene_only_source_pair_id(
         : trace_pair_id;
 }
 
+// Strict Stereo publishes the retained HUD for accepted predecessor H while
+// the two submitted HUD command lists that prove scene-only ownership finish
+// during the following stereo cadence. At the OpenXR boundary for scene N,
+// the complete ownership record therefore belongs to exact predecessor H,
+// not to N. This also applies to strict-stereo Cinema: its retained HUD
+// readiness can suppress the baked text at H while the scene-N ownership
+// record has not completed yet. AER/sequential Cinema, Full VR and invalid
+// relations retain the final image identity selected above.
+constexpr uint64_t strict_stereo_late_hud_proof_pair_id(
+    bool strict_stereo_join_active,
+    HudProjectionRoute route,
+    uint32_t current_generation,
+    uint32_t target_generation,
+    uint64_t final_scene_pair_id,
+    uint64_t retained_hud_pair_id) noexcept {
+    return strict_stereo_join_active &&
+        (route == HudProjectionRoute::Gameplay ||
+            route == HudProjectionRoute::Cinema) &&
+        current_generation == target_generation &&
+        final_scene_pair_id != 0 && final_scene_pair_id != UINT64_MAX &&
+        retained_hud_pair_id != 0 && retained_hud_pair_id != UINT64_MAX &&
+        retained_hud_pair_id < final_scene_pair_id
+        ? retained_hud_pair_id
+        : final_scene_pair_id;
+}
+
 // [FIX:HUD-FINAL-SCENE-OWNERSHIP V1536] A missing proof is allowed to block
 // the late composite only after the proof lookup targets that exact published
 // image. This keeps the native-HUD fail-open contract for genuinely baked

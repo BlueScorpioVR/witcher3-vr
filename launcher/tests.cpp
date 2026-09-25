@@ -1774,6 +1774,8 @@ void TestOfxrAndPersistentOptiscalerSave() {
                         std::string(ofxr_logging ? "0" : "1") + "\n");
                     auto state = w3vr::LoadConfiguration(paths).state;
                     state.frame_generation_backend = backend;
+                    state.integration_mode =
+                        w3vr::IntegrationMode::OptiscalerDlss5;
                     state.ofxr_nvidia_preset =
                         w3vr::OfxrNvidiaPreset::Fast;
                     state.ofxr_nvidia_input_scale =
@@ -1836,6 +1838,10 @@ void TestOfxrAndPersistentOptiscalerSave() {
                             root_opti.find("; persistent OptiScaler comment") !=
                                 std::string::npos &&
                             root_opti.find("LogToFile=true") !=
+                                std::string::npos &&
+                            root_opti.find("OverlayMenu=true") !=
+                                std::string::npos &&
+                            root_opti.find("RenderInUpscaler=true") !=
                                 std::string::npos,
                         "persistent OptiScaler.ini was not written");
                     Require(w3vr::SaveConfiguration(paths, state, error) &&

@@ -397,6 +397,13 @@ if(BUILD_TESTING)
     )
 
     add_test(
+        NAME hud_editor_subtitle_live_refresh_contract
+        COMMAND "${CMAKE_COMMAND}"
+            "-DHUD_EDITOR_SCRIPT=${CMAKE_CURRENT_SOURCE_DIR}/support/modWitcher3VRHUDEditor/content/scripts/local/witcher3vr_hud_editor/hud_editor.ws"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/hud_editor_subtitle_live_refresh_contract.cmake"
+    )
+
+    add_test(
         NAME renderer_mode3_projection_transition_contract
         COMMAND "${CMAKE_COMMAND}"
             "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
@@ -615,6 +622,13 @@ if(BUILD_TESTING)
         COMMAND "${CMAKE_COMMAND}"
             "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/taau_recent_exact_submission_authority_contract.cmake"
+    )
+
+    add_test(
+        NAME renderer_f10_key_edge_contract
+        COMMAND "${CMAKE_COMMAND}"
+            "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/f10_key_edge_contract.cmake"
     )
 
     add_test(

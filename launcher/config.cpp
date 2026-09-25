@@ -1921,6 +1921,14 @@ bool BuildUpdatedOptiscalerIniDocument(const ConfigPaths& paths,
         state.frame_generation_backend == FrameGenerationBackend::Fsr3;
     optiscaler.Set("Log", "LogToFile",
         state.optiscaler_logging ? "true" : "false");
+    if (IntegrationModeUsesOptiscaler(state.integration_mode) &&
+        ModeUsesDlss(state.mode)) {
+        // The dxgi proxy can keep OptiScaler's desktop-only overlay route when
+        // these remain on auto. The launcher owns only the two visibility
+        // switches; every other persistent OptiScaler setting is preserved.
+        optiscaler.Set("Menu", "OverlayMenu", "true");
+        optiscaler.Set("Menu", "RenderInUpscaler", "true");
+    }
     optiscaler.Set("ofxr", "enabled", enabled ? "1" : "0");
     optiscaler.Set("ofxr", "frame_generation", fsr ? "fsr3" : "ofxr");
     optiscaler.Set("ofxr", "motion_vectors", fsr ? "dlss" : "off");
