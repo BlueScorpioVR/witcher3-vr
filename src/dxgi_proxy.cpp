@@ -1,4 +1,5 @@
 #include <Windows.h>
+#include "minimal_xr_disk_log.h"
 #include <d3d12.h>
 #include <d3d12shader.h>
 #include <dxgi1_6.h>
@@ -43364,6 +43365,7 @@ void install_xinput_snap_turn_hook() {
 
 void ensure_initialized() {
     std::call_once(g_init_once, []() {
+        w3vr::minimal_xr_log::initialize();
         // [DEBUG:RENDERDOC-DLSS-CAPTURE V12103 3/3] Load the manual INI gate
         // before touching RenderDoc. System32 exports are still frozen first;
         // with the default OFF setting the adjacent DLL is never loaded.
@@ -47949,6 +47951,7 @@ bool native_stereo_capture_ready() {
 void render_openxr_test_frame(
     PoseTimelineEvent trace_reason = PoseTimelineEvent::SubmitOther,
     uint64_t trace_pair_id = 0) {
+    w3vr::minimal_xr_log::write("XR_ENTER", g_present_count.load(std::memory_order_relaxed), trace_pair_id);
     w3vr::pipeline_flight::CpuScope flight_frame_cpu{
         w3vr::pipeline_flight::Phase::XrFrame};
     if (!g_xr_resources_ready || !g_xr_session_running) {
@@ -51316,7 +51319,9 @@ void render_openxr_test_frame(
             const HRESULT close_result = g_xr_command_list->Close();
             if (SUCCEEDED(close_result)) {
                 ID3D12CommandList* lists[] = {g_xr_command_list};
+                w3vr::minimal_xr_log::write("QUEUE_BEGIN", current_present, trace_pair_id, g_xr_fence_value + 1);
                 g_command_queue->ExecuteCommandLists(1, lists);
+                w3vr::minimal_xr_log::write("QUEUE_RETURN", current_present, trace_pair_id, g_xr_fence_value + 1);
                 // [FIX:AER-FULL-VR-COMPLETED-FRAME-AUTHORITY V1209 4/5]
                 // Retire the completed-frame serial only after the command
                 // list containing its final-backbuffer copy has reached the
@@ -51633,7 +51638,9 @@ void render_openxr_test_frame(
     }
     const int64_t flight_end_frame_begin =
         w3vr::pipeline_flight::cpu_begin();
+    w3vr::minimal_xr_log::write("END_BEGIN", current_present, trace_pair_id, g_xr_fence_value, end_info.layerCount);
     result = pfn_xrEndFrame(g_xr_session, &end_info);
+    w3vr::minimal_xr_log::write("END_RETURN", current_present, trace_pair_id, g_xr_fence_value, result);
     w3vr::pipeline_flight::cpu_end(
         w3vr::pipeline_flight::Phase::XrEndFrame,
         flight_end_frame_begin);

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(witcher3vr VERSION 0.1538.0 LANGUAGES C CXX)
+project(witcher3vr VERSION 0.1539.0 LANGUAGES C CXX)
 
 include(CTest)
 
@@ -73,6 +73,10 @@ set_target_properties(witcher3vr_dxgi PROPERTIES OUTPUT_NAME dxgi)
 target_link_options(witcher3vr_dxgi PRIVATE /MAP)
 
 if(BUILD_TESTING)
+    add_executable(w3vr_minimal_xr_disk_log_tests tests/minimal_xr_disk_log_tests.cpp)
+    target_include_directories(w3vr_minimal_xr_disk_log_tests PRIVATE src)
+    target_compile_definitions(w3vr_minimal_xr_disk_log_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    add_test(NAME minimal_xr_log_survives_termination COMMAND w3vr_minimal_xr_disk_log_tests)
     add_executable(w3vr_command_list_identity_tests
         tests/command_list_identity_tests.cpp
         src/command_list_identity.cpp)
