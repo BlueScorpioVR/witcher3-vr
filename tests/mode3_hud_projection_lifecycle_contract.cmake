@@ -98,10 +98,10 @@ if(hud_reset_position EQUAL -1 OR camera_preservation_position EQUAL -1)
 endif()
 
 string(FIND "${dxgi_proxy}"
-    "if (g_mode3_hud_generation_drain_pending.load(\n                std::memory_order_acquire) == generation) {\n            return false;"
+    "if (g_mode3_hud_generation_drain_pending.load(\n                std::memory_order_acquire) == generation) {\n            w3vr::minimal_xr_log::hud(\"FAIL\", \"present=%llu function=capture_mode3_early_hud site=2\", g_present_count.load(std::memory_order_relaxed)); return false;"
     capture_drain_guard)
 string(FIND "${dxgi_proxy}"
-    "if (g_mode3_early_hud_pending_by_command_list.find(command_list) !=\n        g_mode3_early_hud_pending_by_command_list.end()) {\n        return false;"
+    "if (g_mode3_early_hud_pending_by_command_list.find(command_list) !=\n        g_mode3_early_hud_pending_by_command_list.end()) {\n        w3vr::minimal_xr_log::hud(\"FAIL\", \"present=%llu function=capture_mode3_early_hud site=4\", g_present_count.load(std::memory_order_relaxed)); return false;"
     immutable_capture_guard)
 string(FIND "${dxgi_proxy}"
     "if (!projection_toggle && requested_mode < 0) {\n        service_mode3_hud_generation_drain();"

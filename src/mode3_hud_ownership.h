@@ -67,6 +67,7 @@ public:
             *pair = {pair_id, 0};
         }
         const uint32_t eye_bit = 1u << eye;
+        pair->recorded_eyes |= eye_bit;
         if (scene_only) {
             pair->scene_only_eyes |= eye_bit;
         } else {
@@ -86,6 +87,26 @@ public:
         return false;
     }
 
+    // The HUD route is selected uniformly before the final scene transaction.
+    // AFW may publish an accepted pair from one real eye plus one generated
+    // peer, and submitted command-list metadata for ordinary stereo may arrive
+    // for only one eye before that already-complete scene is presented. One
+    // observed scene-only owner therefore admits the pair unless any observed
+    // eye explicitly reports a native/baked HUD. A later native report revokes
+    // admission immediately; missing metadata alone never creates the strobe.
+    bool ready_for_composite(uint32_t generation, uint64_t pair_id) const {
+        if (generation != generation_ || !valid_pair(pair_id)) {
+            return false;
+        }
+        for (const auto& pair : pairs_) {
+            if (pair.id == pair_id) {
+                return pair.recorded_eyes != 0 &&
+                    pair.scene_only_eyes == pair.recorded_eyes;
+            }
+        }
+        return false;
+    }
+
 private:
     static bool valid_pair(uint64_t pair_id) {
         return pair_id != 0 && pair_id != UINT64_MAX;
@@ -93,6 +114,7 @@ private:
     struct Pair {
         uint64_t id{};
         uint32_t scene_only_eyes{};
+        uint32_t recorded_eyes{};
     };
     std::array<Pair, 4> pairs_{};
     uint32_t generation_{};

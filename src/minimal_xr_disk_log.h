@@ -2,12 +2,31 @@
 #include <Windows.h>
 #include <cstdint>
 #include <cstdio>
+#include <cstdarg>
 
-// V1539 trial-only breadcrumbs. Independent of all renderer diagnostic gates.
+// V1542 trial-only breadcrumbs. Independent of all renderer diagnostic gates.
 // One WriteFile per event, no CRT file buffering, flush, worker, GPU query or lock.
 // The OS cache survives process termination, not power loss or an OS failure.
 namespace w3vr::minimal_xr_log {
 inline HANDLE file = INVALID_HANDLE_VALUE;
+inline void hud(const char* event, const char* format, ...) noexcept {
+    if (file == INVALID_HANDLE_VALUE) return;
+    LARGE_INTEGER now{};
+    QueryPerformanceCounter(&now);
+    char line[1024]{};
+    int offset = snprintf(line, sizeof(line), "%lld %lu HUD_%s ",
+        now.QuadPart, GetCurrentThreadId(), event);
+    if (offset <= 0 || offset >= sizeof(line) - 3) return;
+    va_list args;
+    va_start(args, format);
+    const int size = vsnprintf(line + offset, sizeof(line) - offset - 3, format, args);
+    va_end(args);
+    if (size < 0 || size >= sizeof(line) - offset - 3) return;
+    offset += size;
+    line[offset++] = '\r'; line[offset++] = '\n';
+    DWORD written{};
+    WriteFile(file, line, static_cast<DWORD>(offset), &written, nullptr);
+}
 inline void write(const char* event, uint64_t frame = 0, uint64_t pair = 0,
                   uint64_t fence = 0, int64_t result = 0) noexcept {
     if (file == INVALID_HANDLE_VALUE) return;
@@ -32,14 +51,14 @@ inline void initialize() noexcept {
     SYSTEMTIME utc{};
     GetSystemTime(&utc);
     swprintf_s(name, 32768 - (name - path),
-        L"witcher3vr-minimal-V1539-%04u%02u%02u-%02u%02u%02u-%lu.log",
+        L"witcher3vr-minimal-V1542-%04u%02u%02u-%02u%02u%02u-%lu.log",
         utc.wYear, utc.wMonth, utc.wDay, utc.wHour, utc.wMinute, utc.wSecond,
         GetCurrentProcessId());
     file = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
         nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
     LARGE_INTEGER frequency{};
     QueryPerformanceFrequency(&frequency);
-    write("V1539_START_qpc_tid_event_frame_pair_fence_result", 0, 0, 0, frequency.QuadPart);
+    write("V1542_START_qpc_tid_event_frame_pair_fence_result", 0, 0, 0, frequency.QuadPart);
     // Process-lifetime handle: no teardown race with a renderer callback.
 }
 }

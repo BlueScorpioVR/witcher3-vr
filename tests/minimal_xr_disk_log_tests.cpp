@@ -5,6 +5,7 @@ int main(int argc, char**) {
     if (argc > 1) {
         w3vr::minimal_xr_log::initialize();
         w3vr::minimal_xr_log::write("CRASH_SENTINEL", 42, 7, 99, -3);
+        w3vr::minimal_xr_log::hud("TEST", "present=%llu slot=%u serial=%llu reason=%s", 42ull, 2u, 99ull, "pending");
         // No cleanup, CloseHandle, C runtime exit or manual dump.
         TerminateProcess(GetCurrentProcess(), 73);
         return 9;
@@ -27,7 +28,7 @@ int main(int argc, char**) {
     if (code != 73) return 3;
     std::wstring directory(exe);
     directory.resize(directory.find_last_of(L'\\') + 1);
-    const std::wstring pattern = directory + L"witcher3vr-minimal-V1539-*-" +
+    const std::wstring pattern = directory + L"witcher3vr-minimal-V1542-*-" +
         std::to_wstring(process.dwProcessId) + L".log";
     WIN32_FIND_DATAW found{};
     HANDLE search = FindFirstFileW(pattern.c_str(), &found);
@@ -41,8 +42,9 @@ int main(int argc, char**) {
     const bool read = ReadFile(input, bytes, sizeof(bytes) - 1, &count, nullptr) != FALSE;
     CloseHandle(input);
     const std::string contents(bytes, count);
-    const bool valid = read && contents.find("V1539_START_") != std::string::npos &&
-        contents.find("CRASH_SENTINEL 42 7 99 -3\r\n") != std::string::npos;
+    const bool valid = read && contents.find("V1542_START_") != std::string::npos &&
+        contents.find("CRASH_SENTINEL 42 7 99 -3\r\n") != std::string::npos &&
+        contents.find("HUD_TEST present=42 slot=2 serial=99 reason=pending\r\n") != std::string::npos;
     // Remove only the file belonging to this test's child PID.
     DeleteFileW(path.c_str());
     return valid ? 0 : 5;
