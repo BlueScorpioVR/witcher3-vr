@@ -63,7 +63,6 @@ enum class IntegrationMode {
     Optiscaler,
     Reshade,
     OptiscalerReshade,
-    OptiscalerDlss5,
     Count,
 };
 
@@ -108,6 +107,7 @@ struct LauncherState {
     bool ofxr_logging{};
     bool optiscaler_logging{};
     int hud_convergence_delta{-20};
+    bool hud_controller_locked{};
     float presentation_scale{1.0f};
     float world_detail_range{1.0f};
     float menu_scale{0.85f};
@@ -189,7 +189,6 @@ const char* IntegrationModeIniValue(IntegrationMode mode) noexcept;
 IntegrationMode ParseIntegrationMode(const std::string& value) noexcept;
 bool IntegrationModeUsesOptiscaler(IntegrationMode mode) noexcept;
 bool IntegrationModeUsesReshade(IntegrationMode mode) noexcept;
-bool IntegrationModeUsesDlss5(IntegrationMode mode) noexcept;
 std::optional<int> DlssNearSquareCompatibleWidth(const LauncherState& state);
 int CinemaHudConvergenceShift(float hud_scale, int offset);
 int FullVrHudConvergenceShift(float hud_scale, int offset);

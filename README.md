@@ -50,13 +50,12 @@ OFXR is a VR frame-generation system based on optical flow. It can improve smoot
 
 Choose the integration you want directly from the launcher:
 
-- **ReShade support**, on its own or alongside ordinary OptiScaler.
-- **ReShade DLSS5 support through RenoDX.**
-- **OptiScaler DLSS5 support**, using our stereo-compatible fork.
+- **ReShade support**, on its own or alongside OptiScaler.
+- **OptiScaler support**, using our stereo-compatible DLSS5/VR fork.
 
 The bundled ReShade is [our unofficial ReShade VR fork](https://github.com/tig3rmast3r/ReShade_VR), based on ReShade 6.8.0. It includes a targeted fix for a startup crash when SteamVR uses DirectX 11 and 12 together. This fix has been validated with Witcher3VR; it is not a claim of compatibility with every game or VR setup.
 
-Ordinary OptiScaler remains available. Disable DLSS Override before using it. DLSS5 modes are community integrations and require compatible NVIDIA DLLs supplied separately; these files are not included with the mod.
+Disable DLSS Override before using OptiScaler. Its neural-rendering route requires a compatible NVIDIA NR DLL supplied separately; that file is not included with the mod.
 
 ### Cinema Modes
 
@@ -85,7 +84,6 @@ HUD elements can be positioned in VR and saved from inside the game. Separate pr
 | No AA / FXAA / TAAU / DLSS / DLAA | Supported, depending on render mode |
 | OptiScaler | Supported |
 | ReShade | Supported through our fork with the validated SteamVR startup crash fix |
-| DLSS5 via ReShade / RenoDX | Supported; other configurations may still need compatibility fixes |
 | DLSS5 via OptiScaler | Supported through the stereo-compatible fork |
 | OFXR frame generation | Experimental; tested with VDXR and partially with SteamVR OpenXR |
 
@@ -113,15 +111,15 @@ DLSS and DLAA require a compatible NVIDIA GPU. OptiScaler and OFXR have their ow
 
 ## Installation
 
-**Everything needed for the integrations is already included except the NVIDIA DLSS5 DLLs:** ReShade, the RenoDX add-on, OptiScaler, OFXR and the launcher are supplied in the package. You do not need to run the ReShade installer or install a separate integration add-on package.
+**Everything needed for the launcher-managed integrations is already included except the NVIDIA NR DLL:** ReShade, the custom VR OptiScaler, OFXR and the launcher are supplied in the package. ReShade add-ons are optional and user-managed.
 
 1. Extract the release archive into the Witcher 3 game folder, the directory containing `bin`, `content` and `mods`.
 2. Merge the folders and overwrite the package files when prompted.
-3. For DLSS5 modes, download a compatible DLSS5 package separately from another source, choosing the files for your GPU (**RTX 50xx or RTX 40xx**). Copy only `nvngx_dlss.dll`, `nvngx_dlssg.dll` and `nvngx_dlssnr.dll` into `The Witcher 3\bin\x64_dx12\witcher3vr-dlss5-reference`. This folder is empty in the release; do not put other files or folders in it. Ordinary ReShade and OptiScaler do not need this separate DLSS5 package.
+3. To use OptiScaler, obtain a compatible `nvngx_dlssnr.dll` for your GPU (**RTX 50xx or RTX 40xx**) separately and put it in `The Witcher 3\bin\x64_dx12\witcher3vr-dlss5-reference`. This folder is empty in the release. ReShade alone does not need the NR DLL.
 4. Run `bin\x64_dx12\Witcher3VRLauncher.exe`.
-5. Choose your desired integration from the dropdown, then select **Save & Launch**. DLSS5 integrations also need a DLSS/DLAA rendering mode. The launcher handles the file copies and add-on selection automatically; choose **Off** and save to disable the integrations.
+5. Choose Off, OptiScaler, ReShade or OptiScaler + ReShade, then select **Save & Launch**. OptiScaler needs a DLSS/DLAA rendering mode. The launcher handles its own runtime files; choose **Off** and save to disable the integrations. ReShade add-ons, if desired, must be installed and configured separately by the user.
 
-The package layout includes the VR DLL, launcher, OFXR, ReShade, OptiScaler references, configuration, scripts and bundled mod files inside the correct `bin\x64_dx12`, `mods`, `dlc` and `Witcher3VR` folders. The launcher copies the selected integration from its reference folders into the DX12 directory; it never modifies the references. NVIDIA DLSS5 DLLs are not bundled. Install the whole package when changing release versions; replacing only the DLL can leave incompatible files behind.
+The package layout includes the VR DLL, launcher, OFXR, ReShade, one OptiScaler reference, configuration, scripts and bundled mod files inside the correct `bin\x64_dx12`, `mods`, `dlc` and `Witcher3VR` folders. The launcher copies the selected integration from its reference folder into the DX12 directory; it never modifies the references. The NVIDIA NR DLL is not bundled. The root `OptiScaler.ini` stays in place and retains user settings. Install the whole package when changing release versions; replacing only the DLL can leave incompatible files behind.
 
 The separate **RenderDoc Addon** is only for diagnostic captures. It is not required to play.
 
@@ -175,11 +173,11 @@ value to `0` after collecting the run.
 
 ### ReShade and OptiScaler
 
-The integration dropdown offers Off, OptiScaler, ReShade, OptiScaler + ReShade, OptiScaler DLSS5 and ReShade DLSS5 RenoDX. The default is Off.
+The integration dropdown offers Off, OptiScaler, ReShade and OptiScaler + ReShade, in that order. The default is Off.
 
-The RenoDX DLSS5 add-on remains in `witcher3vr-reshade-dlss5-reference` and is copied beside the game executable only when selected. Existing unrelated add-ons and ReShade settings are preserved. OptiScaler settings use Delete; ReShade uses F4; RenoDX uses F6. AFW debug uses Ctrl+F6.
+ReShade is installed as a plain runtime. Its add-ons and their configuration are entirely user-managed: the launcher does not copy, modify or remove them. Existing unrelated add-ons and ReShade settings are preserved. OptiScaler settings use Delete; ReShade uses F4. AFW debug uses Ctrl+F6.
 
-Disable DLSS Override before enabling OptiScaler. DLSS5 selections need a DLSS/DLAA render route. The INI `config_version` is a settings-format migration marker, not a required mod build version; a different value does not block launch.
+Disable DLSS Override before enabling OptiScaler. OptiScaler selections need a DLSS/DLAA render route. The INI `config_version` is a settings-format migration marker, not a required mod build version; a different value does not block launch. The experimental controller-locked HUD option keeps the gameplay HUD aligned to mouse/pad camera turns rather than headset turns; F9 recenters its direction.
 
 ### Cinema
 
@@ -329,7 +327,6 @@ top of the repository.
 ### ReShade, DLSS5 and upscaling
 
 - [Patrick Mours (crosire) and ReShade contributors](https://github.com/crosire/reshade) — post-processing runtime, overlay and add-on API. The package uses [our unofficial ReShade VR fork](https://github.com/tig3rmast3r/ReShade_VR), based on 6.8.0, with a targeted DirectX 11/12 compatibility fix for the reproduced SteamVR startup crash. Original copyright and license notices are retained.
-- [clshortfuse and contributors / RenoDX](https://github.com/clshortfuse/renodx) — the RenoDX framework. Separate thanks to the authors and contributors of the **DLSS5 Neural Rendering add-on**, distributed through the [RenoDX community](https://discord.com/invite/renodx), for the generic neural-rendering integration used here.
 - [The OptiScaler team and contributors](https://github.com/optiscaler/OptiScaler) — the original upscaling integration.
 - [Dagherbou / OptiScaler_DLSSNR](https://github.com/Dagherbou/OptiScaler_DLSSNR) — DLSS Neural Rendering support in OptiScaler. [Our VR fork](https://github.com/tig3rmast3r/OptiScaler_DLSSNR_VR) adds separate processing for each eye to prevent flickering and unstable colours.
 - [sadbee166](https://github.com/sadbee166) — author of [OptiScaler_DLSSNR PR #6](https://github.com/Dagherbou/OptiScaler_DLSSNR/pull/6), which introduced running DLSS Neural Rendering before DLSS upscaling and is the basis of the VR v2 pre-DLSS path.

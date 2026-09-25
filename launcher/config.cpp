@@ -1173,7 +1173,6 @@ const wchar_t* IntegrationModeDisplayName(IntegrationMode mode) {
         L"OptiScaler",
         L"ReShade",
         L"OptiScaler + ReShade",
-        L"OptiScaler DLSS5",
     };
     const auto index = static_cast<size_t>(mode);
     return index < std::size(names) ? names[index] : L"Off";
@@ -1185,7 +1184,6 @@ const char* IntegrationModeIniValue(IntegrationMode mode) noexcept {
     case IntegrationMode::Optiscaler: return "optiscaler";
     case IntegrationMode::Reshade: return "reshade";
     case IntegrationMode::OptiscalerReshade: return "optiscaler_reshade";
-    case IntegrationMode::OptiscalerDlss5: return "optiscaler_dlss5";
     default: return "off";
     }
 }
@@ -1196,9 +1194,7 @@ IntegrationMode ParseIntegrationMode(const std::string& value) noexcept {
     if (value == "optiscaler_reshade") {
         return IntegrationMode::OptiscalerReshade;
     }
-    if (value == "optiscaler_dlss5") {
-        return IntegrationMode::OptiscalerDlss5;
-    }
+    if (value == "optiscaler_dlss5") return IntegrationMode::Optiscaler;
     // Retired launcher-owned RenoDX mode migrates to plain ReShade. Add-ons
     // are user-owned and are no longer copied or configured by the launcher.
     if (value == "reshade_dlss5") return IntegrationMode::Reshade;
@@ -1207,17 +1203,12 @@ IntegrationMode ParseIntegrationMode(const std::string& value) noexcept {
 
 bool IntegrationModeUsesOptiscaler(IntegrationMode mode) noexcept {
     return mode == IntegrationMode::Optiscaler ||
-        mode == IntegrationMode::OptiscalerReshade ||
-        mode == IntegrationMode::OptiscalerDlss5;
+        mode == IntegrationMode::OptiscalerReshade;
 }
 
 bool IntegrationModeUsesReshade(IntegrationMode mode) noexcept {
     return mode == IntegrationMode::Reshade ||
         mode == IntegrationMode::OptiscalerReshade;
-}
-
-bool IntegrationModeUsesDlss5(IntegrationMode mode) noexcept {
-    return mode == IntegrationMode::OptiscalerDlss5;
 }
 
 bool ModeUsesDlss(RenderMode mode) {
@@ -1618,6 +1609,8 @@ LoadResult LoadConfiguration(const ConfigPaths& paths) {
     }
     result.state.hud_convergence_delta = std::clamp(
         ReadInt(*vr, "openxr", "hud_stereo_shift_px", -36) + 16, -64, 64);
+    result.state.hud_controller_locked = ReadBool(
+        *vr, "openxr", "hud_controller_locked", false);
     result.state.presentation_scale = std::clamp(
         ReadFloat(*vr, "openxr", "presentation_scale", 1.0f), 0.5f, 1.0f);
     result.state.world_detail_range = std::clamp(
@@ -1745,6 +1738,8 @@ bool BuildUpdatedDocuments(const ConfigPaths& paths, const LauncherState& state,
         state.fullscreen_projection ? "1" : "0");
     vr_ini.Set("openxr", "hud_stereo_shift_px",
         std::to_string(std::clamp(state.hud_convergence_delta - 16, -256, 256)));
+    vr_ini.Set("openxr", "hud_controller_locked",
+        state.hud_controller_locked ? "1" : "0");
     vr_ini.Set("openxr", "presentation_scale", FloatString(
         state.presentation_scale));
     vr_ini.Set("openxr", "world_detail_range", FloatString(
@@ -1906,9 +1901,8 @@ bool BuildUpdatedOptiscalerIniDocument(const ConfigPaths& paths,
                 L"Checking OptiScaler.ini", paths.optiscaler_ini);
             return false;
         }
-        // This is the one persistent live OptiScaler configuration shared by
-        // both launcher-managed OptiScaler DLL variants. Reference INIs are
-        // deliberately never copied over it.
+        // This is the single persistent root configuration. The launcher
+        // never copies a reference INI over the user's settings.
         optiscaler = IniDocument::FromText(
             "; Witcher 3 VR persistent OptiScaler settings\r\n"
             "[Log]\r\nLogToFile=false\r\n"

@@ -549,6 +549,7 @@ struct Config {
     float hud_vertical_scale{0.7f};
     int hud_stereo_shift_px{-16};
     float hud_size{1.0f};
+    bool hud_controller_locked{};
     float menu_scale{0.7f};
     float cinema_scale{0.7f};
     float cinema_aspect_ratio{5.0f / 4.0f};
@@ -1377,6 +1378,10 @@ float g_hmd_position_y{};
 float g_hmd_position_z{};
 XrVector3f g_mono_neck_pose_correction{};
 std::mutex g_hmd_pose_snapshot_mutex{};
+std::atomic<float> g_hud_game_camera_yaw{};
+std::atomic<float> g_hud_game_camera_pitch{};
+std::atomic<bool> g_hud_game_camera_valid{};
+std::atomic<uint64_t> g_hud_center_generation{};
 
 XrQuaternionf multiply_quaternions(const XrQuaternionf& a, const XrQuaternionf& b);
 XrVector3f rotate_vector(const XrQuaternionf& rotation, const XrVector3f& vector);
@@ -14302,6 +14307,8 @@ void load_config() {
             read_ini_int("openxr", "hud_stereo_shift_px", -16), -256, 256);
         g_config.hud_size = std::clamp(
             read_ini_float("openxr", "hud_size", 1.0f), 0.5f, 1.5f);
+        g_config.hud_controller_locked =
+            read_ini_bool("openxr", "hud_controller_locked", false);
         g_config.menu_scale = std::clamp(
             read_ini_float("openxr", "menu_scale", 0.7f), 0.3f, 1.5f);
         // [FEATURE:CINEMA-ASPECT V1138 1/5] One exact rational owns the
@@ -37437,6 +37444,17 @@ void __fastcall hook_engine_view_rebuild(float* view) {
         const float original_pitch = view[5];
         const float original_yaw = view[6];
         const float original_roll = view[4];
+        if (g_config.hud_controller_locked && world_camera &&
+            g_engine_factory_eye != 1 && std::isfinite(original_yaw) &&
+            std::isfinite(original_pitch)) {
+            g_hud_game_camera_yaw.store(
+                original_yaw, std::memory_order_relaxed);
+            g_hud_game_camera_pitch.store(
+                g_config.hmd_lock_game_pitch ? 0.0f : original_pitch,
+                std::memory_order_relaxed);
+            g_hud_game_camera_valid.store(true,
+                std::memory_order_release);
+        }
         if (!g_config.hmd_compositor_only) {
             const float position_scale = g_config.hmd_position_scale;
             const float local_right = camera_hmd_position_x * position_scale;
@@ -44416,7 +44434,56 @@ bool composite_mode3_hud_into_projection_image(
             hud_geometry_views, hud_eye_geometry) &&
         hud_eye_geometry.baseline_m >= 0.04f &&
         hud_eye_geometry.baseline_m <= 0.10f &&
-        hud_eye_geometry.cant_degrees <= 45.0f;
+            hud_eye_geometry.cant_degrees <= 45.0f;
+    // [TRIAL:CONTROLLER-LOCKED-HUD V1566] Keep the gameplay HUD plane at the
+    // F9-calibrated tracking orientation while using the current physical
+    // eye poses for parallax. Controller/mouse camera turns still move the
+    // game image normally; headset rotation no longer carries the HUD plane.
+    // Reticle, Cinema, Full VR and menu geometry keep their validated route.
+    auto hud_plane_geometry = hud_eye_geometry;
+    if (headset_projection && g_config.hud_controller_locked &&
+        !automatic_full_vr_cutscene) {
+        XrQuaternionf center_orientation{};
+        bool center_valid{};
+        uint64_t center_generation{};
+        {
+            std::scoped_lock pose_lock{g_hmd_pose_snapshot_mutex};
+            center_valid = g_hmd_center_valid.load(
+                std::memory_order_acquire);
+            if (center_valid) {
+                center_orientation = g_hmd_center_orientation;
+                center_generation = g_hud_center_generation.load(
+                    std::memory_order_relaxed);
+            }
+        }
+        // The native camera sample precedes the injected HMD rotation. A
+        // mouse/pad turn therefore rotates this HUD plane, while physical
+        // headset motion changes only the eye-to-plane transform.
+        static uint64_t baseline_generation = UINT64_MAX;
+        static float baseline_yaw{};
+        static float baseline_pitch{};
+        if (g_hud_game_camera_valid.load(std::memory_order_acquire)) {
+            const float game_yaw = g_hud_game_camera_yaw.load(
+                std::memory_order_relaxed);
+            const float game_pitch = g_hud_game_camera_pitch.load(
+                std::memory_order_relaxed);
+            if (baseline_generation != center_generation) {
+                baseline_yaw = game_yaw;
+                baseline_pitch = game_pitch;
+                baseline_generation = center_generation;
+            }
+            center_orientation = multiply_quaternions(center_orientation,
+                quaternion_from_hmd_euler(
+                    shortest_yaw_delta(game_pitch, baseline_pitch),
+                    shortest_yaw_delta(game_yaw, baseline_yaw), 0.0f));
+        }
+        w3vr::openxr_eye_geometry::EyeGeometry fixed_geometry{};
+        if (center_valid &&
+            w3vr::openxr_eye_geometry::with_hud_plane_orientation(
+                hud_eye_geometry, center_orientation, fixed_geometry)) {
+            hud_plane_geometry = fixed_geometry;
+        }
+    }
     for (uint32_t eye = 0; eye < 2 && headset_projection; ++eye) {
         const auto& image_rect = submitted_views[eye].subImage.imageRect;
         const int64_t image_right = static_cast<int64_t>(image_rect.offset.x) +
@@ -44431,7 +44498,7 @@ bool composite_mode3_hud_into_projection_image(
             image_bottom <= target_swapchain.height &&
             w3vr::openxr_eye_geometry::
                 build_cyclopean_hud_plane_clip_positions(
-                    hud_eye_geometry, eye, source_render_fov,
+                    hud_plane_geometry, eye, source_render_fov,
                     submitted_views[eye].fov, hud_size,
                     inverse_hud_distance, hud_clip_positions[eye]);
     }
@@ -45976,6 +46043,7 @@ void update_hmd_freelook_pose() {
     }
     if (manual_recenter || !g_hmd_center_valid.load()) {
         g_hmd_center_orientation = current;
+        g_hud_center_generation.fetch_add(1, std::memory_order_relaxed);
         const float yaw_twist_length = sqrtf(
             current.y * current.y + current.w * current.w);
         g_hmd_center_yaw_orientation = yaw_twist_length > 0.000001f

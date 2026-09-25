@@ -238,6 +238,7 @@ void TestAllModes(const w3vr::ConfigPaths& paths) {
         state.camera_follow_policy = static_cast<w3vr::CameraFollowPolicy>(
             index % 3);
         state.hide_static_hud_outside_combat = index % 2 == 0;
+        state.hud_controller_locked = index % 2 == 0;
         state.fast_movement_transitions = index % 2 == 0;
         state.fullscreen_projection = true;
         state.diagnostic_logging = true;
@@ -359,6 +360,9 @@ void TestAllModes(const w3vr::ConfigPaths& paths) {
             "OpenXR AUTO resolution preference missing");
         Require(vr.Get("openxr", "cinema_full_vr") == "1",
             "automatic full-VR cutscene flag missing");
+        Require(vr.Get("openxr", "hud_controller_locked") ==
+                std::string(state.hud_controller_locked ? "1" : "0"),
+            "controller-locked HUD flag missing");
         Require(vr.Get("openxr", "steady_icons") == "1",
             "steady-icons latency flag missing");
         Require(vr.Get("engine", "first_person_snap_turn") == "1",
@@ -492,6 +496,9 @@ void TestAllModes(const w3vr::ConfigPaths& paths) {
         Require(loaded.state.hide_static_hud_outside_combat ==
                 state.hide_static_hud_outside_combat,
             "round-trip dynamic static-HUD policy mismatch");
+        Require(loaded.state.hud_controller_locked ==
+                state.hud_controller_locked,
+            "round-trip controller-locked HUD mismatch");
         Require(loaded.state.cinema_hud_scale == state.cinema_hud_scale &&
             loaded.state.cinema_hud_convergence_offset ==
                 state.cinema_hud_convergence_offset,
@@ -633,6 +640,8 @@ void TestReleaseDefaults() {
         "camera follow must default to the vehicle-only policy");
     Require(!defaults.hide_static_hud_outside_combat,
         "static-HUD hiding must remain opt-in");
+    Require(!defaults.hud_controller_locked,
+        "controller-locked HUD must remain experimental opt-in");
     Require(defaults.fast_movement_transitions,
         "faster movement transitions must default to enabled");
     Require(!defaults.fullscreen_projection,
@@ -697,12 +706,10 @@ void TestEmbeddedLauncherDefaults() {
 }
 
 void TestIntegrationModeContract() {
-    constexpr std::array<const wchar_t*, 5> expected_display{{
-        L"Off", L"OptiScaler", L"ReShade", L"OptiScaler + ReShade",
-        L"OptiScaler DLSS5"}};
-    constexpr std::array<const char*, 5> expected_ini{{
-        "off", "optiscaler", "reshade", "optiscaler_reshade",
-        "optiscaler_dlss5"}};
+    constexpr std::array<const wchar_t*, 4> expected_display{{
+        L"Off", L"OptiScaler", L"ReShade", L"OptiScaler + ReShade"}};
+    constexpr std::array<const char*, 4> expected_ini{{
+        "off", "optiscaler", "reshade", "optiscaler_reshade"}};
     for (size_t index = 0; index < expected_display.size(); ++index) {
         const auto mode = static_cast<w3vr::IntegrationMode>(index);
         Require(std::wstring_view(w3vr::IntegrationModeDisplayName(mode)) ==
@@ -718,22 +725,18 @@ void TestIntegrationModeContract() {
             w3vr::IntegrationModeUsesOptiscaler(
                 w3vr::IntegrationMode::Optiscaler) &&
             w3vr::IntegrationModeUsesOptiscaler(
-                w3vr::IntegrationMode::OptiscalerReshade) &&
-            w3vr::IntegrationModeUsesOptiscaler(
-                w3vr::IntegrationMode::OptiscalerDlss5),
+                w3vr::IntegrationMode::OptiscalerReshade),
         "OptiScaler integration membership changed");
     Require(w3vr::IntegrationModeUsesReshade(
                 w3vr::IntegrationMode::Reshade) &&
             w3vr::IntegrationModeUsesReshade(
                 w3vr::IntegrationMode::OptiscalerReshade) &&
             !w3vr::IntegrationModeUsesReshade(
-                w3vr::IntegrationMode::OptiscalerDlss5),
+                w3vr::IntegrationMode::Optiscaler),
         "ReShade integration membership changed");
-    Require(w3vr::IntegrationModeUsesDlss5(
-                w3vr::IntegrationMode::OptiscalerDlss5) &&
-            !w3vr::IntegrationModeUsesDlss5(
-                w3vr::IntegrationMode::OptiscalerReshade),
-        "DLSS5 integration membership changed");
+    Require(w3vr::ParseIntegrationMode("optiscaler_dlss5") ==
+            w3vr::IntegrationMode::Optiscaler,
+        "legacy OptiScaler DLSS5 mode must migrate to OptiScaler");
     Require(w3vr::ParseIntegrationMode("reshade_dlss5") ==
             w3vr::IntegrationMode::Reshade,
         "legacy RenoDX mode must migrate to plain ReShade");
@@ -1069,6 +1072,7 @@ void TestDlssLabelsAndLegacyAuto(const w3vr::ConfigPaths& paths) {
 
     vr->Remove("openxr", "cinema_full_vr");
     vr->Remove("openxr", "steady_icons");
+    vr->Remove("openxr", "hud_controller_locked");
     vr->Remove("openxr", "vertical_pitch_enabled");
     vr->Remove("engine", "first_person_combat_exit");
     vr->Remove("engine", "first_person_strafe");
@@ -1086,6 +1090,8 @@ void TestDlssLabelsAndLegacyAuto(const w3vr::ConfigPaths& paths) {
         "missing automatic-cutscene flag must default to enabled");
     Require(!missing_flags.state.steady_icons,
         "missing steady-icons flag must default to disabled");
+    Require(!missing_flags.state.hud_controller_locked,
+        "missing controller-locked HUD flag must default to disabled");
     Require(!missing_flags.state.vertical_pitch_enabled,
         "missing vertical-pitch flag must default to disabled");
     Require(!missing_flags.state.first_person_combat_exit,
@@ -1775,7 +1781,7 @@ void TestOfxrAndPersistentOptiscalerSave() {
                     auto state = w3vr::LoadConfiguration(paths).state;
                     state.frame_generation_backend = backend;
                     state.integration_mode =
-                        w3vr::IntegrationMode::OptiscalerDlss5;
+                        w3vr::IntegrationMode::Optiscaler;
                     state.ofxr_nvidia_preset =
                         w3vr::OfxrNvidiaPreset::Fast;
                     state.ofxr_nvidia_input_scale =

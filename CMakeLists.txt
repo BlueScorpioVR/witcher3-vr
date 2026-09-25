@@ -784,17 +784,10 @@ if(BUILD_TESTING)
     )
 
     add_test(
-        NAME launcher_v23032_exact_composition_contract
+        NAME launcher_v1566_four_integration_modes_contract
         COMMAND "${CMAKE_COMMAND}"
             "-DSOURCE_ROOT=${CMAKE_CURRENT_SOURCE_DIR}"
-            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/launcher_v23032_exact_composition_contract.cmake"
-    )
-
-    add_test(
-        NAME launcher_v23032_dlss5_payload_whitelist_contract
-        COMMAND "${CMAKE_COMMAND}"
-            "-DSOURCE_ROOT=${CMAKE_CURRENT_SOURCE_DIR}"
-            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/launcher_v23032_dlss5_payload_whitelist_contract.cmake"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/launcher_v1566_four_integration_modes_contract.cmake"
     )
 
 endif()

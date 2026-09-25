@@ -51,14 +51,10 @@ std::string ReadFile(const fs::path& path) {
 void StageReferences(const fs::path& root) {
     const auto mod = root / L"witcher3vr-mod-reference";
     const auto reshade = root / L"witcher3vr-reshade-reference";
-    const auto canonical = root / L"witcher3vr-optiscaler-reference";
     const auto modified = root / L"witcher3vr-optiscaler-dlss5-reference";
     const auto dlss5 = root / L"witcher3vr-dlss5-reference";
     WriteFile(mod / L"dxgi.dll", "mod-renderer");
     WriteFile(reshade / L"ReShade64.dll", "reshade-runtime");
-    WriteFile(canonical / L"OptiScaler.dll", "canonical-opti");
-    WriteFile(canonical / L"OptiScaler.ini",
-        "[Menu]\r\nShortcutKey=0x2E\r\n");
     const std::vector<std::wstring> modified_files{
         L"OptiScaler.dll", L"OptiScaler.ini", L"nvngx.dll_dlssnr.dll",
         L"amd_fidelityfx_framegeneration_dx12.dll",
@@ -69,8 +65,6 @@ void StageReferences(const fs::path& root) {
                 ? "[Menu]\r\nShortcutKey=0x2E\r\n"
                 : "modified:" + fs::path(relative).generic_string());
     }
-    WriteFile(dlss5 / L"nvngx_dlss.dll", "rtx40-dlss");
-    WriteFile(dlss5 / L"nvngx_dlssg.dll", "rtx40-dlssg");
     WriteFile(dlss5 / L"nvngx_dlssnr.dll", "rtx40-dlssnr");
 }
 
@@ -117,6 +111,7 @@ void TestAllModesAndReferenceImmutability() {
     const auto references = SnapshotReferences(root);
     WriteFile(root / L"witcher3vr_dxgi.dll", "obsolete-reversed-chain");
     WriteFile(root / L"ReShade64.dll", "obsolete-secondary-runtime");
+    WriteFile(root / L"OptiScaler.dll", "obsolete-optiscaler-runtime");
     WriteFile(root / L"renodx-dlss5-v2.5.addon64", "user-owned-addon");
     WriteFile(root / L"CheekyFoveatedDLSS.addon64", "user-owned-addon");
     WriteFile(root / L"amd_fidelityfx_dx12.dll", "game-owned-ffx");
@@ -130,8 +125,8 @@ void TestAllModesAndReferenceImmutability() {
     Require(ReadFile(root / L"dxgi.dll") == "mod-renderer" &&
             !fs::exists(root / L"witcher3vr_dxgi.dll"),
         "Off did not publish only the renderer proxy");
-    Require(ReadFile(root / L"OptiScaler.dll") == "canonical-opti",
-        "Off did not publish canonical OptiScaler");
+    Require(!fs::exists(root / L"OptiScaler.dll"),
+        "Off left the OptiScaler runtime active");
     Require(!fs::exists(root / L"ReShade64.dll") &&
             ReadFile(root / L"renodx-dlss5-v2.5.addon64") ==
                 "user-owned-addon" &&
@@ -148,27 +143,28 @@ void TestAllModesAndReferenceImmutability() {
             root, w3vr::IntegrationMode::Reshade, error),
         "ReShade mode failed");
     Require(ReadFile(root / L"dxgi.dll") == "mod-renderer" &&
-            ReadFile(root / L"ReShade64.dll") == "reshade-runtime",
+            ReadFile(root / L"ReShade64.dll") == "reshade-runtime" &&
+            !fs::exists(root / L"OptiScaler.dll"),
         "renderer-first ReShade chain is wrong");
     Require(ReadFile(root / L"renodx-dlss5-v2.5.addon64") ==
             "user-owned-addon",
         "plain ReShade touched the user-owned DLSS5 add-on");
     auto ini = ReadFile(root / L"ReShade.ini");
-    Require(ini.find("EnableProxyLibrary=0") != std::string::npos &&
-            ini.find("ProxyLibrary=") != std::string::npos &&
-            ini.find("KeyOverlay=115,0,0,0") != std::string::npos &&
-            ini.find("DisabledAddons=User Addon,Generic Depth") !=
-                std::string::npos &&
-            ini.find("LoadFromDllMain=user.addon64,"
-                     "renodx-dlss5-v2.5.addon64") != std::string::npos,
-        "persistent ReShade settings are wrong");
+    Require(ini == "[ADDON]\r\nDisabledAddons=User Addon\r\n"
+            "LoadFromDllMain=user.addon64,renodx-dlss5-v2.5.addon64\r\n"
+            "[INPUT]\r\nKeyOverlay=36,0,0,0\r\n",
+        "ReShade settings were modified");
 
     Require(w3vr::ApplyManagedIntegrationMode(
             root, w3vr::IntegrationMode::Optiscaler, error),
         "OptiScaler mode failed");
     Require(ReadFile(root / L"dxgi.dll") == "mod-renderer" &&
-            ReadFile(root / L"OptiScaler.dll") == "canonical-opti",
-        "canonical OptiScaler mode is wrong");
+            ReadFile(root / L"OptiScaler.dll") ==
+                "modified:OptiScaler.dll" &&
+            ReadFile(root / L"nvngx_dlssnr.dll") == "rtx40-dlssnr" &&
+            !fs::exists(root / L"nvngx_dlss.dll") &&
+            !fs::exists(root / L"nvngx_dlssg.dll"),
+        "OptiScaler mode did not use the lean NR payload");
     WriteFile(root / L"OptiScaler.ini",
         "; persistent user file\r\n[Log]\r\nLogToFile=true\r\n");
     Require(w3vr::ApplyManagedIntegrationMode(
@@ -176,18 +172,17 @@ void TestAllModesAndReferenceImmutability() {
         "OptiScaler plus ReShade mode failed");
     Require(ReadFile(root / L"dxgi.dll") == "mod-renderer" &&
             ReadFile(root / L"ReShade64.dll") == "reshade-runtime" &&
-            ReadFile(root / L"OptiScaler.dll") == "canonical-opti",
-        "combined canonical mode is wrong");
+            ReadFile(root / L"OptiScaler.dll") ==
+                "modified:OptiScaler.dll",
+        "combined VR OptiScaler mode is wrong");
 
     StageLegacyOptiscalerPayload(root);
     Require(w3vr::ApplyManagedIntegrationMode(
-            root, w3vr::IntegrationMode::OptiscalerDlss5, error),
-        "OptiScaler DLSS5 mode failed");
+            root, w3vr::IntegrationMode::Optiscaler, error),
+        "OptiScaler repeat mode failed");
     Require(ReadFile(root / L"dxgi.dll") == "mod-renderer" &&
             ReadFile(root / L"OptiScaler.dll") ==
                 "modified:OptiScaler.dll" &&
-            ReadFile(root / L"nvngx_dlss.dll") == "rtx40-dlss" &&
-            ReadFile(root / L"nvngx_dlssg.dll") == "rtx40-dlssg" &&
             ReadFile(root / L"nvngx_dlssnr.dll") == "rtx40-dlssnr" &&
             ReadFile(root / L"nvngx.dll_dlssnr.dll") ==
                 "modified:nvngx.dll_dlssnr.dll" &&
@@ -200,7 +195,7 @@ void TestAllModesAndReferenceImmutability() {
             ReadFile(root / L"renodx-dlss5-v2.5.addon64") ==
                 "user-owned-addon" &&
             !fs::exists(root / L"OptiScaler"),
-        "OptiScaler DLSS5 composition is wrong");
+        "OptiScaler composition is wrong");
 
     for (const auto& [path, contents] : references) {
         Require(fs::exists(path) && ReadFile(path) == contents,
@@ -214,23 +209,25 @@ void TestAllModesAndReferenceImmutability() {
     RequireNoStagingFiles(root);
 }
 
-void TestDlss5ReferenceMustBeExact() {
+void TestDlss5ReferenceNeedsOnlyNr() {
     TemporaryDirectory temporary;
     const auto& root = temporary.path;
     StageReferences(root);
     fs::remove(root / L"witcher3vr-dlss5-reference" / L"nvngx_dlssnr.dll");
     std::wstring error;
     Require(!w3vr::ApplyManagedIntegrationMode(
-            root, w3vr::IntegrationMode::OptiscalerDlss5, error) &&
+            root, w3vr::IntegrationMode::Optiscaler, error) &&
             !fs::exists(root / L"dxgi.dll"),
         "incomplete DLSS5 reference was accepted");
     WriteFile(root / L"witcher3vr-dlss5-reference" /
         L"nvngx_dlssnr.dll", "rtx40-dlssnr");
     WriteFile(root / L"witcher3vr-dlss5-reference" / L"OptiScaler.dll",
         "unexpected");
-    Require(!w3vr::ApplyManagedIntegrationMode(
-            root, w3vr::IntegrationMode::OptiscalerDlss5, error),
-        "mixed DLSS5 reference was accepted");
+    Require(w3vr::ApplyManagedIntegrationMode(
+            root, w3vr::IntegrationMode::Optiscaler, error) &&
+            !fs::exists(root / L"nvngx_dlss.dll") &&
+            !fs::exists(root / L"nvngx_dlssg.dll"),
+        "extra reference files should be ignored");
     RequireNoStagingFiles(root);
 }
 
@@ -242,8 +239,7 @@ void TestRepeatedModeAndStaleCleanup() {
 
     const fs::path stale_files[]{
         root / L"nvngx.dll_dlssnr.dll.w3vr-v23032-next",
-        root / L"OptiScaler.dll.w3vr-v23032-next",
-        root / L"ReShade.ini.w3vr-v23032-next"};
+        root / L"OptiScaler.dll.w3vr-v23032-next"};
     for (const auto& path : stale_files) {
         WriteFile(path, "stale");
         Require(SetFileAttributesW(path.c_str(), FILE_ATTRIBUTE_READONLY),
@@ -251,7 +247,7 @@ void TestRepeatedModeAndStaleCleanup() {
     }
 
     const w3vr::IntegrationMode repeated_modes[]{
-        w3vr::IntegrationMode::OptiscalerDlss5,
+        w3vr::IntegrationMode::Optiscaler,
         w3vr::IntegrationMode::Reshade,
         w3vr::IntegrationMode::Off};
     std::wstring error;
@@ -316,7 +312,7 @@ int main() {
     try {
         TestAllModesAndReferenceImmutability();
         TestEveryIntegrationTransition();
-        TestDlss5ReferenceMustBeExact();
+        TestDlss5ReferenceNeedsOnlyNr();
         TestRepeatedModeAndStaleCleanup();
         TestUnknownLegacyFolderEntryIsPreserved();
         return 0;

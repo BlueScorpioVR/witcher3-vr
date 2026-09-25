@@ -244,6 +244,39 @@ bool compute(const std::array<XrView, 2>& views, EyeGeometry& geometry) {
     return true;
 }
 
+bool with_hud_plane_orientation(
+    const EyeGeometry& current,
+    const XrQuaternionf& plane_orientation,
+    EyeGeometry& result) {
+    EyeGeometry candidate = current;
+    if (!normalize(plane_orientation, candidate.cyclopean_orientation) ||
+        !finite(candidate.cyclopean_position)) {
+        return false;
+    }
+    const auto inverse_plane = conjugate(candidate.cyclopean_orientation);
+    for (size_t eye = 0; eye < candidate.eye_orientations.size(); ++eye) {
+        XrQuaternionf normalized_eye{};
+        if (!normalize(current.eye_orientations[eye], normalized_eye)) {
+            return false;
+        }
+        candidate.eye_orientations[eye] = normalized_eye;
+        if (!normalize(multiply(inverse_plane, normalized_eye),
+                candidate.relative_orientations[eye])) {
+            return false;
+        }
+        const auto eye_from_current_center = rotate(
+            current.cyclopean_orientation,
+            current.relative_positions[eye]);
+        candidate.relative_positions[eye] = rotate(
+            inverse_plane, eye_from_current_center);
+        if (!finite(candidate.relative_positions[eye])) {
+            return false;
+        }
+    }
+    result = candidate;
+    return true;
+}
+
 bool derive_asymmetric_projection_descriptor(
     const XrFovf& fov,
     uint32_t render_width,

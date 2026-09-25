@@ -82,6 +82,7 @@ enum ControlId {
     IdFirstPersonAnchorSmoothing,
     IdCameraFollow,
     IdHideStaticHudOutsideCombat,
+    IdHudControllerLocked,
     IdFastMovementTransitions,
     IdCinemaFullVr,
     IdSteadyIcons,
@@ -462,8 +463,7 @@ bool CaptureState(LauncherState& state, std::wstring& error) {
     }
     state.integration_mode = static_cast<IntegrationMode>(integration_mode);
     if (!w3vr::ModeUsesDlss(state.mode) &&
-        (w3vr::IntegrationModeUsesOptiscaler(state.integration_mode) ||
-            w3vr::IntegrationModeUsesDlss5(state.integration_mode))) {
+        w3vr::IntegrationModeUsesOptiscaler(state.integration_mode)) {
         error = L"The selected integration mode requires a DLSS render mode.";
         return false;
     }
@@ -497,9 +497,9 @@ bool CaptureState(LauncherState& state, std::wstring& error) {
         Item(IdOfxrNvidiaBidirectional), BM_GETCHECK, 0, 0) == BST_CHECKED;
     if (state.frame_generation_backend == FrameGenerationBackend::Fsr3 &&
         (!w3vr::ModeUsesDlss(state.mode) ||
-            state.integration_mode != IntegrationMode::OptiscalerDlss5)) {
+            !w3vr::IntegrationModeUsesOptiscaler(state.integration_mode))) {
         error = L"FSR 3.1 VR Framegen requires a DLSS render mode and the "
-            L"OptiScaler DLSS5 integration. Select both before saving or "
+            L"OptiScaler integration. Select both before saving or "
             L"launching the game.";
         return false;
     }
@@ -558,6 +558,8 @@ bool CaptureState(LauncherState& state, std::wstring& error) {
             Item(IdCameraFollow), CB_GETCURSEL, 0, 0)), 0, 2));
     state.hide_static_hud_outside_combat = SendMessageW(
         Item(IdHideStaticHudOutsideCombat), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    state.hud_controller_locked = SendMessageW(
+        Item(IdHudControllerLocked), BM_GETCHECK, 0, 0) == BST_CHECKED;
     state.fast_movement_transitions = SendMessageW(
         Item(IdFastMovementTransitions), BM_GETCHECK, 0, 0) == BST_CHECKED;
     state.cinema_full_vr = SendMessageW(
@@ -979,6 +981,8 @@ void RestoreLauncherDefaults() {
     SendMessageW(Item(IdHideStaticHudOutsideCombat), BM_SETCHECK,
         defaults.hide_static_hud_outside_combat
             ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(Item(IdHudControllerLocked), BM_SETCHECK,
+        defaults.hud_controller_locked ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(Item(IdFastMovementTransitions), BM_SETCHECK,
         defaults.fast_movement_transitions ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(Item(IdCinemaFullVr), BM_SETCHECK,
@@ -1223,6 +1227,8 @@ void PopulateControls() {
     SendMessageW(Item(IdHideStaticHudOutsideCombat), BM_SETCHECK,
         loaded.state.hide_static_hud_outside_combat
             ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(Item(IdHudControllerLocked), BM_SETCHECK,
+        loaded.state.hud_controller_locked ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(Item(IdFastMovementTransitions), BM_SETCHECK,
         loaded.state.fast_movement_transitions
             ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -1292,7 +1298,7 @@ void CreateInterface(HWND window) {
          AddControl(L"EDIT", L"", WS_BORDER | ES_NUMBER | ES_CENTER |
              WS_TABSTOP, 466, 76, 70, 25, IdHeight, WS_EX_CLIENTEDGE)});
     AddTooltips(
-        L"Select one complete integration state. OptiScaler modes require a DLSS render route. Active DLLs are copied from separate reference folders; the DLSS5 reference contains only the three user-supplied NVIDIA DLLs.",
+        L"Select Off, OptiScaler, ReShade or both. OptiScaler requires a DLSS render route and uses the custom VR build. Only the NVIDIA NR DLL is required in the DLSS5 reference.",
         {AddLabel(L"Integration", 38, 116, 95, 22),
          AddCombo(135, 108, 230, IdIntegrationMode)});
     AddTooltip(AddControl(L"BUTTON", L"Comfort and interface", BS_GROUPBOX,
@@ -1387,9 +1393,13 @@ void CreateInterface(HWND window) {
         L"Enables the bundled movement-input fix DLC for faster transitions between movement states.");
 
     AddTooltip(AddControl(L"BUTTON", L"Hide Static HUD Outside Combat",
-        BS_AUTOCHECKBOX | WS_TABSTOP, 38, 582, 510, 26,
+        BS_AUTOCHECKBOX | WS_TABSTOP, 38, 582, 260, 26,
         IdHideStaticHudOutsideCombat),
         L"Hides the minimap, tracked objectives, vitality, buffs, equipped items, damaged-item status, companion panel, and control hints outside combat. Witcher Sense reveals them; combat and horse races preserve navigation information.");
+    AddTooltip(AddControl(L"BUTTON", L"Controller-locked HUD (Experimental)",
+        BS_AUTOCHECKBOX | WS_TABSTOP, 304, 582, 256, 26,
+        IdHudControllerLocked),
+        L"In gameplay, the HUD follows mouse or gamepad camera turns but stays in its F9-calibrated direction as the headset rotates. The reticle, menus and Cinema HUD are unchanged. Press F9 to recenter the HUD direction.");
 
     AddTooltip(AddControl(L"BUTTON", L"First Person and camera", BS_GROUPBOX,
         600, 18, 560, 178),
@@ -1424,7 +1434,7 @@ void CreateInterface(HWND window) {
         600, 210, 560, 100),
         L"Controls the external OFXR V093 OpenXR layer. FSR 3.1 uses the DLSS motion vectors published by the custom OptiScaler build. F2  Toggle between Symmetric and Asymmetric projection. Toggle between symmetric and asymmetric projection.");
     AddTooltips(
-        L"Select the VR frame-generation engine. FSR 3.1 requires both a DLSS render mode and OptiScaler DLSS5.",
+        L"Select the VR frame-generation engine. FSR 3.1 requires both a DLSS render mode and OptiScaler.",
         {AddLabel(L"Engine", 618, 238, 50, 22),
          AddCombo(670, 230, 180, IdOfxrBridge)});
     AddTooltips(
@@ -1471,7 +1481,7 @@ void CreateInterface(HWND window) {
 
     AddTooltip(AddControl(L"BUTTON", L"Debug and integrations", BS_GROUPBOX,
         600, 462, 560, 160),
-        L"Independent diagnostic controls. ReShade, OptiScaler and DLSS5 are selected through the single Integration control above. The DLSS5 reference is read-only.");
+        L"Independent diagnostic controls. Select OptiScaler, ReShade or both with the single Integration control above. Add-ons and their settings remain user-owned.");
     AddTooltip(AddControl(L"BUTTON", L"Diagnostic Logging",
         BS_AUTOCHECKBOX | WS_TABSTOP, 618, 486, 150, 24,
         IdDiagnosticLogging),
@@ -1505,7 +1515,7 @@ void CreateInterface(HWND window) {
         618, 560, 524, 20);
     ApplySmallFont(menu_bindings);
     AddTooltip(menu_bindings,
-        L"Launcher defaults for the three integration overlays. The immutable DLSS5 reference is never edited; the active OptiScaler copy receives DEL.");
+        L"ReShade and OptiScaler menu shortcuts. The launcher does not manage ReShade add-ons or replace the root OptiScaler.ini.");
     HWND optiscaler_bindings = AddLabel(
         L"OptiScaler:  Page Up FPS   |   Page Down FPS view   |   End Frame Generation",
         618, 580, 524, 20);
@@ -1675,7 +1685,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     }
     bounds = FitWindowToWorkArea(bounds);
     HWND window = CreateWindowExW(0, kWindowClass,
-        L"Witcher 3 VR Launcher - V1547",
+        L"Witcher 3 VR Launcher - V1566",
         kWindowStyle,
         bounds.left, bounds.top, bounds.right - bounds.left,
         bounds.bottom - bounds.top, nullptr, nullptr, instance, nullptr);

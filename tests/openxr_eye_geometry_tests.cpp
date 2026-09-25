@@ -475,6 +475,50 @@ void test_canted_hud_plane_and_invalid_fallback() {
         "HUD plane rejects invalid reference baseline");
 }
 
+void test_controller_locked_hud_plane() {
+    const auto turned_head = yaw(20.0f);
+    const auto views = make_views(
+        turned_head, turned_head, {0.0f, 1.6f, 0.0f}, turned_head,
+        {-0.032f, 0.0f, 0.0f}, {0.032f, 0.0f, 0.0f});
+    eye_geometry::EyeGeometry current{};
+    eye_geometry::EyeGeometry fixed{};
+    require(eye_geometry::compute(views, current),
+        "controller-locked HUD current eye geometry");
+    require(eye_geometry::with_hud_plane_orientation(
+        current, {0.0f, 0.0f, 0.0f, 1.0f}, fixed),
+        "controller-locked HUD fixed plane geometry");
+    require_reconstruction(views, fixed,
+        "controller-locked HUD retains physical eye poses");
+    const XrFovf fov{-0.9f, 0.9f, 0.9f, -0.9f};
+    std::array<float, 16> headlocked_clip{};
+    std::array<float, 16> fixed_clip{};
+    require(eye_geometry::build_cyclopean_hud_plane_clip_positions(
+        current, 0, fov, fov, 0.5f, 0.5f, headlocked_clip),
+        "headlocked HUD reference clip");
+    require(eye_geometry::build_cyclopean_hud_plane_clip_positions(
+        fixed, 0, fov, fov, 0.5f, 0.5f, fixed_clip),
+        "controller-locked HUD fixed clip");
+    const float headlocked_center =
+        (headlocked_clip[0] / headlocked_clip[3] +
+            headlocked_clip[4] / headlocked_clip[7]) * 0.5f;
+    const float fixed_center =
+        (fixed_clip[0] / fixed_clip[3] +
+            fixed_clip[4] / fixed_clip[7]) * 0.5f;
+    require(std::fabs(fixed_center - headlocked_center) > 0.1f,
+        "fixed HUD moves in the view when the headset turns");
+    eye_geometry::EyeGeometry recentered{};
+    require(eye_geometry::with_hud_plane_orientation(
+        current, turned_head, recentered),
+        "controller-locked HUD recenter");
+    std::array<float, 16> recentered_clip{};
+    require(eye_geometry::build_cyclopean_hud_plane_clip_positions(
+        recentered, 0, fov, fov, 0.5f, 0.5f, recentered_clip),
+        "controller-locked HUD recentered clip");
+    require(std::fabs(recentered_clip[0] / recentered_clip[3] -
+        headlocked_clip[0] / headlocked_clip[3]) < 1.0e-5f,
+        "F9 recenter restores the HUD to the current head direction");
+}
+
 void test_parallel_headset_adaptation() {
     constexpr float baseline = 0.068047f;
     constexpr float width = 2160.0f;
@@ -896,6 +940,7 @@ int main() {
     test_redengine_descriptor_composition();
     test_quest_reference_hud_plane();
     test_canted_hud_plane_and_invalid_fallback();
+    test_controller_locked_hud_plane();
     test_parallel_headset_adaptation();
     test_asymmetric_projection_descriptor();
     test_asymmetric_presentation_scale();

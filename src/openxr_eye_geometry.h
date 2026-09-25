@@ -81,6 +81,13 @@ XrQuaternionf from_redengine_view_euler_degrees(
 RedEngineViewEulerDegrees to_redengine_view_euler_degrees(
     const XrQuaternionf& orientation);
 bool compute(const std::array<XrView, 2>& views, EyeGeometry& geometry);
+// Re-express the same physical eyes around a fixed HUD-plane orientation.
+// The cyclopean position and eye poses remain current, so only headset
+// rotation is removed from the HUD plane; stereo parallax stays live.
+bool with_hud_plane_orientation(
+    const EyeGeometry& current,
+    const XrQuaternionf& plane_orientation,
+    EyeGeometry& result);
 bool derive_asymmetric_projection_descriptor(
     const XrFovf& fov,
     uint32_t render_width,

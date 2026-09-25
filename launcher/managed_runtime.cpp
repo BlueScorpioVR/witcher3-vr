@@ -3,12 +3,8 @@
 #include <Windows.h>
 
 #include <array>
-#include <cctype>
 #include <filesystem>
-#include <fstream>
 #include <string>
-#include <string_view>
-#include <utility>
 #include <vector>
 
 namespace w3vr {
@@ -21,19 +17,16 @@ namespace fs = std::filesystem;
 // moves, renames or deletes anything inside a reference directory.
 constexpr wchar_t kModReference[] = L"witcher3vr-mod-reference";
 constexpr wchar_t kReshadeReference[] = L"witcher3vr-reshade-reference";
-constexpr wchar_t kOptiscalerReference[] = L"witcher3vr-optiscaler-reference";
 constexpr wchar_t kOptiscalerDlss5Reference[] =
     L"witcher3vr-optiscaler-dlss5-reference";
 constexpr wchar_t kDlss5Reference[] = L"witcher3vr-dlss5-reference";
 constexpr wchar_t kReshadeRuntime[] = L"ReShade64.dll";
 
 constexpr auto kDlss5Files = std::to_array<const wchar_t*>({
-    L"nvngx_dlss.dll", L"nvngx_dlssg.dll", L"nvngx_dlssnr.dll"});
+    L"nvngx_dlssnr.dll"});
 // [FIX:LEAN-DLSS5-REFERENCE V23031 1/1] Publish only the files used by the
 // selected Witcher 3 routes. The FidelityFX DLLs already shipped by the game
 // remain untouched, while optional FSR/XeSS/FG backends are not packaged.
-constexpr auto kCanonicalOptiscalerFiles = std::to_array<const wchar_t*>({
-    L"OptiScaler.dll"});
 constexpr auto kDlss5OptiscalerFiles = std::to_array<const wchar_t*>({
     L"OptiScaler.dll", L"nvngx.dll_dlssnr.dll",
     L"amd_fidelityfx_framegeneration_dx12.dll",
@@ -169,8 +162,7 @@ bool RemoveFileIfPresent(const fs::path& path, std::wstring& error) {
     if (DeleteFileW(path.c_str())) return true;
     const DWORD code = GetLastError();
     // [FIX:IDEMPOTENT-RUNTIME-CLEANUP V23025 2/2] Apply the same not-found
-    // success rule to every inactive root alias and every staged runtime or
-    // ReShade INI file that is removed through this shared helper.
+    // success rule to every inactive root alias and staged runtime file.
     if (IsNotFound(code)) return true;
     error = L"Could not remove inactive integration alias:\n" +
         path.wstring() + L"\n\n" + WindowsError(code);
@@ -255,11 +247,6 @@ bool PublishCopy(CopyOperation& operation, std::wstring& error) {
     return false;
 }
 
-bool SameFilename(std::wstring_view left, std::wstring_view right) {
-    return left.size() == right.size() &&
-        _wcsnicmp(left.data(), right.data(), left.size()) == 0;
-}
-
 bool ValidateDlss5Reference(const fs::path& directory, std::wstring& error) {
     const DWORD attributes = GetFileAttributesW(directory.c_str());
     if (attributes == INVALID_FILE_ATTRIBUTES ||
@@ -269,133 +256,7 @@ bool ValidateDlss5Reference(const fs::path& directory, std::wstring& error) {
             directory.wstring();
         return false;
     }
-    std::array<bool, kDlss5Files.size()> found{};
-    WIN32_FIND_DATAW entry{};
-    const auto pattern = directory / L"*";
-    HANDLE search = FindFirstFileW(pattern.c_str(), &entry);
-    if (search == INVALID_HANDLE_VALUE) {
-        error = L"Could not enumerate the DLSS5 reference directory:\n" +
-            directory.wstring() + L"\n\n" + WindowsError(GetLastError());
-        return false;
-    }
-    do {
-        const std::wstring_view name(entry.cFileName);
-        if (name == L"." || name == L"..") continue;
-        size_t index{};
-        for (; index < kDlss5Files.size(); ++index) {
-            if (SameFilename(name, kDlss5Files[index])) break;
-        }
-        if (index == kDlss5Files.size() ||
-            (entry.dwFileAttributes &
-                (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) !=
-                0) {
-            FindClose(search);
-            error = L"The DLSS5 reference must contain only the three NVIDIA "
-                L"DLLs. Unexpected entry:\n" +
-                (directory / entry.cFileName).wstring();
-            return false;
-        }
-        found[index] = true;
-    } while (FindNextFileW(search, &entry));
-    FindClose(search);
-    for (size_t index = 0; index < found.size(); ++index) {
-        if (!found[index]) {
-            error = L"The DLSS5 reference is incomplete. Missing:\n" +
-                (directory / kDlss5Files[index]).wstring();
-            return false;
-        }
-    }
-    return true;
-}
-
-std::string Trim(std::string_view value) {
-    size_t begin{};
-    while (begin < value.size() &&
-        std::isspace(static_cast<unsigned char>(value[begin])) != 0) ++begin;
-    size_t end = value.size();
-    while (end > begin &&
-        std::isspace(static_cast<unsigned char>(value[end - 1])) != 0) --end;
-    return std::string(value.substr(begin, end - begin));
-}
-
-bool SameToken(std::string_view left, std::string_view right) {
-    return left.size() == right.size() &&
-        _strnicmp(left.data(), right.data(), left.size()) == 0;
-}
-
-void SetCsvToken(IniDocument& document, const std::string& section,
-    const std::string& key, std::string_view token, bool enabled) {
-    std::vector<std::string> tokens;
-    const std::string current = document.Get(section, key).value_or("");
-    size_t begin{};
-    while (begin <= current.size()) {
-        const size_t separator = current.find(',', begin);
-        const size_t end = separator == std::string::npos
-            ? current.size() : separator;
-        std::string candidate = Trim(
-            std::string_view(current).substr(begin, end - begin));
-        if (!candidate.empty() && !SameToken(candidate, token)) {
-            tokens.push_back(std::move(candidate));
-        }
-        if (separator == std::string::npos) break;
-        begin = separator + 1;
-    }
-    if (enabled) tokens.emplace_back(token);
-    if (tokens.empty()) {
-        document.Remove(section, key);
-        return;
-    }
-    std::string value;
-    for (size_t index = 0; index < tokens.size(); ++index) {
-        if (index != 0) value += ',';
-        value += tokens[index];
-    }
-    document.Set(section, key, value);
-}
-
-bool WriteIni(const fs::path& path, const std::string& contents,
-    std::wstring& error) {
-    const fs::path temporary = path.wstring() + L".w3vr-v23032-next";
-    if (!RemoveFileIfPresent(temporary, error) ||
-        !EnsureDirectory(path.parent_path(), error)) return false;
-    {
-        std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
-        output.write(contents.data(),
-            static_cast<std::streamsize>(contents.size()));
-        output.flush();
-        if (!output.good()) {
-            error = L"Could not stage persistent ReShade configuration:\n" +
-                temporary.wstring();
-            return false;
-        }
-    }
-    if (!MakeWritableIfPresent(path, error)) return false;
-    if (MoveFileExW(temporary.c_str(), path.c_str(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) return true;
-    error = L"Could not publish persistent ReShade configuration:\n" +
-        path.wstring() + L"\n\n" + WindowsError(GetLastError());
-    std::wstring ignored;
-    RemoveFileIfPresent(temporary, ignored);
-    return false;
-}
-
-bool ConfigurePersistentReshade(const fs::path& root, bool use_reshade,
-    std::wstring& error) {
-    const auto path = root / L"ReShade.ini";
-    bool present{};
-    if (!InspectRegularFile(path, present, error)) return false;
-    if (!present && !use_reshade) return true;
-    IniDocument document = IniDocument::FromText("");
-    if (present) {
-        const auto loaded = IniDocument::Load(path, error);
-        if (!loaded) return false;
-        document = *loaded;
-    }
-    document.Set("PROXY", "EnableProxyLibrary", "0");
-    document.Set("PROXY", "ProxyLibrary", "");
-    document.Set("INPUT", "KeyOverlay", "115,0,0,0");
-    SetCsvToken(document, "ADDON", "DisabledAddons", "Generic Depth", true);
-    return WriteIni(path, document.Serialize(), error);
+    return RequireReferenceFile(directory / kDlss5Files.front(), error);
 }
 
 template <size_t Count>
@@ -417,16 +278,12 @@ bool ApplyManagedIntegrationMode(const std::filesystem::path& root,
         return false;
     }
     const bool use_reshade = IntegrationModeUsesReshade(desired);
-    const bool use_dlss5 = IntegrationModeUsesDlss5(desired);
-    const bool use_modified_optiscaler =
-        desired == IntegrationMode::OptiscalerDlss5;
+    const bool use_optiscaler = IntegrationModeUsesOptiscaler(desired);
     const auto mod_reference = root / kModReference;
     const auto reshade_reference = root / kReshadeReference;
-    const auto optiscaler_reference = root /
-        (use_modified_optiscaler
-            ? kOptiscalerDlss5Reference : kOptiscalerReference);
+    const auto optiscaler_reference = root / kOptiscalerDlss5Reference;
     const auto dlss5_reference = root / kDlss5Reference;
-    if (use_dlss5 && !ValidateDlss5Reference(dlss5_reference, error)) {
+    if (use_optiscaler && !ValidateDlss5Reference(dlss5_reference, error)) {
         return false;
     }
 
@@ -435,14 +292,11 @@ bool ApplyManagedIntegrationMode(const std::filesystem::path& root,
         operations.push_back({reshade_reference / kReshadeRuntime,
             root / kReshadeRuntime, {}});
     }
-    if (use_modified_optiscaler) {
+    if (use_optiscaler) {
         AppendCopies(operations, optiscaler_reference, root,
             kDlss5OptiscalerFiles);
-    } else {
-        AppendCopies(operations, optiscaler_reference, root,
-            kCanonicalOptiscalerFiles);
     }
-    if (use_dlss5) {
+    if (use_optiscaler) {
         AppendCopies(operations, dlss5_reference, root, kDlss5Files);
     }
     // The known-good renderer remains the DXGI proxy in every mode. It loads
@@ -456,14 +310,15 @@ bool ApplyManagedIntegrationMode(const std::filesystem::path& root,
             return false;
         }
     }
-    if (!ConfigurePersistentReshade(root, use_reshade, error) ||
-        !CleanupLegacyOptiscalerPayload(root, error) ||
-        (!use_modified_optiscaler &&
+    if (!CleanupLegacyOptiscalerPayload(root, error) ||
+        (!use_optiscaler &&
+            !RemoveFileIfPresent(root / L"OptiScaler.dll", error)) ||
+        (!use_optiscaler &&
             !RemoveFileIfPresent(root / L"nvngx.dll_dlssnr.dll", error)) ||
-        (!use_modified_optiscaler &&
+        (!use_optiscaler &&
             !RemoveFileIfPresent(root /
                 L"amd_fidelityfx_framegeneration_dx12.dll", error)) ||
-        (!use_modified_optiscaler &&
+        (!use_optiscaler &&
             !RemoveFileIfPresent(root /
                 L"ofxr_amd_fidelityfx_framegeneration_dx12.dll", error)) ||
         (!use_reshade &&

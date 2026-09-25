@@ -192,20 +192,6 @@ head commit `914963ffb641943fba8f19f3c8654f0620fc68ac`.
 The custom `nvngx.dll_dlssnr.dll` is a forwarding component, not NVIDIA's
 `nvngx_dlssnr.dll`. NVIDIA DLSS5 DLLs are not included.
 
-## RenoDX and DLSS5 Neural Rendering add-on
-
-Credit: clshortfuse and the RenoDX contributors for the framework, and the
-DLSS5 Neural Rendering add-on authors for the generic neural-rendering
-integration distributed through the RenoDX community. The bundled
-`renodx-dlss5-v2.5.addon64` uses the NGX-only configuration required by the
-game's older Streamline integration. NVIDIA's neural-rendering DLLs must be
-obtained separately and are not relicensed by this project.
-
-- Framework source: https://github.com/clshortfuse/renodx
-- Framework license: MIT, Copyright (c) 2025 Carlos Lopez Jr.; retained in
-  `licenses/RenoDX-MIT.txt`.
-- Add-on community: https://discord.com/invite/renodx
-
 ## OFXR Bridge
 
 OFXR Bridge V059 is included as a separate, replaceable OpenXR layer DLL under
