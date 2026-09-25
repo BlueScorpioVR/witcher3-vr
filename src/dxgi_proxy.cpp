@@ -5067,6 +5067,12 @@ std::atomic<uint64_t> g_mode3_hud_composite_success{};
 constexpr uint32_t kMode3EarlyHudSlotCount = 6;
 struct Mode3EarlyHudSlot {
     ID3D12Resource* resource{};
+    // The producer-side copy ring must not overwrite a snapshot while an XR
+    // command list is still sampling it. UINT64_MAX reserves the slot between
+    // command recording and the primary-queue signal; the exact fence value
+    // replaces it immediately after submission.
+    ID3D12Fence* last_use_fence{};
+    uint64_t last_use_fence_value{};
     ID3D12Fence* producer_queue_fence{};
     uint64_t producer_queue_fence_value{};
     ID3D12Fence* tag_producer_queue_fence{};
@@ -24257,6 +24263,10 @@ bool mode3_early_hud_slot_pending_locked(uint32_t slot_index) {
     return false;
 }
 
+bool private_resource_slot_retired(
+    ID3D12Fence* retirement_fence,
+    uint64_t retirement_fence_value);
+
 uint32_t select_mode3_early_hud_write_slot_locked() {
     for (uint32_t attempt = 0;
          attempt < kMode3EarlyHudSlotCount; ++attempt) {
@@ -24265,7 +24275,10 @@ uint32_t select_mode3_early_hud_write_slot_locked() {
             kMode3EarlyHudSlotCount;
         if (slot == g_mode3_early_hud_accepted_slot[0] ||
             slot == g_mode3_early_hud_accepted_slot[1] ||
-            mode3_early_hud_slot_pending_locked(slot)) {
+            mode3_early_hud_slot_pending_locked(slot) ||
+            !private_resource_slot_retired(
+                g_mode3_early_hud_slots[slot].last_use_fence,
+                g_mode3_early_hud_slots[slot].last_use_fence_value)) {
             continue;
         }
         return slot;
@@ -24514,8 +24527,10 @@ bool get_mode3_early_hud_pair(
     bool* shared_fresh_source = nullptr,
     bool require_eye_local_sources = false,
     ID3D12Fence* producer_queue_fences[4] = nullptr,
-    uint64_t producer_queue_fence_values[4] = nullptr) {
+    uint64_t producer_queue_fence_values[4] = nullptr,
+    uint32_t consumer_slots[2] = nullptr) {
     std::scoped_lock lock{g_mode3_early_hud_mutex};
+    uint32_t selected_source_slots[2]{UINT32_MAX, UINT32_MAX};
     if (selected_pair != nullptr) {
         *selected_pair = 0;
     }
@@ -24535,10 +24550,15 @@ bool get_mode3_early_hud_pair(
             producer_queue_fence_values[index] = 0;
         }
     }
-    const auto select_source = [&](uint32_t eye,
-                                   const Mode3EarlyHudSlot& slot) {
+    if (consumer_slots != nullptr) {
+        consumer_slots[0] = UINT32_MAX;
+        consumer_slots[1] = UINT32_MAX;
+    }
+    const auto select_source = [&](uint32_t eye, uint32_t slot_index) {
+        const auto& slot = g_mode3_early_hud_slots[slot_index];
         sources[eye] = slot.resource;
         source_formats[eye] = slot.srv_format;
+        selected_source_slots[eye] = slot_index;
         if (producer_queue_fences != nullptr) {
             producer_queue_fences[eye * 2] =
                 slot.producer_queue_fence;
@@ -24551,6 +24571,22 @@ bool get_mode3_early_hud_pair(
             producer_queue_fence_values[eye * 2 + 1] =
                 slot.tag_producer_queue_fence_value;
         }
+    };
+    const auto reserve_consumer_sources = [&]() {
+        if (consumer_slots == nullptr) {
+            return true;
+        }
+        for (uint32_t eye = 0; eye < 2; ++eye) {
+            const uint32_t slot_index = selected_source_slots[eye];
+            if (slot_index >= kMode3EarlyHudSlotCount) {
+                return false;
+            }
+            consumer_slots[eye] = slot_index;
+            auto& slot = g_mode3_early_hud_slots[slot_index];
+            slot.last_use_fence = g_xr_fence;
+            slot.last_use_fence_value = UINT64_MAX;
+        }
+        return true;
     };
     const uint32_t generation =
         g_streamline_capture_generation.load(std::memory_order_acquire);
@@ -24611,7 +24647,7 @@ bool get_mode3_early_hud_pair(
         if (settled_slot < kMode3EarlyHudSlotCount) {
             const auto& slot = g_mode3_early_hud_slots[settled_slot];
             for (uint32_t eye = 0; eye < 2; ++eye) {
-                select_source(eye, slot);
+                select_source(eye, settled_slot);
             }
             if (selected_pair != nullptr) {
                 *selected_pair = target_pair;
@@ -24622,7 +24658,7 @@ bool get_mode3_early_hud_pair(
             if (shared_fresh_source != nullptr) {
                 *shared_fresh_source = true;
             }
-            return true;
+            return reserve_consumer_sources();
         }
         if (aer_steady_hud_only && target_pair != 0) {
             // Never fall through to the just-completed AER HUD: that is the
@@ -24651,7 +24687,7 @@ bool get_mode3_early_hud_pair(
             if (fallback_slot < kMode3EarlyHudSlotCount) {
                 const auto& slot = g_mode3_early_hud_slots[fallback_slot];
                 for (uint32_t eye = 0; eye < 2; ++eye) {
-                    select_source(eye, slot);
+                    select_source(eye, fallback_slot);
                 }
                 if (selected_pair != nullptr) {
                     *selected_pair = fallback_pair;
@@ -24659,7 +24695,7 @@ bool get_mode3_early_hud_pair(
                 if (shared_fresh_source != nullptr) {
                     *shared_fresh_source = true;
                 }
-                return true;
+                return reserve_consumer_sources();
             }
             return false;
         }
@@ -24713,7 +24749,7 @@ bool get_mode3_early_hud_pair(
                 const auto& slot =
                     g_mode3_early_hud_slots[fresh_slot];
                 for (uint32_t eye = 0; eye < 2; ++eye) {
-                    select_source(eye, slot);
+                    select_source(eye, fresh_slot);
                 }
                 if (shared_fresh_source != nullptr) {
                     *shared_fresh_source = true;
@@ -24724,7 +24760,7 @@ bool get_mode3_early_hud_pair(
                 for (uint32_t eye = 0; eye < 2; ++eye) {
                     const auto& slot =
                         g_mode3_early_hud_slots[exact_slot[eye]];
-                    select_source(eye, slot);
+                    select_source(eye, exact_slot[eye]);
                 }
             }
             if (selected_pair != nullptr) {
@@ -24733,7 +24769,7 @@ bool get_mode3_early_hud_pair(
             if (exact_pair != nullptr) {
                 *exact_pair = true;
             }
-            return true;
+            return reserve_consumer_sources();
         }
     }
     if (g_mode3_early_hud_accepted_pair == 0 ||
@@ -24753,12 +24789,35 @@ bool get_mode3_early_hud_pair(
             slot.pair_id != g_mode3_early_hud_accepted_pair) {
             return false;
         }
-        select_source(eye, slot);
+        select_source(eye, slot_index);
     }
     if (selected_pair != nullptr) {
         *selected_pair = g_mode3_early_hud_accepted_pair;
     }
-    return true;
+    return reserve_consumer_sources();
+}
+
+void finish_mode3_early_hud_consumer(
+    const uint32_t consumer_slots[2],
+    bool submitted,
+    uint64_t fence_value) {
+    if (consumer_slots == nullptr) {
+        return;
+    }
+    std::scoped_lock lock{g_mode3_early_hud_mutex};
+    for (uint32_t eye = 0; eye < 2; ++eye) {
+        const uint32_t slot_index = consumer_slots[eye];
+        if (slot_index >= kMode3EarlyHudSlotCount ||
+            (eye == 1 && slot_index == consumer_slots[0])) {
+            continue;
+        }
+        auto& slot = g_mode3_early_hud_slots[slot_index];
+        if (slot.last_use_fence_value != UINT64_MAX) {
+            continue;
+        }
+        slot.last_use_fence = submitted ? g_xr_fence : nullptr;
+        slot.last_use_fence_value = submitted ? fence_value : 0;
+    }
 }
 
 bool mode3_early_hud_pair_ready() {
@@ -43487,12 +43546,17 @@ void ensure_initialized() {
             // [FIX:STRICT-STEREO-GAMEPLAY-HUD-EYE-AUTHORITY V1496 3/3]
             log_line(
                 "V1496 strict_stereo_gameplay_hud_eye=exact_pso_selected submitted_fallback=gameplay_full_vr_cinema diagnostic_logging_required=0 pointer_exact=unchanged aer=unchanged base=V1495");
-            // [FIX:GAMEPLAY-HUD-CURRENT-SCENE-PROOF V23035 3/3]
+            // [FIX:HUD-FINAL-SCENE-OWNERSHIP V1536]
             log_line(
-                "V23035 gameplay_hud_late_composite=exact_current_scene_pair "
-                "retained_hud_label=accepted_predecessor "
-                "native_hud_bootstrap=preserved baked_fallback=single_owner "
-                "reshade_optiscaler=unchanged");
+                "V1536 hud_late_composite=exact_final_scene_pair "
+                "aer_afw=completed_output_not_ahead_trace "
+                "cinema=completed_sequential_output "
+                "native_hud_bootstrap=preserved baked_fallback=single_owner");
+            // [FIX:RETAINED-HUD-CONSUMER-RETIREMENT V1538]
+            log_line(
+                "V1538 retained_hud_snapshot_lifetime=xr_consumer_fence "
+                "record_to_signal_reservation=1 cross_queue_reuse=retired_only "
+                "aer_afw=1 strict_stereo=1 logging_timing_independent=1");
             // [FIX:RESHADE-OVERLAY-MENU-ISOLATION V23036 3/4]
             log_line(
                 "V23036 reshade_overlay=official_open_close_event "
@@ -43947,7 +44011,8 @@ bool composite_mode3_hud_into_projection_image(
     const XrCompositionLayerProjectionView* submitted_views,
     uint64_t scene_pair_id,
     Mode3HudProjectionRoute route,
-    const CinemaHudProjectionParameters* cinema_parameters) {
+    const CinemaHudProjectionParameters* cinema_parameters,
+    uint32_t consumer_slots[2]) {
     ID3D12Resource* sources[2]{};
     DXGI_FORMAT source_formats[2]{
         DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN};
@@ -43961,7 +44026,8 @@ bool composite_mode3_hud_into_projection_image(
         &selected_hud_pair, &exact_hud_pair,
         &shared_fresh_hud_source,
         route == Mode3HudProjectionRoute::FullVr,
-        hud_producer_fences, hud_producer_fence_values);
+        hud_producer_fences, hud_producer_fence_values,
+        consumer_slots);
     if (!hud_pair_available ||
         g_xr_command_list == nullptr ||
         g_xr_hud_pipeline == nullptr ||
@@ -48381,9 +48447,17 @@ void render_openxr_test_frame(
         : (mode3_final_source_gameplay_pair_ready
             ? g_mode3_afw_sequenced_pair
             : trace_pair_id);
-    const uint64_t hud_source_pair_id = sequential_cinema_pair_active
-        ? hud_scene_pair_id
-        : trace_pair_id;
+    // [FIX:HUD-FINAL-SCENE-OWNERSHIP V1536] DLSS5 can advance the renderer
+    // trace while AER+AFW still publishes its completed pair. Querying the
+    // trace here classified a genuinely scene-only output as "unknown" and
+    // suppressed the retained HUD indefinitely. The proof now follows the
+    // exact final source selected above.
+    const uint64_t hud_source_pair_id =
+        w3vr::mode3_transport::hud_scene_only_source_pair_id(
+            sequential_cinema_pair_active,
+            mode3_final_source_gameplay_pair_ready,
+            hud_scene_pair_id,
+            trace_pair_id);
     const bool scene_only_hud_source_ready =
         mode3_scene_only_output_pair_ready(hud_source_pair_id);
     // [FIX:FULL-VR-HUD-SINGLE-OWNER V1235 1/1] Automatic Full VR can become
@@ -51167,6 +51241,7 @@ void render_openxr_test_frame(
         // XR image in render-target state. Blend the latest HUD into each
         // matching slice before closing this same command list, then submit
         // only the projection layer so scene, markers and HUD share one pose.
+        uint32_t mode3_hud_consumer_slots[2]{UINT32_MAX, UINT32_MAX};
         if (command_list_recording && submitted && hud_composite_ready &&
             (!cinema_panel || cinema_projection_panel_ready)) {
             const bool collect_hud_audit =
@@ -51197,7 +51272,8 @@ void render_openxr_test_frame(
                 projection_eye_shifts_y_px,
                 projection_views.data(),
                 hud_scene_pair_id, hud_projection_route,
-                cinema_panel ? &cinema_hud_parameters : nullptr);
+                cinema_panel ? &cinema_hud_parameters : nullptr,
+                mode3_hud_consumer_slots);
             if (hud_composited) {
                 if (collect_hud_audit) {
                     g_mode3_hud_composite_success.fetch_add(
@@ -51297,6 +51373,15 @@ void render_openxr_test_frame(
         // resources has retired. A failed submission releases it immediately;
         // a successful one is reclaimed only after this exact fence value.
         finish_puredark_afw_xr_bundle(
+            puredark_afw_bundle_submitted,
+            puredark_afw_bundle_fence);
+        // [FIX:RETAINED-HUD-CONSUMER-RETIREMENT V1538] The early-HUD ring is
+        // written by renderer queues and sampled later by the primary XR
+        // queue. Keep every selected immutable snapshot reserved until this
+        // exact XR submission retires; logging can no longer change whether a
+        // producer overwrites pixels that are still in flight.
+        finish_mode3_early_hud_consumer(
+            mode3_hud_consumer_slots,
             puredark_afw_bundle_submitted,
             puredark_afw_bundle_fence);
 

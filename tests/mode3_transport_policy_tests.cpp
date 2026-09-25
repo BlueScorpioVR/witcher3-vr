@@ -22,6 +22,7 @@ int main() {
     using w3vr::mode3_transport::final_backbuffer_route_active;
     using w3vr::mode3_transport::final_color_submission_backend;
     using w3vr::mode3_transport::immutable_pair_view_ready;
+    using w3vr::mode3_transport::hud_scene_only_source_pair_id;
     using w3vr::mode3_transport::late_hud_composite_source_ready;
     using w3vr::mode3_transport::strict_stereo_scene_only_output_pair_id;
     using w3vr::mode3_transport::aer_full_vr_scene_only_admission_ready;
@@ -231,10 +232,16 @@ int main() {
     assert(afw_queued_producer_expired(108, 100));
     assert(afw_queued_producer_expired(1000, 100));
 
-    // Recording and OpenXR submission can straddle an overlay transition.
-    // Every route must fail open on its native HUD until the exact final pair
-    // proves both eyes were rendered scene-only; otherwise the late layer
-    // would draw the same HUD a second time over a baked backbuffer.
+    // The ownership query follows the final image source. In AER+AFW the
+    // completed output may trail DLSS5's current renderer trace; using 1280
+    // below would suppress a valid retained HUD from final pair 640.
+    assert(hud_scene_only_source_pair_id(false, true, 640, 1280) == 640);
+    assert(hud_scene_only_source_pair_id(true, false, 700, 1400) == 700);
+    assert(hud_scene_only_source_pair_id(false, false, 0, 1400) == 1400);
+
+    // Every route still fails open on its native HUD until that selected final
+    // pair proves both eyes were rendered scene-only; the fix changes the
+    // queried identity, not the single-owner safety rule.
     assert(!late_hud_composite_source_ready(
         HudProjectionRoute::Gameplay, false));
     assert(late_hud_composite_source_ready(

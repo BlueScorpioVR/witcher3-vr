@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(witcher3vr VERSION 0.1535.0 LANGUAGES C CXX)
+project(witcher3vr VERSION 0.1538.0 LANGUAGES C CXX)
 
 include(CTest)
 
@@ -734,6 +734,13 @@ if(BUILD_TESTING)
         COMMAND "${CMAKE_COMMAND}"
             "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/command_list_identity_contract.cmake"
+    )
+
+    add_test(
+        NAME renderer_v1538_hud_consumer_retirement_contract
+        COMMAND "${CMAKE_COMMAND}"
+            "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/hud_consumer_retirement_contract.cmake"
     )
 
     add_test(

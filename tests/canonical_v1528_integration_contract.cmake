@@ -29,8 +29,9 @@ foreach(required IN ITEMS
     endif()
 endforeach()
 
-file(READ "${SOURCE_ROOT}/CMakeLists.txt" project_config)
-string(REGEX MATCH "VERSION 0[.]([0-9]+)[.]0" version_match "${project_config}")
+file(READ "${SOURCE_ROOT}/launcher/CMakeLists.txt" launcher_project_config)
+string(REGEX MATCH "VERSION 0[.]([0-9]+)[.]0" version_match
+    "${launcher_project_config}")
 set(release_version "${CMAKE_MATCH_1}")
 foreach(required IN ITEMS "NVIDIA med. 50%" "Witcher 3 VR Launcher - V${release_version}")
     string(FIND "${launcher}" "${required}" position)

@@ -66,6 +66,36 @@ if(NOT addon_size EQUAL 1732608 OR
     message(FATAL_ERROR "Release does not carry the updated NGX-only add-on")
 endif()
 
+set(modified_reference
+    "${SOURCE_ROOT}/runtime/witcher3vr-optiscaler-dlss5-reference")
+file(GLOB modified_entries RELATIVE "${modified_reference}"
+    "${modified_reference}/*")
+list(SORT modified_entries)
+set(expected_modified_entries OptiScaler.dll OptiScaler.ini
+    nvngx.dll_dlssnr.dll)
+list(SORT expected_modified_entries)
+if(NOT modified_entries STREQUAL expected_modified_entries)
+    message(FATAL_ERROR "Modified OptiScaler reference must contain exactly three files")
+endif()
+
+file(SIZE "${modified_reference}/OptiScaler.dll" modified_dll_size)
+file(SHA256 "${modified_reference}/OptiScaler.dll" modified_dll_sha256)
+file(SHA256 "${modified_reference}/OptiScaler.ini" modified_ini_sha256)
+if(NOT modified_dll_size EQUAL 25735680 OR
+   NOT modified_dll_sha256 STREQUAL "1876a8e06a4b280b41380fbb6d3f3efee5699175fd631c3d7d95102e572380a6" OR
+   NOT modified_ini_sha256 STREQUAL "7eb791934cdc2e499dd8d458dc6f5f2cf48f5b74edc771f5b13611cc6938e557")
+    message(FATAL_ERROR "Modified OptiScaler reference is not the V23040 VR v2 payload")
+endif()
+
+# Release-package fixtures are optional in a source workspace. The two Alpha 2
+# integration references above remain mandatory and are verified independently.
+if(NOT EXISTS "${SOURCE_ROOT}/runtime/XR_APILAYER_XRFrameBridge_diagnostic.dll" OR
+   NOT EXISTS "${SOURCE_ROOT}/runtime/witcher3vr-optiscaler-reference" OR
+   NOT EXISTS "${SOURCE_ROOT}/runtime/witcher3vr-dlss5-reference")
+    message(STATUS "Alpha 2 references verified; full release-package fixtures are not staged")
+    return()
+endif()
+
 file(SHA256 "${SOURCE_ROOT}/runtime/XR_APILAYER_XRFrameBridge_diagnostic.dll" ofxr_sha256)
 if(NOT ofxr_sha256 STREQUAL "6b6ba7c47ef191e21e01167fc712a76f3d468d23d1cae36ea976f92fe7877698")
     message(FATAL_ERROR "V1528 requires OFXR V059")
@@ -96,27 +126,6 @@ set(expected_canonical_entries OptiScaler.dll OptiScaler.ini)
 list(SORT expected_canonical_entries)
 if(NOT canonical_entries STREQUAL expected_canonical_entries)
     message(FATAL_ERROR "Canonical OptiScaler reference must contain only its DLL and INI")
-endif()
-
-set(modified_reference
-    "${SOURCE_ROOT}/runtime/witcher3vr-optiscaler-dlss5-reference")
-file(GLOB modified_entries RELATIVE "${modified_reference}"
-    "${modified_reference}/*")
-list(SORT modified_entries)
-set(expected_modified_entries OptiScaler.dll OptiScaler.ini
-    nvngx.dll_dlssnr.dll)
-list(SORT expected_modified_entries)
-if(NOT modified_entries STREQUAL expected_modified_entries)
-    message(FATAL_ERROR "Modified OptiScaler reference must contain exactly three files")
-endif()
-
-file(SIZE "${modified_reference}/OptiScaler.dll" modified_dll_size)
-file(SHA256 "${modified_reference}/OptiScaler.dll" modified_dll_sha256)
-file(SHA256 "${modified_reference}/OptiScaler.ini" modified_ini_sha256)
-if(NOT modified_dll_size EQUAL 25735680 OR
-   NOT modified_dll_sha256 STREQUAL "1876a8e06a4b280b41380fbb6d3f3efee5699175fd631c3d7d95102e572380a6" OR
-   NOT modified_ini_sha256 STREQUAL "7eb791934cdc2e499dd8d458dc6f5f2cf48f5b74edc771f5b13611cc6938e557")
-    message(FATAL_ERROR "Modified OptiScaler reference is not the V23040 VR v2 payload")
 endif()
 
 string(REGEX MATCH

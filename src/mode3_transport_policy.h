@@ -290,12 +290,25 @@ constexpr bool afw_queued_producer_expired(
         present - ready_present >= kAfwStaleProducerMaxAgePresents;
 }
 
-// [FIX:GAMEPLAY-HUD-CURRENT-SCENE-PROOF V23035 1/3] The scene-only decision is
-// made while REDengine records the HUD draw, whereas retained-pair freshness
-// can advance before the later OpenXR submit. An overlay can expose that race:
-// the backbuffer keeps its baked HUD, then the late path adds the retained HUD
-// again. Every route must therefore prove that the exact published scene pair
-// was rendered scene-only before it may composite the late HUD.
+// The late compositor must query ownership with the identity of the image it
+// will actually publish. AER+AFW presents the completed AFW pair, not the
+// renderer's newer trace pair; Cinema likewise presents its completed
+// sequential pair. Strict Stereo without either final-source route continues
+// to own the trace pair directly.
+constexpr uint64_t hud_scene_only_source_pair_id(
+    bool sequential_source_active,
+    bool afw_final_source_ready,
+    uint64_t final_scene_pair_id,
+    uint64_t trace_pair_id) noexcept {
+    return sequential_source_active || afw_final_source_ready
+        ? final_scene_pair_id
+        : trace_pair_id;
+}
+
+// [FIX:HUD-FINAL-SCENE-OWNERSHIP V1536] A missing proof is allowed to block
+// the late composite only after the proof lookup targets that exact published
+// image. This keeps the native-HUD fail-open contract for genuinely baked
+// output without mistaking DLSS5's ahead-of-AFW trace pair for the output.
 constexpr bool late_hud_composite_source_ready(
     HudProjectionRoute /*route*/,
     bool scene_only_pair_ready) noexcept {
