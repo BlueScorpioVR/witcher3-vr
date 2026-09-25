@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(witcher3vr VERSION 0.1544.0 LANGUAGES C CXX)
+project(witcher3vr VERSION 0.1552.0 LANGUAGES C CXX)
 
 include(CTest)
 
@@ -73,6 +73,11 @@ set_target_properties(witcher3vr_dxgi PROPERTIES OUTPUT_NAME dxgi)
 target_link_options(witcher3vr_dxgi PRIVATE /MAP)
 
 if(BUILD_TESTING)
+    add_executable(w3vr_swapchain_identity_tests tests/swapchain_identity_tests.cpp)
+    target_include_directories(w3vr_swapchain_identity_tests PRIVATE src)
+    target_compile_definitions(w3vr_swapchain_identity_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_link_libraries(w3vr_swapchain_identity_tests PRIVATE d3d12 dxgi dxguid user32)
+    add_test(NAME renderer_present_swapchain_identity COMMAND w3vr_swapchain_identity_tests)
     add_executable(w3vr_hud_producer_publication_tests tests/hud_producer_publication_tests.cpp)
     target_include_directories(w3vr_hud_producer_publication_tests PRIVATE src)
     add_test(NAME hud_producer_publication_order COMMAND w3vr_hud_producer_publication_tests)
@@ -403,6 +408,13 @@ if(BUILD_TESTING)
         COMMAND "${CMAKE_COMMAND}"
             "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/mode3_hud_projection_lifecycle_contract.cmake"
+    )
+
+    add_test(
+        NAME renderer_cinema_hud_freshness_contract
+        COMMAND "${CMAKE_COMMAND}"
+            "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/cinema_hud_freshness_contract.cmake"
     )
 
     add_test(

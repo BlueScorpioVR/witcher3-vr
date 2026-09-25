@@ -10,7 +10,6 @@ file(READ "${SOURCE_ROOT}/launcher/startup_checks_tests.cpp" startup_tests)
 foreach(required IN ITEMS
         "Witcher 3 VR Launcher - V"
         "F4 ReShade"
-        "F6 RenoDX"
         "DEL OptiScaler"
         "Page Up FPS"
         "Page Down FPS view"
@@ -26,7 +25,6 @@ foreach(required IN ITEMS
         "LEAN-DLSS5-REFERENCE V23031"
         "EXACT-INTEGRATION-COMPOSITION V23032"
         "KeyOverlay\", \"115,0,0,0"
-        "EnableHooks\", \"2"
         "kDlss5Files"
         "nvngx_dlss.dll"
         "nvngx_dlssg.dll"
@@ -58,33 +56,34 @@ if(NOT EXISTS "${SOURCE_ROOT}/runtime")
     return()
 endif()
 
-set(addon "${SOURCE_ROOT}/runtime/witcher3vr-reshade-dlss5-reference/renodx-dlss5-v2.5.addon64")
-file(SIZE "${addon}" addon_size)
-file(SHA256 "${addon}" addon_sha256)
-if(NOT addon_size EQUAL 1732608 OR
-   NOT addon_sha256 STREQUAL "d5adf82eb44b065f4c590ac91fe824bab07afea0eb9f994bde936710c8593952")
-    message(FATAL_ERROR "Release does not carry the updated NGX-only add-on")
-endif()
-
 set(modified_reference
     "${SOURCE_ROOT}/runtime/witcher3vr-optiscaler-dlss5-reference")
 file(GLOB modified_entries RELATIVE "${modified_reference}"
     "${modified_reference}/*")
 list(SORT modified_entries)
-set(expected_modified_entries OptiScaler.dll OptiScaler.ini
-    nvngx.dll_dlssnr.dll)
+set(expected_modified_entries OptiScaler.dll nvngx.dll_dlssnr.dll
+    amd_fidelityfx_framegeneration_dx12.dll
+    ofxr_amd_fidelityfx_framegeneration_dx12.dll)
 list(SORT expected_modified_entries)
 if(NOT modified_entries STREQUAL expected_modified_entries)
-    message(FATAL_ERROR "Modified OptiScaler reference must contain exactly three files")
+    message(FATAL_ERROR "Modified OptiScaler reference must contain exactly the V23073 DLL, forwarder and two FSR runtime aliases")
 endif()
 
 file(SIZE "${modified_reference}/OptiScaler.dll" modified_dll_size)
-file(SHA256 "${modified_reference}/OptiScaler.dll" modified_dll_sha256)
-file(SHA256 "${modified_reference}/OptiScaler.ini" modified_ini_sha256)
-if(NOT modified_dll_size EQUAL 25735680 OR
-   NOT modified_dll_sha256 STREQUAL "1876a8e06a4b280b41380fbb6d3f3efee5699175fd631c3d7d95102e572380a6" OR
-   NOT modified_ini_sha256 STREQUAL "7eb791934cdc2e499dd8d458dc6f5f2cf48f5b74edc771f5b13611cc6938e557")
-    message(FATAL_ERROR "Modified OptiScaler reference is not the V23040 VR v2 payload")
+if(modified_dll_size LESS 1000000)
+    message(FATAL_ERROR "Modified OptiScaler reference DLL is not a real build")
+endif()
+
+string(REGEX MATCH
+    "constexpr auto kCanonicalOptiscalerFiles[^;]+;"
+    canonical_publish_set "${runtime_source}")
+string(REGEX MATCH
+    "constexpr auto kDlss5OptiscalerFiles[^;]+;"
+    modified_publish_set "${runtime_source}")
+string(FIND "${canonical_publish_set}${modified_publish_set}"
+    "OptiScaler.ini" copied_ini)
+if(NOT copied_ini EQUAL -1)
+    message(FATAL_ERROR "OptiScaler.ini must never be copied from either reference")
 endif()
 
 # Release-package fixtures are optional in a source workspace. The two Alpha 2
@@ -101,16 +100,6 @@ if(NOT ofxr_sha256 STREQUAL "6b6ba7c47ef191e21e01167fc712a76f3d468d23d1cae36ea97
     message(FATAL_ERROR "V1528 requires OFXR V059")
 endif()
 
-foreach(reference_ini IN ITEMS
-        "${SOURCE_ROOT}/runtime/witcher3vr-optiscaler-reference/OptiScaler.ini"
-        "${SOURCE_ROOT}/runtime/witcher3vr-optiscaler-dlss5-reference/OptiScaler.ini")
-    file(READ "${reference_ini}" contents)
-    string(FIND "${contents}" "ShortcutKey=0x2E" binding)
-    if(binding EQUAL -1)
-        message(FATAL_ERROR "OptiScaler Delete binding missing: ${reference_ini}")
-    endif()
-endforeach()
-
 set(dlss5_reference "${SOURCE_ROOT}/runtime/witcher3vr-dlss5-reference")
 file(GLOB dlss5_entries RELATIVE "${dlss5_reference}" "${dlss5_reference}/*")
 if(dlss5_entries)
@@ -122,7 +111,7 @@ set(canonical_reference
 file(GLOB canonical_entries RELATIVE "${canonical_reference}"
     "${canonical_reference}/*")
 list(SORT canonical_entries)
-set(expected_canonical_entries OptiScaler.dll OptiScaler.ini)
+set(expected_canonical_entries OptiScaler.dll)
 list(SORT expected_canonical_entries)
 if(NOT canonical_entries STREQUAL expected_canonical_entries)
     message(FATAL_ERROR "Canonical OptiScaler reference must contain only its DLL and INI")

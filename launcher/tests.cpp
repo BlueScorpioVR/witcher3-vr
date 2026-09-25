@@ -100,7 +100,7 @@ struct TempDirectory {
 w3vr::ConfigPaths MakePaths(const fs::path& root) {
     return {root, root / "witcher3vr.ini", root / "optiscaler_bridge.ini",
         root / "ofxr_bridge.ini", root / "dx12user.settings",
-        root / "witcher3.exe"};
+        root / "witcher3.exe", root / "OptiScaler.ini"};
 }
 
 void WriteBaseFixtures(const w3vr::ConfigPaths& paths) {
@@ -438,8 +438,8 @@ void TestAllModes(const w3vr::ConfigPaths& paths) {
         Require(w3vr::BuildUpdatedOfxrDocument(
                 paths, state, ofxr, error),
             "OFXR Bridge sidecar document build failed");
-        const std::array<std::string, 3> expected_ofxr{
-            "off", "fidelityfx", "nvidia"};
+        const std::array<std::string, 4> expected_ofxr{
+            "off", "fidelityfx", "nvidia", "fidelityfx"};
         Require(ofxr.Get("ofxr", "backend") ==
                 expected_ofxr[static_cast<size_t>(
                     state.frame_generation_backend)],
@@ -697,12 +697,12 @@ void TestEmbeddedLauncherDefaults() {
 }
 
 void TestIntegrationModeContract() {
-    constexpr std::array<const wchar_t*, 6> expected_display{{
+    constexpr std::array<const wchar_t*, 5> expected_display{{
         L"Off", L"OptiScaler", L"ReShade", L"OptiScaler + ReShade",
-        L"OptiScaler DLSS5", L"ReShade DLSS5 RenoDX"}};
-    constexpr std::array<const char*, 6> expected_ini{{
+        L"OptiScaler DLSS5"}};
+    constexpr std::array<const char*, 5> expected_ini{{
         "off", "optiscaler", "reshade", "optiscaler_reshade",
-        "optiscaler_dlss5", "reshade_dlss5"}};
+        "optiscaler_dlss5"}};
     for (size_t index = 0; index < expected_display.size(); ++index) {
         const auto mode = static_cast<w3vr::IntegrationMode>(index);
         Require(std::wstring_view(w3vr::IntegrationModeDisplayName(mode)) ==
@@ -726,18 +726,17 @@ void TestIntegrationModeContract() {
                 w3vr::IntegrationMode::Reshade) &&
             w3vr::IntegrationModeUsesReshade(
                 w3vr::IntegrationMode::OptiscalerReshade) &&
-            w3vr::IntegrationModeUsesReshade(
-                w3vr::IntegrationMode::ReshadeDlss5) &&
             !w3vr::IntegrationModeUsesReshade(
                 w3vr::IntegrationMode::OptiscalerDlss5),
         "ReShade integration membership changed");
     Require(w3vr::IntegrationModeUsesDlss5(
                 w3vr::IntegrationMode::OptiscalerDlss5) &&
-            w3vr::IntegrationModeUsesDlss5(
-                w3vr::IntegrationMode::ReshadeDlss5) &&
             !w3vr::IntegrationModeUsesDlss5(
                 w3vr::IntegrationMode::OptiscalerReshade),
         "DLSS5 integration membership changed");
+    Require(w3vr::ParseIntegrationMode("reshade_dlss5") ==
+            w3vr::IntegrationMode::Reshade,
+        "legacy RenoDX mode must migrate to plain ReShade");
 }
 
 void TestHudEditorSetup(const fs::path& root) {
@@ -751,7 +750,8 @@ void TestHudEditorSetup(const fs::path& root) {
         launcher_directory / "optiscaler_bridge.ini",
         launcher_directory / "ofxr_bridge.ini",
         documents / "dx12user.settings",
-        launcher_directory / "witcher3.exe"};
+        launcher_directory / "witcher3.exe",
+        launcher_directory / "OptiScaler.ini"};
     const fs::path script = game / "mods" / "modWitcher3VRHUDEditor" /
         "content" / "scripts" / "local" / "witcher3vr_hud_editor" /
         "hud_editor.ws";
@@ -1754,7 +1754,7 @@ void TestOfxrLaunchEnvironment(const fs::path& root) {
     SetEnvironmentVariableW(L"XRFG_FLOW_BACKEND", nullptr);
 }
 
-void TestOfxrBackendOnlySave() {
+void TestOfxrAndPersistentOptiscalerSave() {
     TempDirectory temporary;
     const auto paths = MakePaths(temporary.path);
     WriteBaseFixtures(paths);
@@ -1764,7 +1764,8 @@ void TestOfxrBackendOnlySave() {
     // a manual recorder change made after the launcher loaded its UI state.
     for (const auto backend : {w3vr::FrameGenerationBackend::Off,
             w3vr::FrameGenerationBackend::FidelityFx,
-            w3vr::FrameGenerationBackend::Nvidia}) {
+            w3vr::FrameGenerationBackend::Nvidia,
+            w3vr::FrameGenerationBackend::Fsr3}) {
         for (const bool mod_logging : {false, true}) {
             for (const bool ofxr_logging : {false, true}) {
                 for (const bool supplied_profile : {false, true}) {
@@ -1773,7 +1774,16 @@ void TestOfxrBackendOnlySave() {
                         std::string(ofxr_logging ? "0" : "1") + "\n");
                     auto state = w3vr::LoadConfiguration(paths).state;
                     state.frame_generation_backend = backend;
+                    state.ofxr_nvidia_preset =
+                        w3vr::OfxrNvidiaPreset::Fast;
+                    state.ofxr_nvidia_input_scale =
+                        w3vr::OfxrNvidiaInputScale::ThreeQuarter;
+                    state.ofxr_nvidia_bidirectional = true;
                     state.diagnostic_logging = mod_logging;
+                    state.ofxr_logging = ofxr_logging;
+                    state.optiscaler_logging = true;
+                    state.ofxr_overlay_position =
+                        w3vr::OfxrOverlayPosition::LowerLeft;
 
                     // Deliberately mixed line endings, comments, unknown keys,
                     // a separate backend key and no trailing newline.
@@ -1789,18 +1799,45 @@ void TestOfxrBackendOnlySave() {
                         "nvidia_bidirectional=1\r\n; keep this comment\n"
                         "future_option=keep\r\n[unrelated]\nbackend=untouched";
                     Write(paths.ofxr_bridge_ini, before);
-                    std::string expected = before;
-                    const char* backend_value =
-                        backend == w3vr::FrameGenerationBackend::Off ? "off" :
+                    Write(paths.optiscaler_ini,
+                        "; persistent OptiScaler comment\r\n"
+                        "[General]\r\nFutureOption=keep\r\n"
+                        "[Log]\r\nLogToFile=false\r\n");
+                    auto expected_doc = w3vr::IniDocument::FromText(before);
+                    const bool enabled =
+                        backend != w3vr::FrameGenerationBackend::Off;
+                    const bool fsr = backend ==
+                        w3vr::FrameGenerationBackend::Fsr3;
+                    const char* backend_value = backend ==
+                            w3vr::FrameGenerationBackend::Off ? "off" :
                         backend == w3vr::FrameGenerationBackend::Nvidia
                             ? "nvidia" : "fidelityfx";
-                    expected.replace(expected.find("backend =fidelityfx"),
-                        std::string("backend =fidelityfx").size(),
-                        "backend =" + std::string(backend_value));
+                    expected_doc.Set("ofxr", "enabled", enabled ? "1" : "0");
+                    expected_doc.Set("ofxr", "frame_generation",
+                        fsr ? "fsr3" : "ofxr");
+                    expected_doc.Set("ofxr", "motion_vectors",
+                        fsr ? "dlss" : "off");
+                    expected_doc.Set("ofxr", "backend", backend_value);
+                    expected_doc.Set("ofxr", "nvidia_preset", "fast");
+                    expected_doc.Set("ofxr", "nvidia_input_scale", "75");
+                    expected_doc.Set("ofxr", "nvidia_bidirectional", "1");
+                    expected_doc.Set("diagnostics", "logging_enabled",
+                        ofxr_logging ? "1" : "0");
+                    expected_doc.Set("overlay", "position", "lower_left");
+                    const std::string expected = expected_doc.Serialize();
                     Require(w3vr::SaveConfiguration(paths, state, error),
-                        "OFXR backend-only save failed");
+                        "OFXR settings save failed");
                     Require(Read(paths.ofxr_bridge_ini) == expected,
-                        "OFXR save changed bytes outside the backend value");
+                        "OFXR save changed bytes outside launcher-owned keys");
+                    const auto root_opti = Read(paths.optiscaler_ini);
+                    Require(root_opti.find("[ofxr]") != std::string::npos &&
+                            root_opti.find("FutureOption=keep") !=
+                                std::string::npos &&
+                            root_opti.find("; persistent OptiScaler comment") !=
+                                std::string::npos &&
+                            root_opti.find("LogToFile=true") !=
+                                std::string::npos,
+                        "persistent OptiScaler.ini was not written");
                     Require(w3vr::SaveConfiguration(paths, state, error) &&
                             Read(paths.ofxr_bridge_ini) == expected,
                         "repeated save changed the independent OFXR settings");
@@ -1809,17 +1846,22 @@ void TestOfxrBackendOnlySave() {
         }
     }
 
-    // Missing backend is inserted without recreating the user's configuration.
+    // Missing keys are inserted without recreating the user's configuration.
     Write(paths.ofxr_bridge_ini,
         "[ofxr]\r\nnvidia_preset=medium\r\nnvidia_input_scale=50\r\n"
         "[diagnostics]\r\nlogging_enabled=1\r\n");
     w3vr::LauncherState state;
     state.frame_generation_backend = w3vr::FrameGenerationBackend::Nvidia;
+    state.ofxr_nvidia_preset = w3vr::OfxrNvidiaPreset::Slow;
+    state.ofxr_nvidia_input_scale = w3vr::OfxrNvidiaInputScale::Full;
+    state.ofxr_nvidia_bidirectional = true;
+    state.ofxr_logging = true;
     w3vr::IniDocument ofxr;
     Require(w3vr::BuildUpdatedOfxrDocument(paths, state, ofxr, error) &&
             ofxr.Get("ofxr", "backend") == "nvidia" &&
-            ofxr.Get("ofxr", "nvidia_preset") == "medium" &&
-            ofxr.Get("ofxr", "nvidia_input_scale") == "50" &&
+            ofxr.Get("ofxr", "nvidia_preset") == "slow" &&
+            ofxr.Get("ofxr", "nvidia_input_scale") == "100" &&
+            ofxr.Get("ofxr", "nvidia_bidirectional") == "1" &&
             ofxr.Get("diagnostics", "logging_enabled") == "1",
         "inserting the missing OFXR backend lost existing settings");
 
@@ -1881,7 +1923,7 @@ int main() {
         TestVrBaselineAndRestore(paths);
         TestFailurePaths(temporary.path);
         TestOfxrLaunchEnvironment(temporary.path);
-        TestOfxrBackendOnlySave();
+        TestOfxrAndPersistentOptiscalerSave();
         TestNonblockingVersion();
         std::cout << "All launcher configuration tests passed.\n";
         return 0;

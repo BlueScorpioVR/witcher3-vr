@@ -20,6 +20,12 @@ file(READ "${DXGI_PROXY_SOURCE}" dxgi_proxy)
 
 foreach(required IN ITEMS
         "IdIntegrationMode"
+        "IdOfxrNvidiaPreset"
+        "IdOfxrNvidiaInputScale"
+        "IdOfxrNvidiaBidirectional"
+        "NVIDIA bidirectional consistency"
+        "L\"OFXR log\""
+        "L\"OptiScaler log\""
         "L\"Integration\""
         "Select one complete integration state."
         "DLSS5 reference is read-only"

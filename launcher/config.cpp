@@ -270,6 +270,11 @@ std::string ReadString(const IniDocument& doc, const char* section,
 }
 
 FrameGenerationBackend ReadFrameGenerationBackend(const IniDocument& ini) {
+    const auto generation = ReadString(
+        ini, "ofxr", "frame_generation", "ofxr");
+    if (generation == "fsr3") {
+        return FrameGenerationBackend::Fsr3;
+    }
     const auto value = ReadString(ini, "ofxr", "backend", "off");
     if (value == "fidelityfx") {
         return FrameGenerationBackend::FidelityFx;
@@ -287,8 +292,63 @@ const char* FrameGenerationBackendIniValue(
         return "fidelityfx";
     case FrameGenerationBackend::Nvidia:
         return "nvidia";
+    case FrameGenerationBackend::Fsr3:
+        return "fidelityfx";
     default:
         return "off";
+    }
+}
+
+OfxrNvidiaPreset ReadOfxrNvidiaPreset(const IniDocument& ini) {
+    const auto value = ReadString(ini, "ofxr", "nvidia_preset", "medium");
+    if (value == "fast") return OfxrNvidiaPreset::Fast;
+    if (value == "slow") return OfxrNvidiaPreset::Slow;
+    return OfxrNvidiaPreset::Medium;
+}
+
+const char* OfxrNvidiaPresetIniValue(OfxrNvidiaPreset preset) noexcept {
+    switch (preset) {
+    case OfxrNvidiaPreset::Fast: return "fast";
+    case OfxrNvidiaPreset::Slow: return "slow";
+    default: return "medium";
+    }
+}
+
+OfxrNvidiaInputScale ReadOfxrNvidiaInputScale(const IniDocument& ini) {
+    const auto value = ReadString(
+        ini, "ofxr", "nvidia_input_scale", "50");
+    if (value == "100") return OfxrNvidiaInputScale::Full;
+    if (value == "75") return OfxrNvidiaInputScale::ThreeQuarter;
+    return OfxrNvidiaInputScale::Half;
+}
+
+const char* OfxrNvidiaInputScaleIniValue(
+    OfxrNvidiaInputScale scale) noexcept {
+    switch (scale) {
+    case OfxrNvidiaInputScale::Full: return "100";
+    case OfxrNvidiaInputScale::ThreeQuarter: return "75";
+    default: return "50";
+    }
+}
+
+OfxrOverlayPosition ReadOfxrOverlayPosition(const IniDocument& ini) {
+    const auto value = ReadString(
+        ini, "overlay", "position", "upper_right");
+    if (value == "off") return OfxrOverlayPosition::Off;
+    if (value == "upper_left") return OfxrOverlayPosition::UpperLeft;
+    if (value == "lower_left") return OfxrOverlayPosition::LowerLeft;
+    if (value == "lower_right") return OfxrOverlayPosition::LowerRight;
+    return OfxrOverlayPosition::UpperRight;
+}
+
+const char* OfxrOverlayPositionIniValue(
+    OfxrOverlayPosition position) noexcept {
+    switch (position) {
+    case OfxrOverlayPosition::Off: return "off";
+    case OfxrOverlayPosition::UpperLeft: return "upper_left";
+    case OfxrOverlayPosition::LowerLeft: return "lower_left";
+    case OfxrOverlayPosition::LowerRight: return "lower_right";
+    default: return "upper_right";
     }
 }
 
@@ -1114,7 +1174,6 @@ const wchar_t* IntegrationModeDisplayName(IntegrationMode mode) {
         L"ReShade",
         L"OptiScaler + ReShade",
         L"OptiScaler DLSS5",
-        L"ReShade DLSS5 RenoDX",
     };
     const auto index = static_cast<size_t>(mode);
     return index < std::size(names) ? names[index] : L"Off";
@@ -1127,7 +1186,6 @@ const char* IntegrationModeIniValue(IntegrationMode mode) noexcept {
     case IntegrationMode::Reshade: return "reshade";
     case IntegrationMode::OptiscalerReshade: return "optiscaler_reshade";
     case IntegrationMode::OptiscalerDlss5: return "optiscaler_dlss5";
-    case IntegrationMode::ReshadeDlss5: return "reshade_dlss5";
     default: return "off";
     }
 }
@@ -1141,7 +1199,9 @@ IntegrationMode ParseIntegrationMode(const std::string& value) noexcept {
     if (value == "optiscaler_dlss5") {
         return IntegrationMode::OptiscalerDlss5;
     }
-    if (value == "reshade_dlss5") return IntegrationMode::ReshadeDlss5;
+    // Retired launcher-owned RenoDX mode migrates to plain ReShade. Add-ons
+    // are user-owned and are no longer copied or configured by the launcher.
+    if (value == "reshade_dlss5") return IntegrationMode::Reshade;
     return IntegrationMode::Off;
 }
 
@@ -1153,13 +1213,11 @@ bool IntegrationModeUsesOptiscaler(IntegrationMode mode) noexcept {
 
 bool IntegrationModeUsesReshade(IntegrationMode mode) noexcept {
     return mode == IntegrationMode::Reshade ||
-        mode == IntegrationMode::OptiscalerReshade ||
-        mode == IntegrationMode::ReshadeDlss5;
+        mode == IntegrationMode::OptiscalerReshade;
 }
 
 bool IntegrationModeUsesDlss5(IntegrationMode mode) noexcept {
-    return mode == IntegrationMode::OptiscalerDlss5 ||
-        mode == IntegrationMode::ReshadeDlss5;
+    return mode == IntegrationMode::OptiscalerDlss5;
 }
 
 bool ModeUsesDlss(RenderMode mode) {
@@ -1230,6 +1288,7 @@ ConfigPaths DiscoverPaths() {
         directory / L"ofxr_bridge.ini",
         documents / L"The Witcher 3" / L"dx12user.settings",
         directory / L"witcher3.exe",
+        directory / L"OptiScaler.ini",
     };
 }
 
@@ -1541,6 +1600,21 @@ LoadResult LoadConfiguration(const ConfigPaths& paths) {
             paths.ofxr_bridge_ini, ofxr_error)) {
         result.state.frame_generation_backend =
             ReadFrameGenerationBackend(*ofxr);
+        result.state.ofxr_nvidia_preset = ReadOfxrNvidiaPreset(*ofxr);
+        result.state.ofxr_nvidia_input_scale =
+            ReadOfxrNvidiaInputScale(*ofxr);
+        result.state.ofxr_nvidia_bidirectional = ReadBool(
+            *ofxr, "ofxr", "nvidia_bidirectional", false);
+        result.state.ofxr_overlay_position =
+            ReadOfxrOverlayPosition(*ofxr);
+        result.state.ofxr_logging = ReadBool(
+            *ofxr, "diagnostics", "logging_enabled", false);
+    }
+    std::wstring root_optiscaler_error;
+    if (const auto root_optiscaler = IniDocument::Load(
+            paths.optiscaler_ini, root_optiscaler_error)) {
+        result.state.optiscaler_logging = ReadBool(
+            *root_optiscaler, "Log", "LogToFile", false);
     }
     result.state.hud_convergence_delta = std::clamp(
         ReadInt(*vr, "openxr", "hud_stereo_shift_px", -36) + 16, -64, 64);
@@ -1625,8 +1699,7 @@ LoadResult LoadConfiguration(const ConfigPaths& paths) {
         *vr, "launcher", "integration_mode", "off"));
     if (!ModeUsesDlss(result.state.mode)) {
         if (result.state.integration_mode ==
-                IntegrationMode::OptiscalerReshade ||
-            result.state.integration_mode == IntegrationMode::ReshadeDlss5) {
+                IntegrationMode::OptiscalerReshade) {
             result.state.integration_mode = IntegrationMode::Reshade;
         } else if (IntegrationModeUsesOptiscaler(
                        result.state.integration_mode)) {
@@ -1816,6 +1889,56 @@ bool BuildUpdatedOptiscalerDocument(const ConfigPaths& paths,
     return true;
 }
 
+bool BuildUpdatedOptiscalerIniDocument(const ConfigPaths& paths,
+    const LauncherState& state, IniDocument& optiscaler,
+    std::wstring& error) {
+    const DWORD attributes = GetFileAttributesW(paths.optiscaler_ini.c_str());
+    if (attributes != INVALID_FILE_ATTRIBUTES) {
+        const auto loaded = IniDocument::Load(paths.optiscaler_ini, error);
+        if (!loaded) return false;
+        optiscaler = *loaded;
+    } else {
+        const DWORD lookup_error = GetLastError();
+        if (lookup_error != ERROR_FILE_NOT_FOUND &&
+            lookup_error != ERROR_PATH_NOT_FOUND) {
+            SetLastError(lookup_error);
+            error = LastErrorMessage(
+                L"Checking OptiScaler.ini", paths.optiscaler_ini);
+            return false;
+        }
+        // This is the one persistent live OptiScaler configuration shared by
+        // both launcher-managed OptiScaler DLL variants. Reference INIs are
+        // deliberately never copied over it.
+        optiscaler = IniDocument::FromText(
+            "; Witcher 3 VR persistent OptiScaler settings\r\n"
+            "[Log]\r\nLogToFile=false\r\n"
+            "\r\n[ofxr]\r\n");
+    }
+
+    const bool enabled =
+        state.frame_generation_backend != FrameGenerationBackend::Off;
+    const bool fsr =
+        state.frame_generation_backend == FrameGenerationBackend::Fsr3;
+    optiscaler.Set("Log", "LogToFile",
+        state.optiscaler_logging ? "true" : "false");
+    optiscaler.Set("ofxr", "enabled", enabled ? "1" : "0");
+    optiscaler.Set("ofxr", "frame_generation", fsr ? "fsr3" : "ofxr");
+    optiscaler.Set("ofxr", "motion_vectors", fsr ? "dlss" : "off");
+    optiscaler.Set("ofxr", "backend",
+        FrameGenerationBackendIniValue(state.frame_generation_backend));
+    optiscaler.Set("ofxr", "nvidia_preset",
+        OfxrNvidiaPresetIniValue(state.ofxr_nvidia_preset));
+    optiscaler.Set("ofxr", "nvidia_input_scale",
+        OfxrNvidiaInputScaleIniValue(state.ofxr_nvidia_input_scale));
+    optiscaler.Set("ofxr", "nvidia_bidirectional",
+        state.ofxr_nvidia_bidirectional ? "1" : "0");
+    optiscaler.Set("ofxr", "overlay_position",
+        OfxrOverlayPositionIniValue(state.ofxr_overlay_position));
+    optiscaler.Set("ofxr", "logging_enabled",
+        state.ofxr_logging ? "1" : "0");
+    return true;
+}
+
 bool BuildUpdatedOfxrDocument(const ConfigPaths& paths,
     const LauncherState& state, IniDocument& ofxr,
     std::wstring& error) {
@@ -1836,11 +1959,25 @@ bool BuildUpdatedOfxrDocument(const ConfigPaths& paths,
         }
         ofxr = IniDocument::FromText("[ofxr]\r\nbackend=off\r\n");
     }
-    // Read the DLL-local INI at save time and own only this key. NVIDIA tuning
-    // comes from the supplied INI; OFXR diagnostics are independent of the
-    // mod's Diagnostic Logging checkbox and must survive every launch.
+    const bool enabled =
+        state.frame_generation_backend != FrameGenerationBackend::Off;
+    const bool fsr =
+        state.frame_generation_backend == FrameGenerationBackend::Fsr3;
+    ofxr.Set("ofxr", "enabled", enabled ? "1" : "0");
+    ofxr.Set("ofxr", "frame_generation", fsr ? "fsr3" : "ofxr");
+    ofxr.Set("ofxr", "motion_vectors", fsr ? "dlss" : "off");
     ofxr.Set("ofxr", "backend",
         FrameGenerationBackendIniValue(state.frame_generation_backend));
+    ofxr.Set("ofxr", "nvidia_preset",
+        OfxrNvidiaPresetIniValue(state.ofxr_nvidia_preset));
+    ofxr.Set("ofxr", "nvidia_input_scale",
+        OfxrNvidiaInputScaleIniValue(state.ofxr_nvidia_input_scale));
+    ofxr.Set("ofxr", "nvidia_bidirectional",
+        state.ofxr_nvidia_bidirectional ? "1" : "0");
+    ofxr.Set("diagnostics", "logging_enabled",
+        state.ofxr_logging ? "1" : "0");
+    ofxr.Set("overlay", "position",
+        OfxrOverlayPositionIniValue(state.ofxr_overlay_position));
     return true;
 }
 
@@ -1887,15 +2024,20 @@ bool SaveConfiguration(const ConfigPaths& paths, const LauncherState& state,
     IniDocument vr;
     IniDocument game;
     IniDocument optiscaler;
+    IniDocument optiscaler_ini;
     IniDocument ofxr;
     if (!BuildUpdatedDocuments(paths, state, vr, game, error)) return false;
     if (!BuildUpdatedOptiscalerDocument(
             paths, state, optiscaler, error)) return false;
+    if (!BuildUpdatedOptiscalerIniDocument(
+            paths, state, optiscaler_ini, error)) return false;
     if (!BuildUpdatedOfxrDocument(paths, state, ofxr, error)) return false;
     if (!AtomicWriteWithBackup(paths.vr_ini, vr.Serialize(), error)) return false;
     if (!AtomicWriteWithBackup(paths.game_settings, game.Serialize(), error)) return false;
     if (!AtomicWriteWithBackup(paths.optiscaler_bridge_ini,
             optiscaler.Serialize(), error)) return false;
+    if (!AtomicWriteWithBackup(paths.optiscaler_ini,
+            optiscaler_ini.Serialize(), error)) return false;
     if (!AtomicWriteWithBackup(paths.ofxr_bridge_ini,
             ofxr.Serialize(), error)) return false;
     return true;

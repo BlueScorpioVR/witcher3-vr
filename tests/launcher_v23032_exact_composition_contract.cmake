@@ -18,11 +18,10 @@ foreach(required IN ITEMS
         "Reshade,"
         "OptiscalerReshade,"
         "OptiscalerDlss5,"
-        "ReshadeDlss5,"
         "IntegrationMode integration_mode{IntegrationMode::Off};")
     string(FIND "${header}" "${required}" found)
     if(found EQUAL -1)
-        message(FATAL_ERROR "Missing six-mode integration contract: ${required}")
+        message(FATAL_ERROR "Missing five-mode integration contract: ${required}")
     endif()
 endforeach()
 
@@ -32,11 +31,10 @@ foreach(required IN ITEMS
         "L\"ReShade\""
         "L\"OptiScaler + ReShade\""
         "L\"OptiScaler DLSS5\""
-        "L\"ReShade DLSS5 RenoDX\""
         "integration_mode=off")
     string(FIND "${config}${defaults}" "${required}" found)
     if(found EQUAL -1)
-        message(FATAL_ERROR "Missing six-mode persistence/default: ${required}")
+        message(FATAL_ERROR "Missing five-mode persistence/default: ${required}")
     endif()
 endforeach()
 
@@ -54,7 +52,6 @@ endforeach()
 foreach(required IN ITEMS
         "witcher3vr-mod-reference"
         "witcher3vr-reshade-reference"
-        "witcher3vr-reshade-dlss5-reference"
         "witcher3vr-optiscaler-reference"
         "witcher3vr-optiscaler-dlss5-reference"
         "witcher3vr-dlss5-reference"
@@ -63,7 +60,6 @@ foreach(required IN ITEMS
         "kDlss5OptiscalerFiles"
         "ReShade64.dll"
         "ProxyLibrary"
-        "LoadFromDllMain"
         "ApplyManagedIntegrationMode")
     string(FIND "${managed}" "${required}" found)
     if(found EQUAL -1)
@@ -86,7 +82,6 @@ endforeach()
 foreach(required IN ITEMS
         "witcher3vr-mod-reference"
         "witcher3vr-reshade-reference"
-        "witcher3vr-reshade-dlss5-reference"
         "witcher3vr-optiscaler-reference"
         "witcher3vr-optiscaler-dlss5-reference"
         "witcher3vr-dlss5-reference"
@@ -94,6 +89,17 @@ foreach(required IN ITEMS
     string(FIND "${package}" "${required}" found)
     if(found EQUAL -1)
         message(FATAL_ERROR "Missing V23032 package layout: ${required}")
+    endif()
+endforeach()
+
+foreach(retired IN ITEMS
+        "ReshadeDlss5"
+        "ReShade DLSS5 RenoDX"
+        "witcher3vr-reshade-dlss5-reference"
+        "renodx-dlss5-v2.5.addon64")
+    string(FIND "${main}${config}${header}${managed}${package}" "${retired}" found)
+    if(NOT found EQUAL -1)
+        message(FATAL_ERROR "Retired launcher-owned RenoDX route remains: ${retired}")
     endif()
 endforeach()
 

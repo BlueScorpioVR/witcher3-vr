@@ -31,6 +31,30 @@ enum class FrameGenerationBackend {
     Off,
     FidelityFx,
     Nvidia,
+    Fsr3,
+    Count,
+};
+
+enum class OfxrNvidiaPreset {
+    Fast,
+    Medium,
+    Slow,
+    Count,
+};
+
+enum class OfxrNvidiaInputScale {
+    Half,
+    ThreeQuarter,
+    Full,
+    Count,
+};
+
+enum class OfxrOverlayPosition {
+    Off,
+    UpperLeft,
+    UpperRight,
+    LowerLeft,
+    LowerRight,
     Count,
 };
 
@@ -40,7 +64,6 @@ enum class IntegrationMode {
     Reshade,
     OptiscalerReshade,
     OptiscalerDlss5,
-    ReshadeDlss5,
     Count,
 };
 
@@ -76,6 +99,14 @@ struct LauncherState {
     IntegrationMode integration_mode{IntegrationMode::Off};
     FrameGenerationBackend frame_generation_backend{
         FrameGenerationBackend::Off};
+    OfxrNvidiaPreset ofxr_nvidia_preset{OfxrNvidiaPreset::Medium};
+    OfxrNvidiaInputScale ofxr_nvidia_input_scale{
+        OfxrNvidiaInputScale::Half};
+    bool ofxr_nvidia_bidirectional{};
+    OfxrOverlayPosition ofxr_overlay_position{
+        OfxrOverlayPosition::UpperRight};
+    bool ofxr_logging{};
+    bool optiscaler_logging{};
     int hud_convergence_delta{-20};
     float presentation_scale{1.0f};
     float world_detail_range{1.0f};
@@ -116,6 +147,7 @@ struct ConfigPaths {
     std::filesystem::path ofxr_bridge_ini;
     std::filesystem::path game_settings;
     std::filesystem::path game_executable;
+    std::filesystem::path optiscaler_ini;
 };
 
 struct LoadResult {
@@ -172,6 +204,9 @@ CompatibilityWarnings InspectCompatibilitySettings(const ConfigPaths& paths);
 bool BuildUpdatedDocuments(const ConfigPaths& paths, const LauncherState& state,
     IniDocument& vr_ini, IniDocument& game_settings, std::wstring& error);
 bool BuildUpdatedOptiscalerDocument(const ConfigPaths& paths,
+    const LauncherState& state, IniDocument& optiscaler,
+    std::wstring& error);
+bool BuildUpdatedOptiscalerIniDocument(const ConfigPaths& paths,
     const LauncherState& state, IniDocument& optiscaler,
     std::wstring& error);
 bool BuildUpdatedOfxrDocument(const ConfigPaths& paths,

@@ -21,15 +21,11 @@ namespace fs = std::filesystem;
 // moves, renames or deletes anything inside a reference directory.
 constexpr wchar_t kModReference[] = L"witcher3vr-mod-reference";
 constexpr wchar_t kReshadeReference[] = L"witcher3vr-reshade-reference";
-constexpr wchar_t kReshadeDlss5Reference[] =
-    L"witcher3vr-reshade-dlss5-reference";
 constexpr wchar_t kOptiscalerReference[] = L"witcher3vr-optiscaler-reference";
 constexpr wchar_t kOptiscalerDlss5Reference[] =
     L"witcher3vr-optiscaler-dlss5-reference";
 constexpr wchar_t kDlss5Reference[] = L"witcher3vr-dlss5-reference";
 constexpr wchar_t kReshadeRuntime[] = L"ReShade64.dll";
-constexpr wchar_t kDlss5Addon[] = L"renodx-dlss5-v2.5.addon64";
-constexpr char kDlss5AddonToken[] = "renodx-dlss5-v2.5.addon64";
 
 constexpr auto kDlss5Files = std::to_array<const wchar_t*>({
     L"nvngx_dlss.dll", L"nvngx_dlssg.dll", L"nvngx_dlssnr.dll"});
@@ -37,9 +33,11 @@ constexpr auto kDlss5Files = std::to_array<const wchar_t*>({
 // selected Witcher 3 routes. The FidelityFX DLLs already shipped by the game
 // remain untouched, while optional FSR/XeSS/FG backends are not packaged.
 constexpr auto kCanonicalOptiscalerFiles = std::to_array<const wchar_t*>({
-    L"OptiScaler.dll", L"OptiScaler.ini"});
+    L"OptiScaler.dll"});
 constexpr auto kDlss5OptiscalerFiles = std::to_array<const wchar_t*>({
-    L"OptiScaler.dll", L"OptiScaler.ini", L"nvngx.dll_dlssnr.dll"});
+    L"OptiScaler.dll", L"nvngx.dll_dlssnr.dll",
+    L"amd_fidelityfx_framegeneration_dx12.dll",
+    L"ofxr_amd_fidelityfx_framegeneration_dx12.dll"});
 constexpr auto kLegacyOptiscalerOptionalFiles =
     std::to_array<const wchar_t*>({
         L"OptiScaler/amd_fidelityfx_framegeneration_dx12.dll",
@@ -382,7 +380,7 @@ bool WriteIni(const fs::path& path, const std::string& contents,
 }
 
 bool ConfigurePersistentReshade(const fs::path& root, bool use_reshade,
-    bool use_dlss5_addon, std::wstring& error) {
+    std::wstring& error) {
     const auto path = root / L"ReShade.ini";
     bool present{};
     if (!InspectRegularFile(path, present, error)) return false;
@@ -397,20 +395,6 @@ bool ConfigurePersistentReshade(const fs::path& root, bool use_reshade,
     document.Set("PROXY", "ProxyLibrary", "");
     document.Set("INPUT", "KeyOverlay", "115,0,0,0");
     SetCsvToken(document, "ADDON", "DisabledAddons", "Generic Depth", true);
-    SetCsvToken(document, "ADDON", "LoadFromDllMain", kDlss5AddonToken,
-        use_dlss5_addon);
-    // Retire the removed add-on from an existing Alpha 1 configuration.
-    SetCsvToken(document, "ADDON", "LoadFromDllMain",
-        "CheekyFoveatedDLSS.addon64", false);
-    if (use_dlss5_addon) {
-        if (const auto hooks = document.Get("RenoDX.DLSS5", "EnableHooks");
-            hooks && Trim(*hooks) != "2") {
-            error = L"ReShade DLSS5 requires [RenoDX.DLSS5] EnableHooks=2 "
-                L"for Witcher 3's Streamline 1.5 runtime.";
-            return false;
-        }
-        document.Set("RenoDX.DLSS5", "EnableHooks", "2");
-    }
     return WriteIni(path, document.Serialize(), error);
 }
 
@@ -436,10 +420,8 @@ bool ApplyManagedIntegrationMode(const std::filesystem::path& root,
     const bool use_dlss5 = IntegrationModeUsesDlss5(desired);
     const bool use_modified_optiscaler =
         desired == IntegrationMode::OptiscalerDlss5;
-    const bool use_dlss5_addon = desired == IntegrationMode::ReshadeDlss5;
     const auto mod_reference = root / kModReference;
     const auto reshade_reference = root / kReshadeReference;
-    const auto reshade_dlss5_reference = root / kReshadeDlss5Reference;
     const auto optiscaler_reference = root /
         (use_modified_optiscaler
             ? kOptiscalerDlss5Reference : kOptiscalerReference);
@@ -463,10 +445,6 @@ bool ApplyManagedIntegrationMode(const std::filesystem::path& root,
     if (use_dlss5) {
         AppendCopies(operations, dlss5_reference, root, kDlss5Files);
     }
-    if (use_dlss5_addon) {
-        operations.push_back({reshade_dlss5_reference / kDlss5Addon,
-            root / kDlss5Addon, {}});
-    }
     // The known-good renderer remains the DXGI proxy in every mode. It loads
     // the adjacent ReShade64.dll secondarily only for ReShade selections.
     operations.push_back({mod_reference / L"dxgi.dll",
@@ -478,18 +456,19 @@ bool ApplyManagedIntegrationMode(const std::filesystem::path& root,
             return false;
         }
     }
-    if (!ConfigurePersistentReshade(
-            root, use_reshade, use_dlss5_addon, error) ||
+    if (!ConfigurePersistentReshade(root, use_reshade, error) ||
         !CleanupLegacyOptiscalerPayload(root, error) ||
         (!use_modified_optiscaler &&
             !RemoveFileIfPresent(root / L"nvngx.dll_dlssnr.dll", error)) ||
+        (!use_modified_optiscaler &&
+            !RemoveFileIfPresent(root /
+                L"amd_fidelityfx_framegeneration_dx12.dll", error)) ||
+        (!use_modified_optiscaler &&
+            !RemoveFileIfPresent(root /
+                L"ofxr_amd_fidelityfx_framegeneration_dx12.dll", error)) ||
         (!use_reshade &&
             !RemoveFileIfPresent(root / kReshadeRuntime, error)) ||
-        !RemoveFileIfPresent(root / L"witcher3vr_dxgi.dll", error) ||
-        (!use_dlss5_addon &&
-            !RemoveFileIfPresent(root / kDlss5Addon, error)) ||
-        !RemoveFileIfPresent(
-            root / L"CheekyFoveatedDLSS.addon64", error)) {
+        !RemoveFileIfPresent(root / L"witcher3vr_dxgi.dll", error)) {
         CleanupStaged(operations);
         return false;
     }

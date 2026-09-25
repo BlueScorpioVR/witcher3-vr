@@ -27,6 +27,9 @@ using w3vr::RenderMode;
 using w3vr::CinemaAspect;
 using w3vr::CameraFollowPolicy;
 using w3vr::FrameGenerationBackend;
+using w3vr::OfxrNvidiaPreset;
+using w3vr::OfxrNvidiaInputScale;
+using w3vr::OfxrOverlayPosition;
 using w3vr::IntegrationMode;
 
 constexpr wchar_t kWindowClass[] = L"Witcher3VRLauncherWindow";
@@ -44,6 +47,12 @@ enum ControlId {
     IdDlssQuality,
     IdIntegrationMode,
     IdOfxrBridge,
+    IdOfxrNvidiaPreset,
+    IdOfxrNvidiaInputScale,
+    IdOfxrNvidiaBidirectional,
+    IdOfxrOverlayPosition,
+    IdOfxrLogging,
+    IdOptiLog,
     IdConvergence,
     IdConvergenceValue,
     IdPresentationScale,
@@ -288,6 +297,28 @@ void UpdateTrackLabels() {
         static_cast<float>(SendMessageW(Item(IdNearView), TBM_GETPOS, 0, 0)) / 100.0f).c_str());
 }
 
+void UpdateOfxrControls() {
+    const int backend = static_cast<int>(SendMessageW(
+        Item(IdOfxrBridge), CB_GETCURSEL, 0, 0));
+    const bool ofxr_selected = backend >
+            static_cast<int>(FrameGenerationBackend::Off) &&
+        backend < static_cast<int>(FrameGenerationBackend::Count);
+    const bool nvidia_selected = backend ==
+        static_cast<int>(FrameGenerationBackend::Nvidia);
+    const int integration = static_cast<int>(SendMessageW(
+        Item(IdIntegrationMode), CB_GETCURSEL, 0, 0));
+    const bool optiscaler_selected = integration >= 0 &&
+        integration < static_cast<int>(IntegrationMode::Count) &&
+        w3vr::IntegrationModeUsesOptiscaler(
+            static_cast<IntegrationMode>(integration));
+    EnableWindow(Item(IdOfxrOverlayPosition), ofxr_selected);
+    EnableWindow(Item(IdOfxrNvidiaPreset), nvidia_selected);
+    EnableWindow(Item(IdOfxrNvidiaInputScale), nvidia_selected);
+    EnableWindow(Item(IdOfxrNvidiaBidirectional), nvidia_selected);
+    EnableWindow(Item(IdOfxrLogging), ofxr_selected);
+    EnableWindow(Item(IdOptiLog), optiscaler_selected);
+}
+
 void UpdateModeControls() {
     const int selected = static_cast<int>(SendMessageW(Item(IdMode), CB_GETCURSEL, 0, 0));
     const bool selected_valid = selected >= 0 &&
@@ -304,8 +335,7 @@ void UpdateModeControls() {
                 selected_integration < static_cast<int>(IntegrationMode::Count)
             ? static_cast<IntegrationMode>(selected_integration)
             : IntegrationMode::Off;
-        if (normalized == IntegrationMode::OptiscalerReshade ||
-            normalized == IntegrationMode::ReshadeDlss5) {
+        if (normalized == IntegrationMode::OptiscalerReshade) {
             normalized = IntegrationMode::Reshade;
         } else if (w3vr::IntegrationModeUsesOptiscaler(normalized)) {
             normalized = IntegrationMode::Off;
@@ -314,6 +344,7 @@ void UpdateModeControls() {
             static_cast<int>(normalized), 0);
     }
     EnableWindow(Item(IdPresentationScale), TRUE);
+    UpdateOfxrControls();
     UpdateTrackLabels();
 }
 
@@ -446,6 +477,45 @@ bool CaptureState(LauncherState& state, std::wstring& error) {
     }
     state.frame_generation_backend =
         static_cast<FrameGenerationBackend>(frame_generation_backend);
+    const int nvidia_preset = static_cast<int>(SendMessageW(
+        Item(IdOfxrNvidiaPreset), CB_GETCURSEL, 0, 0));
+    const int nvidia_input_scale = static_cast<int>(SendMessageW(
+        Item(IdOfxrNvidiaInputScale), CB_GETCURSEL, 0, 0));
+    if (nvidia_preset < 0 ||
+        nvidia_preset >= static_cast<int>(OfxrNvidiaPreset::Count) ||
+        nvidia_input_scale < 0 ||
+        nvidia_input_scale >=
+            static_cast<int>(OfxrNvidiaInputScale::Count)) {
+        error = L"Select valid NVIDIA OFXR options.";
+        return false;
+    }
+    state.ofxr_nvidia_preset =
+        static_cast<OfxrNvidiaPreset>(nvidia_preset);
+    state.ofxr_nvidia_input_scale =
+        static_cast<OfxrNvidiaInputScale>(nvidia_input_scale);
+    state.ofxr_nvidia_bidirectional = SendMessageW(
+        Item(IdOfxrNvidiaBidirectional), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    if (state.frame_generation_backend == FrameGenerationBackend::Fsr3 &&
+        (!w3vr::ModeUsesDlss(state.mode) ||
+            state.integration_mode != IntegrationMode::OptiscalerDlss5)) {
+        error = L"FSR 3.1 VR Framegen requires a DLSS render mode and the "
+            L"OptiScaler DLSS5 integration. Select both before saving or "
+            L"launching the game.";
+        return false;
+    }
+    const int overlay_position = static_cast<int>(SendMessageW(
+        Item(IdOfxrOverlayPosition), CB_GETCURSEL, 0, 0));
+    if (overlay_position < 0 || overlay_position >=
+            static_cast<int>(OfxrOverlayPosition::Count)) {
+        error = L"Select an OFXR FPS overlay position.";
+        return false;
+    }
+    state.ofxr_overlay_position =
+        static_cast<OfxrOverlayPosition>(overlay_position);
+    state.ofxr_logging = SendMessageW(
+        Item(IdOfxrLogging), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    state.optiscaler_logging = SendMessageW(
+        Item(IdOptiLog), BM_GETCHECK, 0, 0) == BST_CHECKED;
     state.hud_convergence_delta = static_cast<int>(SendMessageW(
         Item(IdConvergence), TBM_GETPOS, 0, 0));
     state.presentation_scale = static_cast<float>(SendMessageW(
@@ -858,6 +928,18 @@ void RestoreLauncherDefaults() {
         static_cast<int>(defaults.integration_mode), 0);
     SendMessageW(Item(IdOfxrBridge), CB_SETCURSEL,
         static_cast<int>(defaults.frame_generation_backend), 0);
+    SendMessageW(Item(IdOfxrNvidiaPreset), CB_SETCURSEL,
+        static_cast<int>(defaults.ofxr_nvidia_preset), 0);
+    SendMessageW(Item(IdOfxrNvidiaInputScale), CB_SETCURSEL,
+        static_cast<int>(defaults.ofxr_nvidia_input_scale), 0);
+    SendMessageW(Item(IdOfxrNvidiaBidirectional), BM_SETCHECK,
+        defaults.ofxr_nvidia_bidirectional ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(Item(IdOfxrOverlayPosition), CB_SETCURSEL,
+        static_cast<int>(defaults.ofxr_overlay_position), 0);
+    SendMessageW(Item(IdOfxrLogging), BM_SETCHECK,
+        defaults.ofxr_logging ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(Item(IdOptiLog), BM_SETCHECK,
+        defaults.optiscaler_logging ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(Item(IdConvergence), TBM_SETPOS, TRUE,
         defaults.hud_convergence_delta);
     SendMessageW(Item(IdPresentationScale), TBM_SETPOS, TRUE,
@@ -912,6 +994,7 @@ void RestoreLauncherDefaults() {
     SendMessageW(Item(IdRenderDoc), BM_SETCHECK,
         defaults.renderdoc_enabled ? BST_CHECKED : BST_UNCHECKED, 0);
     UpdateModeControls();
+    UpdateOfxrControls();
     UpdateFirstPersonControls();
     UpdateTrackLabels();
     SetStatus(L"Launcher defaults loaded. Press Save to apply them.");
@@ -1031,7 +1114,25 @@ void PopulateControls() {
     HWND ofxr_bridge = Item(IdOfxrBridge);
     ComboAdd(ofxr_bridge, L"Off");
     ComboAdd(ofxr_bridge, L"FidelityFX");
-    ComboAdd(ofxr_bridge, L"NVIDIA med. 50%");
+    ComboAdd(ofxr_bridge, L"NVIDIA Optical Flow");
+    ComboAdd(ofxr_bridge, L"FSR 3.1 + DLSS vectors");
+
+    HWND ofxr_nvidia_preset = Item(IdOfxrNvidiaPreset);
+    ComboAdd(ofxr_nvidia_preset, L"Fast");
+    ComboAdd(ofxr_nvidia_preset, L"Medium");
+    ComboAdd(ofxr_nvidia_preset, L"Slow");
+
+    HWND ofxr_nvidia_scale = Item(IdOfxrNvidiaInputScale);
+    ComboAdd(ofxr_nvidia_scale, L"50%");
+    ComboAdd(ofxr_nvidia_scale, L"75%");
+    ComboAdd(ofxr_nvidia_scale, L"100%");
+
+    HWND ofxr_overlay = Item(IdOfxrOverlayPosition);
+    ComboAdd(ofxr_overlay, L"Off");
+    ComboAdd(ofxr_overlay, L"Upper left");
+    ComboAdd(ofxr_overlay, L"Upper right");
+    ComboAdd(ofxr_overlay, L"Lower left");
+    ComboAdd(ofxr_overlay, L"Lower right");
 
     HWND cinema_aspect = Item(IdCinemaAspect);
     ComboAdd(cinema_aspect, L"5:4");
@@ -1065,6 +1166,19 @@ void PopulateControls() {
         static_cast<int>(loaded.state.integration_mode), 0);
     SendMessageW(ofxr_bridge, CB_SETCURSEL,
         static_cast<int>(loaded.state.frame_generation_backend), 0);
+    SendMessageW(ofxr_nvidia_preset, CB_SETCURSEL,
+        static_cast<int>(loaded.state.ofxr_nvidia_preset), 0);
+    SendMessageW(ofxr_nvidia_scale, CB_SETCURSEL,
+        static_cast<int>(loaded.state.ofxr_nvidia_input_scale), 0);
+    SendMessageW(Item(IdOfxrNvidiaBidirectional), BM_SETCHECK,
+        loaded.state.ofxr_nvidia_bidirectional
+            ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(ofxr_overlay, CB_SETCURSEL,
+        static_cast<int>(loaded.state.ofxr_overlay_position), 0);
+    SendMessageW(Item(IdOfxrLogging), BM_SETCHECK,
+        loaded.state.ofxr_logging ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(Item(IdOptiLog), BM_SETCHECK,
+        loaded.state.optiscaler_logging ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(Item(IdConvergence), TBM_SETPOS, TRUE,
         loaded.state.hud_convergence_delta);
     SendMessageW(Item(IdPresentationScale), TBM_SETPOS, TRUE,
@@ -1125,6 +1239,7 @@ void PopulateControls() {
     SendMessageW(Item(IdRenderDoc), BM_SETCHECK,
         loaded.state.renderdoc_enabled ? BST_CHECKED : BST_UNCHECKED, 0);
     UpdateModeControls();
+    UpdateOfxrControls();
     UpdateFirstPersonControls();
     UpdateTrackLabels();
     EnableWindow(Item(IdRestoreOriginal),
@@ -1180,11 +1295,6 @@ void CreateInterface(HWND window) {
         L"Select one complete integration state. OptiScaler modes require a DLSS render route. Active DLLs are copied from separate reference folders; the DLSS5 reference contains only the three user-supplied NVIDIA DLLs.",
         {AddLabel(L"Integration", 38, 116, 95, 22),
          AddCombo(135, 108, 230, IdIntegrationMode)});
-    AddTooltips(
-        L"OFXR generates intermediate VR frames using optical flow. NVIDIA selects the Medium preset at 50% optical-flow calculation resolution; the displayed image remains full resolution. Off disables OFXR.",
-        {AddLabel(L"OFXR", 375, 116, 55, 22),
-         AddCombo(428, 108, 132, IdOfxrBridge)});
-
     AddTooltip(AddControl(L"BUTTON", L"Comfort and interface", BS_GROUPBOX,
         20, 174, 560, 448),
         L"Tune headset presentation, HUD, cinema framing, and comfort options. Hover any setting name or control for details.");
@@ -1310,25 +1420,29 @@ void CreateInterface(HWND window) {
         {AddLabel(L"Camera Follow", 618, 148, 130, 22),
          AddCombo(755, 140, 260, IdCameraFollow)});
 
-    AddTooltip(AddControl(L"BUTTON", L"Runtime bindings", BS_GROUPBOX,
+    AddTooltip(AddControl(L"BUTTON", L"OFXR VR Framegen", BS_GROUPBOX,
         600, 210, 560, 100),
-        L"Keyboard view shortcuts available while Witcher 3 VR is running.");
-    AddTooltip(AddLabel(
-        L"F2  Toggle between Symmetric and Asymmetric projection",
-        618, 234, 524, 24),
-        L"Toggle between symmetric and asymmetric projection.");
-    AddTooltip(AddLabel(
-        L"F8  Standard / Near", 618, 258, 250, 24),
-        L"Switch between the standard and near third-person camera presets.");
-    AddTooltip(AddLabel(
-        L"F9  Recenter", 880, 258, 262, 24),
-        L"Recenter the VR headset view.");
-    AddTooltip(AddLabel(
-        L"F10  Cinema3D", 618, 282, 250, 24),
-        L"Toggle the Cinema3D screen for the current scene.");
-    AddTooltip(AddLabel(
-        L"F11  First Person", 880, 282, 262, 24),
-        L"Toggle First Person view.");
+        L"Controls the external OFXR V093 OpenXR layer. FSR 3.1 uses the DLSS motion vectors published by the custom OptiScaler build. F2  Toggle between Symmetric and Asymmetric projection. Toggle between symmetric and asymmetric projection.");
+    AddTooltips(
+        L"Select the VR frame-generation engine. FSR 3.1 requires both a DLSS render mode and OptiScaler DLSS5.",
+        {AddLabel(L"Engine", 618, 238, 50, 22),
+         AddCombo(670, 230, 180, IdOfxrBridge)});
+    AddTooltips(
+        L"NVIDIA quality/performance preset. Fast is experimental; Medium is the recommended default.",
+        {AddLabel(L"Preset", 860, 238, 48, 22),
+         AddCombo(910, 230, 96, IdOfxrNvidiaPreset)});
+    AddTooltips(
+        L"Resolution used only for NVIDIA optical-flow calculation. 50% is recommended; 100% is normally too expensive.",
+        {AddLabel(L"OFA", 1016, 238, 34, 22),
+         AddCombo(1052, 230, 90, IdOfxrNvidiaInputScale)});
+    AddTooltips(
+        L"Select where OFXR draws its minimal generated-frame FPS counter, or turn it off.",
+        {AddLabel(L"FPS overlay", 618, 276, 82, 22),
+         AddCombo(702, 268, 148, IdOfxrOverlayPosition)});
+    AddTooltip(AddControl(L"BUTTON", L"NVIDIA bidirectional consistency",
+        BS_AUTOCHECKBOX | WS_TABSTOP, 870, 270, 272, 25,
+        IdOfxrNvidiaBidirectional),
+        L"Requests forward and backward NVIDIA optical flow. It is more expensive and applies only to the NVIDIA backend.");
 
     AddTooltip(AddControl(L"BUTTON", L"HUD Editor bindings", BS_GROUPBOX,
         600, 324, 560, 124),
@@ -1374,33 +1488,37 @@ void CreateInterface(HWND window) {
         BS_AUTOCHECKBOX | WS_TABSTOP, 1018, 486, 124, 24,
         IdRenderDoc),
         L"Enables in-process RenderDoc capture with F3. Download renderdoc.dll from the dedicated package on the release page and place it beside the launcher.");
-    HWND light_log_note = AddLabel(
-        L"Route and Performance logs are lightweight and do not impact performance.",
-        618, 514, 524, 20);
-    ApplySmallFont(light_log_note);
-    HWND diagnostic_note = AddLabel(
-        L"Diagnostic Logging is heavy and can contaminate results while investigating a problem.",
-        618, 534, 524, 20);
-    ApplySmallFont(diagnostic_note);
+    AddTooltip(AddControl(L"BUTTON", L"OFXR log",
+        BS_AUTOCHECKBOX | WS_TABSTOP, 618, 514, 120, 24,
+        IdOfxrLogging),
+        L"Writes the OFXR flight log. This control is disabled when OFXR VR Framegen is Off.");
+    AddTooltip(AddControl(L"BUTTON", L"OptiScaler log",
+        BS_AUTOCHECKBOX | WS_TABSTOP, 750, 514, 150, 24,
+        IdOptiLog),
+        L"Writes the full OptiScaler trace. V23074 device-removal DRED remains independently armed.");
+    HWND log_note = AddLabel(
+        L"Diagnostic Logging is heavy and can contaminate results; Route and Performance logs are lightweight and do not impact performance.",
+        618, 540, 524, 20);
+    ApplySmallFont(log_note);
     HWND menu_bindings = AddLabel(
-        L"Menus:  F4 ReShade   |   F6 RenoDX   |   DEL OptiScaler",
-        618, 558, 524, 20);
+        L"Menus:  F4 ReShade   |   DEL OptiScaler",
+        618, 560, 524, 20);
     ApplySmallFont(menu_bindings);
     AddTooltip(menu_bindings,
         L"Launcher defaults for the three integration overlays. The immutable DLSS5 reference is never edited; the active OptiScaler copy receives DEL.");
     HWND optiscaler_bindings = AddLabel(
         L"OptiScaler:  Page Up FPS   |   Page Down FPS view   |   End Frame Generation",
-        618, 578, 524, 20);
+        618, 580, 524, 20);
     ApplySmallFont(optiscaler_bindings);
     AddTooltip(optiscaler_bindings,
         L"Native OptiScaler auxiliary bindings retained alongside the DEL menu binding.");
     AddTooltip(AddLabel(
         L"F3  Fast capture: Route / Performance / RenderDoc",
-        618, 598, 318, 20),
+        618, 600, 318, 20),
         L"Dump each enabled lightweight recorder and request a RenderDoc frame capture when RenderDoc is enabled.");
     AddTooltip(AddLabel(
-        L"Ctrl+F6  AFW visual debug", 925, 598, 217, 20),
-        L"Toggle the PureDark AFW visual diagnostic without consuming DLSS5's plain F6 toggle.");
+        L"Ctrl+F6  AFW visual debug", 925, 600, 217, 20),
+        L"Toggle the PureDark AFW visual diagnostic without consuming an unmodified F6 press.");
 
     AddTooltip(AddLabel(L"", 20, 636, 1140, 22, IdStatus, SS_LEFT),
         L"Shows validation results, saved changes, and launch status.");
@@ -1453,6 +1571,10 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam, LPARA
         const int id = LOWORD(wparam);
         const int notification = HIWORD(wparam);
         if (id == IdMode && notification == CBN_SELCHANGE) UpdateModeControls();
+        if ((id == IdIntegrationMode || id == IdOfxrBridge) &&
+            notification == CBN_SELCHANGE) {
+            UpdateOfxrControls();
+        }
         if (id == IdFirstPersonGamepadHeadFollow && notification == BN_CLICKED) {
             UpdateFirstPersonControls();
         }
@@ -1553,7 +1675,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     }
     bounds = FitWindowToWorkArea(bounds);
     HWND window = CreateWindowExW(0, kWindowClass,
-        L"Witcher 3 VR Launcher - V1535",
+        L"Witcher 3 VR Launcher - V1547",
         kWindowStyle,
         bounds.left, bounds.top, bounds.right - bounds.left,
         bounds.bottom - bounds.top, nullptr, nullptr, instance, nullptr);

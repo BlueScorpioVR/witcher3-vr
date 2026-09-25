@@ -33,23 +33,16 @@ file(READ "${SOURCE_ROOT}/launcher/CMakeLists.txt" launcher_project_config)
 string(REGEX MATCH "VERSION 0[.]([0-9]+)[.]0" version_match
     "${launcher_project_config}")
 set(release_version "${CMAKE_MATCH_1}")
-foreach(required IN ITEMS "NVIDIA med. 50%" "Witcher 3 VR Launcher - V${release_version}")
+foreach(required IN ITEMS "NVIDIA Optical Flow" "Witcher 3 VR Launcher - V${release_version}")
     string(FIND "${launcher}" "${required}" position)
     if(position EQUAL -1)
         message(FATAL_ERROR "Missing release launcher label: ${required}")
     endif()
 endforeach()
 
-foreach(required IN ITEMS "renodx-dlss5-v2.5.addon64"
-        "!use_dlss5_addon")
-    string(FIND "${managed}" "${required}" position)
-    if(position EQUAL -1)
-        message(FATAL_ERROR "Missing ReShade add-on ownership: ${required}")
-    endif()
-endforeach()
-
-foreach(retired IN ITEMS "ReshadeDlss5Cheeky" "NrEnabled"
-        "use_cheeky_addon")
+foreach(retired IN ITEMS "ReshadeDlss5" "ReshadeDlss5Cheeky" "NrEnabled"
+        "use_cheeky_addon" "use_dlss5_addon"
+        "renodx-dlss5-v2.5.addon64")
     string(FIND "${managed}${config_header}" "${retired}" position)
     if(NOT position EQUAL -1)
         message(FATAL_ERROR "Retired Cheeky launcher path remains: ${retired}")

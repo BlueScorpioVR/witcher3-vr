@@ -7,9 +7,19 @@
 
 using w3vr::mode3_transport::HudDrawOwnership;
 using w3vr::mode3_transport::HudSceneOwnership;
+using w3vr::mode3_transport::restore_native_hud_for_menu_draw;
 using w3vr::mode3_transport::strict_hud_capture_publishable;
 
 int main() {
+    // A menu transition can happen after SetPipelineState substituted the HUD
+    // with scene-only or a per-eye Cinema/gameplay/Full-VR variant. The caller
+    // classifies every bridge replacement uniformly; native menu draws remain
+    // outside this predicate.
+    assert(restore_native_hud_for_menu_draw(true, true, true));
+    assert(!restore_native_hud_for_menu_draw(false, true, true));
+    assert(!restore_native_hud_for_menu_draw(true, false, true));
+    assert(!restore_native_hud_for_menu_draw(true, true, false));
+
     // A scene-only draw followed by a native HUD draw in the SAME recording
     // must not keep the positive marker used by the old generation-only map.
     HudDrawOwnership draw{};

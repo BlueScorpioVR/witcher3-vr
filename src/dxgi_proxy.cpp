@@ -4,6 +4,7 @@
 #include <d3d12.h>
 #include <d3d12shader.h>
 #include <dxgi1_6.h>
+#include "swapchain_resource_identity.h"
 #include <dxcapi.h>
 #include <nvsdk_ngx.h>
 #include <renderdoc_app.h>
@@ -1298,6 +1299,17 @@ PFN_xrBeginFrame pfn_xrBeginFrame{};
 PFN_xrEndFrame pfn_xrEndFrame{};
 PFN_xrLocateViews pfn_xrLocateViews{};
 PFN_xrGetVisibilityMaskKHR pfn_xrGetVisibilityMaskKHR{};
+struct XrfgPresentationTransformV1 {
+    uint32_t version;
+    uint32_t active;
+    uint32_t view_count;
+    uint32_t reserved;
+    uint64_t frame_id;
+    float clip_positions[2][16];
+};
+using PFN_xrSetPresentationTransformOFXR = XrResult(XRAPI_PTR *)(
+    XrSession, const XrfgPresentationTransformV1*);
+PFN_xrSetPresentationTransformOFXR pfn_xrSetPresentationTransformOFXR{};
 bool g_xr_visibility_mask_extension_enabled{};
 struct XrVisibilityBounds {
     float min_x{};
@@ -13413,29 +13425,7 @@ void log_first_person_aim_diagnostic(const char* fmt, ...) {
 }
 
 bool game_swapchain_owns_resource(ID3D12Resource* resource) {
-    if (resource == nullptr || g_game_swapchain == nullptr) {
-        return false;
-    }
-
-    DXGI_SWAP_CHAIN_DESC swapchain_desc{};
-    if (FAILED(g_game_swapchain->GetDesc(&swapchain_desc)) ||
-        swapchain_desc.BufferCount == 0) {
-        return false;
-    }
-    for (UINT index = 0; index < swapchain_desc.BufferCount; ++index) {
-        ID3D12Resource* swapchain_buffer{};
-        if (FAILED(g_game_swapchain->GetBuffer(
-                index, IID_PPV_ARGS(&swapchain_buffer))) ||
-            swapchain_buffer == nullptr) {
-            continue;
-        }
-        const bool match = swapchain_buffer == resource;
-        swapchain_buffer->Release();
-        if (match) {
-            return true;
-        }
-    }
-    return false;
+    return w3vr::swapchain_identity::owns_resource(g_game_swapchain, resource);
 }
 
 void diagnose_final_present_resource_identity(
@@ -25249,6 +25239,36 @@ void STDMETHODCALLTYPE hook_draw_instanced(
         command_list, "draw-cbv",
         vertex_count_per_instance, instance_count);
 
+    // [FIX:MENU-HUD-FAMILY-LATE-RESTORE V1551 1/1] REDengine can publish
+    // IsAnyMenu after this command list already received any bridge-owned HUD
+    // replacement. V1548 restored only scene-only, leaving the per-eye Cinema
+    // PSO bound when a dialogue choice opened during a cutscene. The menu then
+    // copied a live backbuffer whose native HUD had never been drawn. Restore
+    // the original compositor for every bridge HUD-family replacement at the
+    // actual menu HUD draw. Already-native menu draws remain untouched.
+    {
+        auto* const current_pipeline =
+            load_command_list_pipeline(command_list);
+        auto* const original =
+            g_hud_composite_original_pso.load(std::memory_order_acquire);
+        const bool bridge_hud_replacement =
+            current_pipeline != nullptr && current_pipeline != original &&
+            mode3_hud_pipeline_family(current_pipeline);
+        if (g_set_pipeline_state != nullptr &&
+            w3vr::mode3_transport::restore_native_hud_for_menu_draw(
+                g_engine_menu_state.load(std::memory_order_relaxed) != 0,
+                bridge_hud_replacement,
+                original != nullptr)) {
+            g_set_pipeline_state(command_list, original);
+            store_command_list_pipeline(command_list, original);
+            w3vr::minimal_xr_log::hud(
+                "MENU_PSO_RESTORE",
+                "present=%llu command_list=%p replaced=%p original=%p",
+                g_present_count.load(std::memory_order_relaxed),
+                command_list, current_pipeline, original);
+        }
+    }
+
     // [FIX:AER-AFW-CINEMA-HUD-RESTORE V1190 2/4] V1189 can enter Cinema
     // while the gameplay scene-only PSO is still bound. AFW is intentionally
     // suspended here, so restore the validated baked Cinema HUD on the actual
@@ -25315,8 +25335,13 @@ void STDMETHODCALLTYPE hook_draw_instanced(
     }
     // Native No-AA can keep the already-bound gameplay HUD PSO across the
     // F10/Cinema transition, while DLSS tends to rebind it. Make the final HUD
-    // draw independent of that backend cadence: once a retained pair exists,
-    // replace any known member of the HUD PSO family at draw time as well.
+    // draw independent of that backend cadence.
+    // [FIX:CINEMA-HUD-EXACT-FRESHNESS V1552 1/1] V1121 used the weak
+    // mode3_early_hud_pair_ready() predicate here even though SetPipelineState
+    // and the OpenXR compositor both require the exact retained predecessor.
+    // A stale historical pair therefore removed the baked Cinema HUD and was
+    // then rejected by the late compositor. Use the same exact route-aware
+    // freshness contract at both suppression points.
     if (g_cinema_mode_active.load(std::memory_order_relaxed) &&
         // [FIX:CINEMA-MENU-HUD-GUARD V1135] Match the already-correct
         // SetPipelineState route.  During pause/inventory the menu quad owns
@@ -25338,7 +25363,7 @@ void STDMETHODCALLTYPE hook_draw_instanced(
         if (g_set_pipeline_state != nullptr &&
             scene_only != nullptr && current_pipeline != scene_only &&
             mode3_hud_pipeline_family(current_pipeline) &&
-            mode3_early_hud_pair_ready()) {
+            mode3_retained_hud_pair_ready_for_active_route()) {
             g_set_pipeline_state(command_list, scene_only);
             store_command_list_pipeline(command_list, scene_only);
             static std::atomic<uint32_t> cinema_draw_fallback_logs{};
@@ -28817,34 +28842,21 @@ void STDMETHODCALLTYPE hook_resource_barrier(
             const auto desc = barrier.Transition.pResource->GetDesc();
             if (desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D &&
                 desc.Width == g_game_render_width && desc.Height == g_game_render_height) {
-                // [FIX:PUREDARK-AFW-TAAU-SWAPCHAIN-COLOR-AUTHORITY V12108 1/1]
-                // D3D12_RESOURCE_STATE_PRESENT aliases COMMON (zero). During
-                // AFW publication an internal full-size texture can therefore
-                // look like a final PRESENT transition and consume the exact
-                // TAAU tag before the real game backbuffer arrives. Only this
-                // TAAU AFW route requires pointer-exact DXGI ownership; the
-                // validated DLSS and AFW-off capture routes remain unchanged.
-                if (puredark_afw_mode3_aer_taau_route_configured() &&
-                    !game_swapchain_owns_resource(
+                // [FIX:PRESENT-SWAPCHAIN-IDENTITY V1550] COMMON and PRESENT
+                // are both zero for every backend. A private full-size FSR
+                // colour snapshot must not consume the game's eye/pair tag or
+                // replace its RGBA8 capture ring with an RGBA16F ring.
+                if (!game_swapchain_owns_resource(
                         barrier.Transition.pResource)) {
-                    if (g_config.runtime_diagnostics) {
-                        static std::atomic<uint32_t>
-                            taau_afw_non_swapchain_present_logs{};
-                        if (take_bounded_log_slot(
-                                taau_afw_non_swapchain_present_logs, 32)) {
-                            log_line(
-                                "V12108 AFW TAAU rejected non-swapchain PRESENT command_list=%p resource=%p size=%llux%u format=%u before=0x%X present=%llu",
-                                command_list,
-                                barrier.Transition.pResource,
-                                static_cast<unsigned long long>(desc.Width),
-                                desc.Height,
-                                static_cast<unsigned>(desc.Format),
-                                static_cast<unsigned>(
-                                    barrier.Transition.StateBefore),
-                                static_cast<unsigned long long>(
-                                    g_present_count.load(
-                                        std::memory_order_relaxed)));
-                        }
+                    static std::atomic<uint32_t> non_swapchain_present_logs{};
+                    if (take_bounded_log_slot(non_swapchain_present_logs, 16)) {
+                        w3vr::minimal_xr_log::hud("PRESENT_REJECT",
+                            "present=%llu command_list=%p resource=%p size=%llux%u format=%u before=0x%X reason=not_game_backbuffer",
+                            static_cast<unsigned long long>(g_present_count.load(std::memory_order_relaxed)),
+                            command_list, barrier.Transition.pResource,
+                            static_cast<unsigned long long>(desc.Width), desc.Height,
+                            static_cast<unsigned>(desc.Format),
+                            static_cast<unsigned>(barrier.Transition.StateBefore));
                     }
                     continue;
                 }
@@ -43726,6 +43738,10 @@ void ensure_initialized() {
                 "V1538 retained_hud_snapshot_lifetime=xr_consumer_fence "
                 "record_to_signal_reservation=1 cross_queue_reuse=retired_only "
                 "aer_afw=1 strict_stereo=1 logging_timing_independent=1");
+            log_line(
+                "V1552 cinema_hud_suppression=exact_route_predecessor "
+                "weak_any_pair_fallback=removed menu_hud_family_restore=V1551 "
+                "optiscaler_ofxr_fsr=unchanged base=V1551");
             // [FIX:RESHADE-OVERLAY-MENU-ISOLATION V23036 3/4]
             log_line(
                 "V23036 reshade_overlay=official_open_close_event "
@@ -44958,7 +44974,8 @@ bool render_anchored_cinema_projection(
     const XrView eye_views[2],
     const XrPosef& panel_pose,
     float panel_width,
-    float panel_height) {
+    float panel_height,
+    std::array<float, 16> output_clip_positions[2]) {
     if (g_xr_command_list == nullptr ||
         g_xr_cinema_projection_pipeline == nullptr ||
         g_xr_cinema_projection_root_signature == nullptr ||
@@ -44988,6 +45005,10 @@ bool render_anchored_cinema_projection(
                 clip_positions[eye])) {
             return false;
         }
+    }
+    if (output_clip_positions != nullptr) {
+        output_clip_positions[0] = clip_positions[0];
+        output_clip_positions[1] = clip_positions[1];
     }
 
     D3D12_RESOURCE_BARRIER source_to_shader[2]{};
@@ -45663,6 +45684,19 @@ void initialize_openxr_probe() {
         load_xr_proc(g_xr_instance, "xrBeginFrame", pfn_xrBeginFrame);
         load_xr_proc(g_xr_instance, "xrEndFrame", pfn_xrEndFrame);
         load_xr_proc(g_xr_instance, "xrLocateViews", pfn_xrLocateViews);
+        PFN_xrVoidFunction presentation_transform_function{};
+        const XrResult presentation_transform_result =
+            pfn_xrGetInstanceProcAddr(
+                g_xr_instance,
+                "xrSetPresentationTransformOFXR",
+                &presentation_transform_function);
+        if (XR_SUCCEEDED(presentation_transform_result) &&
+            presentation_transform_function != nullptr) {
+            pfn_xrSetPresentationTransformOFXR =
+                reinterpret_cast<PFN_xrSetPresentationTransformOFXR>(
+                    presentation_transform_function);
+            log_line("OFXR presentation transform contract available");
+        }
         if (g_xr_visibility_mask_extension_enabled) {
             load_xr_proc(
                 g_xr_instance, "xrGetVisibilityMaskKHR",
@@ -48582,6 +48616,7 @@ void render_openxr_test_frame(
     int32_t projection_eye_shifts_y_px[2]{};
     bool full_surface_projection{};
     bool cinema_projection_panel_ready{};
+    std::array<float, 16> cinema_projection_clip_positions[2]{};
     float cinema_projection_panel_width{};
     float cinema_projection_panel_height{};
     float cinema_projection_aspect_ratio{};
@@ -50962,7 +50997,8 @@ void render_openxr_test_frame(
                             cinema_sources, current_panel_views,
                             cinema_projection_anchor,
                             cinema_projection_panel_width,
-                            cinema_projection_panel_height);
+                            cinema_projection_panel_height,
+                            cinema_projection_clip_positions);
                 }
 
                 copied_game = fit_projection_ready;
@@ -51827,6 +51863,42 @@ void render_openxr_test_frame(
     }
     const int64_t flight_end_frame_begin =
         w3vr::pipeline_flight::cpu_begin();
+    if (pfn_xrSetPresentationTransformOFXR != nullptr) {
+        XrfgPresentationTransformV1 presentation_transform{};
+        presentation_transform.version = 1;
+        presentation_transform.active =
+            cinema_panel && cinema_projection_panel_ready ? 1U : 0U;
+        presentation_transform.view_count =
+            presentation_transform.active != 0U ? 2U : 0U;
+        presentation_transform.frame_id = current_present;
+        if (presentation_transform.active != 0U) {
+            for (uint32_t eye = 0; eye < 2; ++eye) {
+                std::copy(
+                    cinema_projection_clip_positions[eye].begin(),
+                    cinema_projection_clip_positions[eye].end(),
+                    presentation_transform.clip_positions[eye]);
+            }
+        }
+        const XrResult transform_result =
+            pfn_xrSetPresentationTransformOFXR(
+                g_xr_session, &presentation_transform);
+        static bool last_transform_active{};
+        static uint32_t transform_failure_logs{};
+        if ((presentation_transform.active != 0U) !=
+                last_transform_active ||
+            XR_FAILED(transform_result)) {
+            log_line(
+                "OFXR presentation transform active=%u result=%s (%d) present=%llu",
+                presentation_transform.active,
+                xr_result_name(transform_result), transform_result,
+                static_cast<unsigned long long>(current_present));
+            last_transform_active = presentation_transform.active != 0U;
+            if (XR_FAILED(transform_result) &&
+                ++transform_failure_logs >= 8U) {
+                pfn_xrSetPresentationTransformOFXR = nullptr;
+            }
+        }
+    }
     w3vr::minimal_xr_log::write("END_BEGIN", current_present, trace_pair_id, g_xr_fence_value, end_info.layerCount);
     result = pfn_xrEndFrame(g_xr_session, &end_info);
     w3vr::minimal_xr_log::write("END_RETURN", current_present, trace_pair_id, g_xr_fence_value, result);

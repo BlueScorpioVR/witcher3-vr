@@ -4,7 +4,7 @@
 #include <cstdio>
 #include <cstdarg>
 
-// V1544 trial-only breadcrumbs. Independent of all renderer diagnostic gates.
+// V1550 trial-only breadcrumbs. Independent of all renderer diagnostic gates.
 // One WriteFile per event, no CRT file buffering, flush, worker, GPU query or lock.
 // The OS cache survives process termination, not power loss or an OS failure.
 namespace w3vr::minimal_xr_log {
@@ -51,14 +51,14 @@ inline void initialize() noexcept {
     SYSTEMTIME utc{};
     GetSystemTime(&utc);
     swprintf_s(name, 32768 - (name - path),
-        L"witcher3vr-minimal-V1544-%04u%02u%02u-%02u%02u%02u-%lu.log",
+        L"witcher3vr-minimal-V1550-%04u%02u%02u-%02u%02u%02u-%lu.log",
         utc.wYear, utc.wMonth, utc.wDay, utc.wHour, utc.wMinute, utc.wSecond,
         GetCurrentProcessId());
     file = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
         nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
     LARGE_INTEGER frequency{};
     QueryPerformanceFrequency(&frequency);
-    write("V1544_START_qpc_tid_event_frame_pair_fence_result", 0, 0, 0, frequency.QuadPart);
+    write("V1550_START_qpc_tid_event_frame_pair_fence_result", 0, 0, 0, frequency.QuadPart);
     // Process-lifetime handle: no teardown race with a renderer callback.
 }
 }

@@ -36,6 +36,18 @@ constexpr bool strict_hud_capture_publishable(
     return eye_valid && eye <= 1 && hud_draw_recorded;
 }
 
+// IsAnyMenu can change after REDengine has already bound any bridge-owned HUD
+// replacement on a command list. The menu panel owns the native final
+// composite, so the actual HUD draw must undo that stale replacement. This
+// includes scene-only as well as the per-eye Cinema/gameplay/Full-VR variants.
+constexpr bool restore_native_hud_for_menu_draw(
+    bool menu_active,
+    bool current_pipeline_is_bridge_replacement,
+    bool original_pipeline_available) {
+    return menu_active && current_pipeline_is_bridge_replacement &&
+        original_pipeline_available;
+}
+
 // Keep the current ownership of each eye of the exact output pair. A native
 // HUD publication must revoke an earlier scene-only proof for that same eye.
 // Callers serialize this state with the same mutex as command-list ownership.

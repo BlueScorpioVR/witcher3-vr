@@ -62,6 +62,8 @@ const auto kKnownDx12Dlls = std::to_array<std::wstring_view>({
     L"nvngx.dll_dlssnr.dll",
     L"amd_fidelityfx_dx12.dll",
     L"amd_fidelityfx_upscaler_dx12.dll",
+    L"amd_fidelityfx_framegeneration_dx12.dll",
+    L"ofxr_amd_fidelityfx_framegeneration_dx12.dll",
     L"renderdoc.dll",
     L"ReShade64.dll",
     // [FIX:OFXR-STARTUP-WHITELIST V1512 1/2] Root-owned XRFG-V041 layer.
