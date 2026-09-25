@@ -177,7 +177,7 @@ The integration dropdown offers Off, OptiScaler, ReShade and OptiScaler + ReShad
 
 ReShade is installed as a plain runtime. Its add-ons and their configuration are entirely user-managed: the launcher does not copy, modify or remove them. Existing unrelated add-ons and ReShade settings are preserved. OptiScaler settings use Delete; ReShade uses F4. AFW debug uses Ctrl+F6.
 
-Disable DLSS Override before enabling OptiScaler. OptiScaler selections need a DLSS/DLAA render route. The INI `config_version` is a settings-format migration marker, not a required mod build version; a different value does not block launch. The experimental controller-locked HUD option keeps the gameplay HUD aligned to mouse/pad camera turns rather than headset turns; F9 recenters its direction.
+Disable DLSS Override before enabling OptiScaler. OptiScaler selections need a DLSS/DLAA render route. The INI `config_version` is a settings-format migration marker, not a required mod build version; a different value does not block launch. The experimental controller-locked HUD option holds the gameplay HUD in the F9-recentered front direction instead of following headset turns.
 
 ### Cinema
 

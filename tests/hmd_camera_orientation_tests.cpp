@@ -21,6 +21,18 @@ void require(bool condition, const char* message) {
 }
 
 int main() {
+    const auto fixed_marker = orientation::marker_hmd_rotation(
+        true, {-4.0f, 12.0f, 19.0f}, 1.9f);
+    require(near(fixed_marker.roll, 0.0f) &&
+        near(fixed_marker.pitch, 0.0f) &&
+        near(fixed_marker.yaw, 0.0f),
+        "fixed HUD omits physical HMD rotation from hovering icons");
+    const auto normal_marker = orientation::marker_hmd_rotation(
+        false, {-4.0f, 12.0f, 19.0f}, 1.9f);
+    require(near(normal_marker.roll, -4.0f) &&
+        near(normal_marker.pitch, 22.8f) &&
+        near(normal_marker.yaw, 19.0f),
+        "normal marker keeps its HMD rotation and vertical gain");
     orientation::EulerDegrees output{};
     require(orientation::compose_game_camera_with_local_hmd(
         {}, {-5.0f, 10.0f, 20.0f}, output), "identity compose");

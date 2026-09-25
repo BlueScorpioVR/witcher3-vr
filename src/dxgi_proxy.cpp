@@ -1378,10 +1378,6 @@ float g_hmd_position_y{};
 float g_hmd_position_z{};
 XrVector3f g_mono_neck_pose_correction{};
 std::mutex g_hmd_pose_snapshot_mutex{};
-std::atomic<float> g_hud_game_camera_yaw{};
-std::atomic<float> g_hud_game_camera_pitch{};
-std::atomic<bool> g_hud_game_camera_valid{};
-std::atomic<uint64_t> g_hud_center_generation{};
 
 XrQuaternionf multiply_quaternions(const XrQuaternionf& a, const XrQuaternionf& b);
 XrVector3f rotate_vector(const XrQuaternionf& rotation, const XrVector3f& vector);
@@ -2788,6 +2784,11 @@ bool mode3_aer_afw_post_hud_gameplay_active() {
 
 bool stereo_icon_policy_transport_active() {
     return mode3_stereo_transport_active();
+}
+bool fixed_gameplay_hud_requested() {
+    return g_config.hud_controller_locked &&
+        !g_cinema_mode_active.load(std::memory_order_relaxed) &&
+        !g_force_mono_cinema.load(std::memory_order_relaxed);
 }
 std::atomic<void*> g_engine_gui_manager{};
 std::atomic<uint64_t> g_engine_frame_factory_last_logged_present{UINT64_MAX};
@@ -34326,7 +34327,7 @@ void publish_packed_world_marker_camera(
     // pose once per pair for both stereo transports. The helper rejects the
     // second AER eye of the same pair, so this never becomes per-icon work.
     if (stereo_icon_policy_transport_active() &&
-        !g_config.steady_icons) {
+        !g_config.steady_icons && !fixed_gameplay_hud_requested()) {
         publish_mode3_marker_pose_hold(
             producer_pair,
             g_hmd_pitch_degrees,
@@ -37444,17 +37445,6 @@ void __fastcall hook_engine_view_rebuild(float* view) {
         const float original_pitch = view[5];
         const float original_yaw = view[6];
         const float original_roll = view[4];
-        if (g_config.hud_controller_locked && world_camera &&
-            g_engine_factory_eye != 1 && std::isfinite(original_yaw) &&
-            std::isfinite(original_pitch)) {
-            g_hud_game_camera_yaw.store(
-                original_yaw, std::memory_order_relaxed);
-            g_hud_game_camera_pitch.store(
-                g_config.hmd_lock_game_pitch ? 0.0f : original_pitch,
-                std::memory_order_relaxed);
-            g_hud_game_camera_valid.store(true,
-                std::memory_order_release);
-        }
         if (!g_config.hmd_compositor_only) {
             const float position_scale = g_config.hmd_position_scale;
             const float local_right = camera_hmd_position_x * position_scale;
@@ -37636,12 +37626,15 @@ void __fastcall hook_engine_view_rebuild(float* view) {
                         ? 0.0f
                         : game_pitch_delta *
                             g_config.world_marker_game_pitch_gain);
-                const w3vr::hmd_camera_orientation::EulerDegrees
-                    marker_hmd_rotation{
-                        scaled_hmd_roll,
-                        scaled_hmd_pitch *
-                            g_config.world_marker_hmd_vertical_gain,
-                        scaled_hmd_yaw};
+                // The fixed HUD owns the no-headset game front. Its hovering
+                // icons are rasterized into that HUD source, so applying the
+                // physical HMD rotation here would move them inside a plane
+                // whose OpenXR projection already accounts for head motion.
+                const auto marker_hmd_rotation =
+                    w3vr::hmd_camera_orientation::marker_hmd_rotation(
+                        fixed_gameplay_hud_requested(),
+                        {scaled_hmd_roll, scaled_hmd_pitch, scaled_hmd_yaw},
+                        g_config.world_marker_hmd_vertical_gain);
                 w3vr::hmd_camera_orientation::EulerDegrees
                     composed_marker_rotation{};
                 const bool marker_rotation_composed =
@@ -39587,7 +39580,8 @@ void __fastcall hook_engine_world_vector_to_view_ratio(
             // camera so scene and marker are reprojected together exactly
             // once. Preserve the legacy live extrapolation only outside the
             // common Mode 3 transport.
-            if (!stereo_icon_policy_transport_active()) {
+            if (!fixed_gameplay_hud_requested() &&
+                !stereo_icon_policy_transport_active()) {
                 const float pitch_delta = shortest_angle_delta(
                     g_hmd_pitch_degrees, published_pitch);
                 const float yaw_delta = shortest_angle_delta(
@@ -39598,7 +39592,8 @@ void __fastcall hook_engine_world_vector_to_view_ratio(
                     g_config.world_marker_hmd_vertical_gain;
                 extrapolated_view[6] += yaw_delta * g_config.hmd_yaw_scale;
                 extrapolated_view[4] += roll_delta * g_config.hmd_roll_scale;
-            } else if (stereo_icon_policy_transport_active() &&
+            } else if (!fixed_gameplay_hud_requested() &&
+                stereo_icon_policy_transport_active() &&
                 !g_config.steady_icons) {
                 // [FIX:MODE3-200MS-MARKER-HOLD 3/3] Replace only the
                 // HMD contribution already baked into this exact camera with
@@ -44435,53 +44430,32 @@ bool composite_mode3_hud_into_projection_image(
         hud_eye_geometry.baseline_m >= 0.04f &&
         hud_eye_geometry.baseline_m <= 0.10f &&
             hud_eye_geometry.cant_degrees <= 45.0f;
-    // [TRIAL:CONTROLLER-LOCKED-HUD V1566] Keep the gameplay HUD plane at the
-    // F9-calibrated tracking orientation while using the current physical
-    // eye poses for parallax. Controller/mouse camera turns still move the
-    // game image normally; headset rotation no longer carries the HUD plane.
+    // [TRIAL:STATIC-HUD-MARKER-POSE V1570] The experimental HUD always faces
+    // the no-headset game front calibrated by F9. Neither a game-camera turn
+    // nor headset rotation may re-anchor it to the user's current gaze.
     // Reticle, Cinema, Full VR and menu geometry keep their validated route.
     auto hud_plane_geometry = hud_eye_geometry;
-    if (headset_projection && g_config.hud_controller_locked &&
-        !automatic_full_vr_cutscene) {
+    const bool controller_locked_hud_active = headset_projection &&
+        fixed_gameplay_hud_requested() && !automatic_full_vr_cutscene;
+    bool controller_hud_visible = true;
+    if (controller_locked_hud_active) {
         XrQuaternionf center_orientation{};
         bool center_valid{};
-        uint64_t center_generation{};
         {
             std::scoped_lock pose_lock{g_hmd_pose_snapshot_mutex};
             center_valid = g_hmd_center_valid.load(
                 std::memory_order_acquire);
             if (center_valid) {
                 center_orientation = g_hmd_center_orientation;
-                center_generation = g_hud_center_generation.load(
-                    std::memory_order_relaxed);
             }
         }
-        // The native camera sample precedes the injected HMD rotation. A
-        // mouse/pad turn therefore rotates this HUD plane, while physical
-        // headset motion changes only the eye-to-plane transform.
-        static uint64_t baseline_generation = UINT64_MAX;
-        static float baseline_yaw{};
-        static float baseline_pitch{};
-        if (g_hud_game_camera_valid.load(std::memory_order_acquire)) {
-            const float game_yaw = g_hud_game_camera_yaw.load(
-                std::memory_order_relaxed);
-            const float game_pitch = g_hud_game_camera_pitch.load(
-                std::memory_order_relaxed);
-            if (baseline_generation != center_generation) {
-                baseline_yaw = game_yaw;
-                baseline_pitch = game_pitch;
-                baseline_generation = center_generation;
+        if (center_valid) {
+            w3vr::openxr_eye_geometry::EyeGeometry fixed_geometry{};
+            if (w3vr::openxr_eye_geometry::with_hud_plane_orientation(
+                    hud_eye_geometry, center_orientation,
+                    fixed_geometry)) {
+                hud_plane_geometry = fixed_geometry;
             }
-            center_orientation = multiply_quaternions(center_orientation,
-                quaternion_from_hmd_euler(
-                    shortest_yaw_delta(game_pitch, baseline_pitch),
-                    shortest_yaw_delta(game_yaw, baseline_yaw), 0.0f));
-        }
-        w3vr::openxr_eye_geometry::EyeGeometry fixed_geometry{};
-        if (center_valid &&
-            w3vr::openxr_eye_geometry::with_hud_plane_orientation(
-                hud_eye_geometry, center_orientation, fixed_geometry)) {
-            hud_plane_geometry = fixed_geometry;
         }
     }
     for (uint32_t eye = 0; eye < 2 && headset_projection; ++eye) {
@@ -44490,17 +44464,26 @@ bool composite_mode3_hud_into_projection_image(
             image_rect.extent.width;
         const int64_t image_bottom = static_cast<int64_t>(image_rect.offset.y) +
             image_rect.extent.height;
-        headset_projection = image_rect.offset.x >= 0 &&
+        const bool valid_image_rect = image_rect.offset.x >= 0 &&
             image_rect.offset.y >= 0 &&
             image_rect.extent.width > 0 &&
             image_rect.extent.height > 0 &&
             image_right <= target_swapchain.width &&
-            image_bottom <= target_swapchain.height &&
-            w3vr::openxr_eye_geometry::
+            image_bottom <= target_swapchain.height;
+        headset_projection = headset_projection && valid_image_rect;
+        if (headset_projection) {
+            const bool plane_visible = w3vr::openxr_eye_geometry::
                 build_cyclopean_hud_plane_clip_positions(
                     hud_plane_geometry, eye, source_render_fov,
                     submitted_views[eye].fov, hud_size,
                     inverse_hud_distance, hud_clip_positions[eye]);
+            if (controller_locked_hud_active) {
+                controller_hud_visible = controller_hud_visible &&
+                    plane_visible;
+            } else {
+                headset_projection = headset_projection && plane_visible;
+            }
+        }
     }
     if (cinema_projection) {
         bool panel_geometry_valid = true;
@@ -44740,13 +44723,15 @@ bool composite_mode3_hud_into_projection_image(
             &sampling_constants[6],
             &kReticleHalfExtentFraction,
             sizeof(kReticleHalfExtentFraction));
-        g_xr_command_list->SetGraphicsRoot32BitConstants(
-            1, static_cast<UINT>(hud_clip_positions[eye].size()),
-            hud_clip_positions[eye].data(), 0);
-        g_xr_command_list->SetGraphicsRoot32BitConstants(
-            2, static_cast<UINT>(std::size(sampling_constants)),
-            sampling_constants, 0);
-        g_draw_instanced(g_xr_command_list, 6, 1, 0, 0);
+        if (controller_hud_visible) {
+            g_xr_command_list->SetGraphicsRoot32BitConstants(
+                1, static_cast<UINT>(hud_clip_positions[eye].size()),
+                hud_clip_positions[eye].data(), 0);
+            g_xr_command_list->SetGraphicsRoot32BitConstants(
+                2, static_cast<UINT>(std::size(sampling_constants)),
+                sampling_constants, 0);
+            g_draw_instanced(g_xr_command_list, 6, 1, 0, 0);
+        }
         if (distance_converged_reticle) {
             sampling_constants[5] = 2u;
             g_xr_command_list->SetGraphicsRoot32BitConstants(
@@ -46043,7 +46028,6 @@ void update_hmd_freelook_pose() {
     }
     if (manual_recenter || !g_hmd_center_valid.load()) {
         g_hmd_center_orientation = current;
-        g_hud_center_generation.fetch_add(1, std::memory_order_relaxed);
         const float yaw_twist_length = sqrtf(
             current.y * current.y + current.w * current.w);
         g_hmd_center_yaw_orientation = yaw_twist_length > 0.000001f
