@@ -3875,17 +3875,17 @@ std::atomic<uint32_t> g_final_present_missing_route_logs{};
 // [FIX:STREAMLINE-COMMAND-LIST-UNWRAP 4/6] Every map that joins a temporal
 // producer to its submission must be keyed by the pointer
 // ExecuteCommandLists will see, never by the interposer wrapper handed to the
-// public callback. Unwrapping inside each writer keeps the identity contract in
-// one place per map and is a no-op for already-native lists.
-ID3D12GraphicsCommandList* resolve_native_command_list(
+// public callback. Resolution inside each writer keeps the identity contract
+// in one place per map and is a no-op for an already-active execution endpoint.
+ID3D12GraphicsCommandList* resolve_execution_command_list(
     ID3D12GraphicsCommandList* command_list);
-bool command_list_is_d3d12_runtime(const void* object);
+bool command_list_is_recording_endpoint(const void* object);
 
 void record_streamline_command_list_eye(
     ID3D12GraphicsCommandList* wrapped_command_list,
     uint32_t eye) {
     ID3D12GraphicsCommandList* const command_list =
-        resolve_native_command_list(wrapped_command_list);
+        resolve_execution_command_list(wrapped_command_list);
     if (command_list == nullptr) {
         return;
     }
@@ -3899,7 +3899,7 @@ void record_streamline_command_list_route(
     const EngineFrameTag& tag) {
     // [FIX:STREAMLINE-COMMAND-LIST-UNWRAP 5/6]
     ID3D12GraphicsCommandList* const command_list =
-        resolve_native_command_list(wrapped_command_list);
+        resolve_execution_command_list(wrapped_command_list);
     if (command_list == nullptr || tag.eye > 1 || tag.pair_id == 0 ||
         tag.pair_id == UINT64_MAX) {
         return;
@@ -11149,13 +11149,14 @@ bool record_puredark_afw_motion_normalization_locked(
     uint32_t input_kind,
     w3vr::puredark_afw::TextureDesc& destination,
     std::wstring& error) {
-    // [FIX:STREAMLINE-AFW-NATIVE-RECORDING V1365 1/3] Every operation in this
-    // function is recorded either through a raw native D3D12 trampoline or
-    // directly on the same object. A public Streamline wrapper is therefore
-    // never a valid recording target, even if its virtual forwarding methods
-    // happen to work for other calls.
-    if (!command_list_is_d3d12_runtime(command_list)) {
-        error = L"AFW motion normalization requires a native D3D12 command list";
+    // [FIX:STREAMLINE-AFW-NATIVE-RECORDING V1365 1/3]
+    // [FIX:RENDERDOC-COMMAND-LIST-ENDPOINT V1544 1/3] Every operation in this
+    // function is recorded through the trampoline belonging to the active
+    // ExecuteCommandLists interception layer. That endpoint is native D3D12
+    // normally and RenderDoc's D3D12 wrapper during capture. Public Streamline
+    // and ReShade wrappers remain invalid recording targets.
+    if (!command_list_is_recording_endpoint(command_list)) {
+        error = L"AFW motion normalization requires a D3D12 recording endpoint";
         return false;
     }
     if (bundle_slot >= kPuredarkAfwBundleRingSize ||
@@ -11798,10 +11799,11 @@ HMODULE vtable_owner_of(const void* object) {
     return module_owning_address(vtable[0]);
 }
 
-bool command_list_is_d3d12_runtime(const void* object) {
+bool command_list_is_recording_endpoint(const void* object) {
     const HMODULE owner = vtable_owner_of(object);
     return module_base_name_is(owner, L"D3D12Core.dll") ||
-        module_base_name_is(owner, L"d3d12.dll");
+        module_base_name_is(owner, L"d3d12.dll") ||
+        module_base_name_is(owner, L"renderdoc.dll");
 }
 
 w3vr::command_list_identity::Owner classify_command_list_owner(
@@ -11818,11 +11820,15 @@ w3vr::command_list_identity::Owner classify_command_list_owner(
     if (module_base_name_is(owner, L"ReShade64.dll")) {
         return Owner::ReShade;
     }
+    if (module_base_name_is(owner, L"renderdoc.dll")) {
+        return Owner::RenderDoc;
+    }
     return Owner::Unknown;
 }
 
 // [FIX:NESTED-COMMAND-LIST-IDENTITY V1532 1/3]
-ID3D12GraphicsCommandList* resolve_native_command_list(
+// [FIX:RENDERDOC-COMMAND-LIST-ENDPOINT V1544 2/3]
+ID3D12GraphicsCommandList* resolve_execution_command_list(
     ID3D12GraphicsCommandList* command_list) {
     using w3vr::command_list_identity::Owner;
     if (command_list == nullptr) {
@@ -11831,12 +11837,13 @@ ID3D12GraphicsCommandList* resolve_native_command_list(
     const auto owner = classify_command_list_owner(command_list);
     // Native lists and unrelated integrations are outside the proxy rewrite.
     // Unknown objects encountered INSIDE a recognized chain are rejected.
-    if (owner == Owner::Native || owner == Owner::Unknown) {
+    if (owner == Owner::Native || owner == Owner::RenderDoc ||
+        owner == Owner::Unknown) {
         return command_list;
     }
     const auto resolved = w3vr::command_list_identity::resolve(
         command_list, classify_command_list_owner);
-    if (resolved.native == nullptr) {
+    if (resolved.endpoint == nullptr) {
         static std::atomic<uint32_t> failure_logs{};
         if (take_bounded_log_slot(failure_logs, 8)) {
             log_line("V1532 command-list identity rejected wrapper=%p depth=%u reason=%u",
@@ -11845,13 +11852,28 @@ ID3D12GraphicsCommandList* resolve_native_command_list(
         }
         return nullptr;
     }
+    // [FIX:RENDERDOC-COMMAND-LIST-ENDPOINT V1544 3/3] The Streamline
+    // producer key must terminate at the same RenderDoc wrapper intercepted by
+    // ExecuteCommandLists. Record this once without enabling broad logging.
+    if (g_config.renderdoc_capture_enabled &&
+        g_config.renderdoc_streamline_device_bridge &&
+        classify_command_list_owner(resolved.endpoint) == Owner::RenderDoc) {
+        static std::atomic<bool> renderdoc_endpoint_logged{};
+        if (!renderdoc_endpoint_logged.exchange(true)) {
+            w3vr::minimal_xr_log::write(
+                "V1544_RENDERDOC_COMMAND_ENDPOINT",
+                g_present_count.load(std::memory_order_relaxed),
+                resolved.wrappers,
+                reinterpret_cast<uintptr_t>(resolved.endpoint), 0);
+        }
+    }
     static std::atomic<uint32_t> success_logs{};
     if (take_bounded_log_slot(success_logs, 8)) {
-        log_line("V1532 command-list identity resolved owner=%s wrapper=%p native=%p depth=%u",
+        log_line("V1544 command-list identity resolved owner=%s wrapper=%p endpoint=%p depth=%u",
             owner == Owner::Streamline ? "Streamline" : "ReShade",
-            command_list, resolved.native, resolved.wrappers);
+            command_list, resolved.endpoint, resolved.wrappers);
     }
-    return resolved.native;
+    return resolved.endpoint;
 }
 
 void finalize_puredark_afw_dlss_submission(
@@ -11860,11 +11882,10 @@ void finalize_puredark_afw_dlss_submission(
     NVSDK_NGX_Result result) {
     // [FIX:STREAMLINE-COMMAND-LIST-UNWRAP 3/3] The producer must be registered
     // under the pointer ExecuteCommandLists will actually present, not the
-    // interposer wrapper the temporal callback was handed. Unwrapped lists and
-    // the NGX boundary return unchanged, so this is identity for every runtime
-    // that already worked.
+    // interposer wrapper the temporal callback was handed. Native D3D12 and
+    // RenderDoc endpoints remain unchanged; only outer wrappers are resolved.
     ID3D12GraphicsCommandList* const command_list =
-        resolve_native_command_list(wrapped_command_list);
+        resolve_execution_command_list(wrapped_command_list);
     if (!puredark_afw_dlss_route_active() || command_list == nullptr) {
         return;
     }
@@ -11992,7 +12013,7 @@ void finalize_dlss_cache_submission(
     // consumer sits behind: peek_mode3_temporal_cache_submission must find the
     // cache entry under the submitted pointer or no producer is ever consumed.
     ID3D12GraphicsCommandList* const command_list =
-        resolve_native_command_list(wrapped_command_list);
+        resolve_execution_command_list(wrapped_command_list);
     if (!dlss_submitted_cache_route_active() ||
         command_list == nullptr || result != NVSDK_NGX_Result_Success ||
         !g_streamline_dlss_route_tag_valid) {
@@ -19557,12 +19578,31 @@ void install_resource_hooks(ID3D12Resource* resource) {
     }
 
     if (g_resource_release == nullptr) {
-        auto target = method<void*>(resource, 2);
-        if (MH_CreateHook(target,
-                reinterpret_cast<void*>(&hook_resource_release),
-                reinterpret_cast<void**>(&g_resource_release)) == MH_OK &&
-            MH_EnableHook(target) == MH_OK) {
-            log_line("Renderer hooked ID3D12Resource::Release at %p", target);
+        // [FIX:RENDERDOC-WRAPPED-RESOURCE-RELEASE-ISOLATION V1543]
+        // The Streamline bridge makes g_d3d12_device a RenderDoc wrapper. In
+        // that mode this vtable target is WrappedID3D12Resource::Release, so a
+        // process-wide MinHook would also intercept RenderDoc's own lifetime
+        // management while it prepares capture initial states. The validated
+        // V1273 capture path predates this Release hook; keep Map/Unmap exactly
+        // as before, but leave wrapper lifetime ownership entirely to RenderDoc.
+        const bool renderdoc_wrapped_device =
+            g_config.renderdoc_capture_enabled &&
+            g_config.renderdoc_streamline_device_bridge;
+        if (renderdoc_wrapped_device) {
+            static std::once_flag renderdoc_release_isolation_log_once;
+            std::call_once(renderdoc_release_isolation_log_once, []() {
+                log_line(
+                    "V1543 RenderDoc bridge isolation skipped "
+                    "ID3D12Resource::Release hook");
+            });
+        } else {
+            auto target = method<void*>(resource, 2);
+            if (MH_CreateHook(target,
+                    reinterpret_cast<void*>(&hook_resource_release),
+                    reinterpret_cast<void**>(&g_resource_release)) == MH_OK &&
+                MH_EnableHook(target) == MH_OK) {
+                log_line("Renderer hooked ID3D12Resource::Release at %p", target);
+            }
         }
     }
 
@@ -28603,6 +28643,20 @@ void STDMETHODCALLTYPE hook_resource_barrier(
     ID3D12GraphicsCommandList* command_list,
     UINT num_barriers,
     const D3D12_RESOURCE_BARRIER* barriers) {
+    // [FIX:RENDERDOC-INTERNAL-BARRIER-BYPASS V1545 1/1] RenderDoc records its
+    // initial-state copies on private command lists implemented by renderdoc.dll.
+    // Their restore barriers are capture bookkeeping, not REDengine/AFW frame
+    // transitions. Feeding them back into the proxy's PRESENT/UAV/resource
+    // tracking can re-enter RenderDoc while its initial-state locks are held.
+    // Bypass only the direct RenderDoc -> RenderDoc-list edge; game, Streamline,
+    // ReShade and PureDark calls targeting the same wrapper remain observable.
+    if (g_renderdoc_module != nullptr &&
+        module_owning_address(_ReturnAddress()) == g_renderdoc_module &&
+        classify_command_list_owner(command_list) ==
+            w3vr::command_list_identity::Owner::RenderDoc) {
+        g_resource_barrier(command_list, num_barriers, barriers);
+        return;
+    }
     if (is_reshade_immediate_command_list(command_list)) {
         g_resource_barrier(command_list, num_barriers, barriers);
         return;
@@ -41532,7 +41586,7 @@ int __fastcall hook_sl_evaluate_feature(
         const auto& snapshot = g_streamline_dlss_evaluate_snapshot;
         record_streamline_command_list_eye(command_list, eye);
         ID3D12GraphicsCommandList* const afw_recording_command_list =
-            resolve_native_command_list(command_list);
+            resolve_execution_command_list(command_list);
         if (callback_constants_valid) {
             public_jitter_applied =
                 resubmit_streamline_native_asymmetric_dlss_jitter(
@@ -41579,7 +41633,7 @@ int __fastcall hook_sl_evaluate_feature(
         clean_mono_transport_active() && temporal_backend_is_dlss();
     ID3D12GraphicsCommandList* const clean_mono_recording_command_list =
         clean_mono_dlss_evaluation
-        ? resolve_native_command_list(command_list)
+        ? resolve_execution_command_list(command_list)
         : nullptr;
     const bool clean_mono_dlss_dispatched = clean_mono_dlss_evaluation &&
         dispatch_clean_mono_dlss_camera_motion(

@@ -25,7 +25,7 @@ struct Node : IUnknown {
         *out = nullptr;
         if (fail) return E_NOINTERFACE;
         if (null_success) return S_OK;
-        if (owner == Owner::Native && graphics &&
+        if ((owner == Owner::Native || owner == Owner::RenderDoc) && graphics &&
             iid == __uuidof(ID3D12GraphicsCommandList)) {
             AddRef();
             *out = this;
@@ -52,23 +52,28 @@ Owner classify(const IUnknown* object) {
 
 int main() {
     Node native{};
+    Node renderdoc{}; renderdoc.owner = Owner::RenderDoc;
     Node streamline{}; streamline.owner = Owner::Streamline; streamline.inner = &native;
     Node reshade{}; reshade.owner = Owner::ReShade; reshade.inner = &native;
     auto* const expected = reinterpret_cast<ID3D12GraphicsCommandList*>(&native);
-    assert(resolve(&native, classify).native == expected);
-    assert(resolve(&streamline, classify).native == expected);
-    assert(resolve(&reshade, classify).native == expected);
-    assert(native.refs == 1 && streamline.refs == 1 && reshade.refs == 1);
+    auto* const renderdoc_expected =
+        reinterpret_cast<ID3D12GraphicsCommandList*>(&renderdoc);
+    assert(resolve(&native, classify).endpoint == expected);
+    assert(resolve(&renderdoc, classify).endpoint == renderdoc_expected);
+    assert(resolve(&streamline, classify).endpoint == expected);
+    assert(resolve(&reshade, classify).endpoint == expected);
+    assert(native.refs == 1 && renderdoc.refs == 1 &&
+        streamline.refs == 1 && reshade.refs == 1);
 
     // The failing topology: the first wrapper contains another proxy, not a
     // direct D3D12 runtime pointer. Both orders must find the same native key.
     streamline.inner = &reshade;
     auto result = resolve(&streamline, classify);
-    assert(result.native == expected && result.wrappers == 2);
+    assert(result.endpoint == expected && result.wrappers == 2);
     streamline.inner = &native;
     reshade.inner = &streamline;
     result = resolve(&reshade, classify);
-    assert(result.native == expected && result.wrappers == 2);
+    assert(result.endpoint == expected && result.wrappers == 2);
     assert(native.refs == 1 && streamline.refs == 1 && reshade.refs == 1);
 
     // Missing/foreign interfaces are not guessed or returned as native.
@@ -106,7 +111,7 @@ int main() {
     }
     assert(resolve(&chain[0], classify).failure == Failure::Depth);
     result = resolve(&chain[1], classify);
-    assert(result.native == expected && result.wrappers == kMaxWrappers);
+    assert(result.endpoint == expected && result.wrappers == kMaxWrappers);
     for (const auto& node : chain) assert(node.refs == 1);
 
     // Regression for the six producer slots: keys from nested callbacks match
@@ -117,15 +122,32 @@ int main() {
     for (uint64_t frame = 0; frame < 1024; ++frame) {
         Node* current_native = (frame & 1) ? &native : &other_native;
         reshade.inner = current_native;
-        auto* const recorded_key = resolve(&streamline, classify).native;
+        auto* const recorded_key = resolve(&streamline, classify).endpoint;
         assert(recorded_key != nullptr);
         pending[recorded_key] = frame;
-        auto* const executed_key = resolve(current_native, classify).native;
+        auto* const executed_key = resolve(current_native, classify).endpoint;
         const auto found = pending.find(executed_key);
         assert(found != pending.end() && found->second == frame);
         pending.erase(found);
         assert(pending.empty());
         assert(current_native->refs == 1 && reshade.refs == 1 && streamline.refs == 1);
+    }
+
+    // With the RenderDoc bridge active, Streamline's documented base link
+    // terminates at RenderDoc's wrapper. ExecuteCommandLists is hooked on that
+    // same wrapper, so producer and execution keys must remain pointer-exact.
+    streamline.inner = &renderdoc;
+    for (uint64_t frame = 0; frame < 1024; ++frame) {
+        auto* const recorded_key = resolve(&streamline, classify).endpoint;
+        auto* const executed_key = resolve(&renderdoc, classify).endpoint;
+        assert(recorded_key == renderdoc_expected);
+        assert(executed_key == renderdoc_expected);
+        pending[recorded_key] = frame;
+        const auto found = pending.find(executed_key);
+        assert(found != pending.end() && found->second == frame);
+        pending.erase(found);
+        assert(pending.empty());
+        assert(renderdoc.refs == 1 && streamline.refs == 1);
     }
     return 0;
 }
