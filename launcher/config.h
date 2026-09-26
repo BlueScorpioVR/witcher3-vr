@@ -31,6 +31,7 @@ enum class FrameGenerationBackend {
     Off,
     FidelityFx,
     Nvidia,
+    NvidiaNew,
     Fsr3,
     Count,
 };

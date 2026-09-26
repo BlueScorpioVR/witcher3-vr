@@ -280,7 +280,8 @@ FrameGenerationBackend ReadFrameGenerationBackend(const IniDocument& ini) {
         return FrameGenerationBackend::FidelityFx;
     }
     if (value == "nvidia") {
-        return FrameGenerationBackend::Nvidia;
+        return ReadString(ini, "ofxr", "nvidia_route", "legacy") == "new"
+            ? FrameGenerationBackend::NvidiaNew : FrameGenerationBackend::Nvidia;
     }
     return FrameGenerationBackend::Off;
 }
@@ -291,6 +292,7 @@ const char* FrameGenerationBackendIniValue(
     case FrameGenerationBackend::FidelityFx:
         return "fidelityfx";
     case FrameGenerationBackend::Nvidia:
+    case FrameGenerationBackend::NvidiaNew:
         return "nvidia";
     case FrameGenerationBackend::Fsr3:
         return "fidelityfx";
@@ -1928,6 +1930,8 @@ bool BuildUpdatedOptiscalerIniDocument(const ConfigPaths& paths,
     optiscaler.Set("ofxr", "motion_vectors", fsr ? "dlss" : "off");
     optiscaler.Set("ofxr", "backend",
         FrameGenerationBackendIniValue(state.frame_generation_backend));
+    optiscaler.Set("ofxr", "nvidia_route",
+        state.frame_generation_backend == FrameGenerationBackend::NvidiaNew ? "new" : "legacy");
     optiscaler.Set("ofxr", "nvidia_preset",
         OfxrNvidiaPresetIniValue(state.ofxr_nvidia_preset));
     optiscaler.Set("ofxr", "nvidia_input_scale",
@@ -1970,6 +1974,8 @@ bool BuildUpdatedOfxrDocument(const ConfigPaths& paths,
     ofxr.Set("ofxr", "motion_vectors", fsr ? "dlss" : "off");
     ofxr.Set("ofxr", "backend",
         FrameGenerationBackendIniValue(state.frame_generation_backend));
+    ofxr.Set("ofxr", "nvidia_route",
+        state.frame_generation_backend == FrameGenerationBackend::NvidiaNew ? "new" : "legacy");
     ofxr.Set("ofxr", "nvidia_preset",
         OfxrNvidiaPresetIniValue(state.ofxr_nvidia_preset));
     ofxr.Set("ofxr", "nvidia_input_scale",

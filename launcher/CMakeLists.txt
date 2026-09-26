@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(Witcher3VRLauncher VERSION 0.1570.0 LANGUAGES CXX)
+project(Witcher3VRLauncher VERSION 0.1579.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

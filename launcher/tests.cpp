@@ -442,8 +442,8 @@ void TestAllModes(const w3vr::ConfigPaths& paths) {
         Require(w3vr::BuildUpdatedOfxrDocument(
                 paths, state, ofxr, error),
             "OFXR Bridge sidecar document build failed");
-        const std::array<std::string, 4> expected_ofxr{
-            "off", "fidelityfx", "nvidia", "fidelityfx"};
+        const std::array<std::string, 5> expected_ofxr{
+            "off", "fidelityfx", "nvidia", "nvidia", "fidelityfx"};
         Require(ofxr.Get("ofxr", "backend") ==
                 expected_ofxr[static_cast<size_t>(
                     state.frame_generation_backend)],
@@ -1770,7 +1770,8 @@ void TestOfxrAndPersistentOptiscalerSave() {
     // a manual recorder change made after the launcher loaded its UI state.
     for (const auto backend : {w3vr::FrameGenerationBackend::Off,
             w3vr::FrameGenerationBackend::FidelityFx,
-            w3vr::FrameGenerationBackend::Nvidia,
+              w3vr::FrameGenerationBackend::Nvidia,
+              w3vr::FrameGenerationBackend::NvidiaNew,
             w3vr::FrameGenerationBackend::Fsr3}) {
         for (const bool mod_logging : {false, true}) {
             for (const bool ofxr_logging : {false, true}) {
@@ -1818,14 +1819,17 @@ void TestOfxrAndPersistentOptiscalerSave() {
                         w3vr::FrameGenerationBackend::Fsr3;
                     const char* backend_value = backend ==
                             w3vr::FrameGenerationBackend::Off ? "off" :
-                        backend == w3vr::FrameGenerationBackend::Nvidia
+                          (backend == w3vr::FrameGenerationBackend::Nvidia ||
+                           backend == w3vr::FrameGenerationBackend::NvidiaNew)
                             ? "nvidia" : "fidelityfx";
                     expected_doc.Set("ofxr", "enabled", enabled ? "1" : "0");
                     expected_doc.Set("ofxr", "frame_generation",
                         fsr ? "fsr3" : "ofxr");
                     expected_doc.Set("ofxr", "motion_vectors",
                         fsr ? "dlss" : "off");
-                    expected_doc.Set("ofxr", "backend", backend_value);
+                      expected_doc.Set("ofxr", "backend", backend_value);
+                      expected_doc.Set("ofxr", "nvidia_route",
+                          backend == w3vr::FrameGenerationBackend::NvidiaNew ? "new" : "legacy");
                     expected_doc.Set("ofxr", "nvidia_preset", "fast");
                     expected_doc.Set("ofxr", "nvidia_input_scale", "75");
                     expected_doc.Set("ofxr", "nvidia_bidirectional", "1");
@@ -1835,8 +1839,10 @@ void TestOfxrAndPersistentOptiscalerSave() {
                     const std::string expected = expected_doc.Serialize();
                     Require(w3vr::SaveConfiguration(paths, state, error),
                         "OFXR settings save failed");
-                    Require(Read(paths.ofxr_bridge_ini) == expected,
-                        "OFXR save changed bytes outside launcher-owned keys");
+                      Require(Read(paths.ofxr_bridge_ini) == expected,
+                          "OFXR save changed bytes outside launcher-owned keys");
+                      Require(w3vr::LoadConfiguration(paths).state.frame_generation_backend == backend,
+                          "frame-generation engine did not survive reload");
                     const auto root_opti = Read(paths.optiscaler_ini);
                     Require(root_opti.find("[ofxr]") != std::string::npos &&
                             root_opti.find("FutureOption=keep") !=

@@ -305,7 +305,8 @@ void UpdateOfxrControls() {
             static_cast<int>(FrameGenerationBackend::Off) &&
         backend < static_cast<int>(FrameGenerationBackend::Count);
     const bool nvidia_selected = backend ==
-        static_cast<int>(FrameGenerationBackend::Nvidia);
+        static_cast<int>(FrameGenerationBackend::Nvidia) || backend ==
+        static_cast<int>(FrameGenerationBackend::NvidiaNew);
     const int integration = static_cast<int>(SendMessageW(
         Item(IdIntegrationMode), CB_GETCURSEL, 0, 0));
     const bool optiscaler_selected = integration >= 0 &&
@@ -495,6 +496,12 @@ bool CaptureState(LauncherState& state, std::wstring& error) {
         static_cast<OfxrNvidiaInputScale>(nvidia_input_scale);
     state.ofxr_nvidia_bidirectional = SendMessageW(
         Item(IdOfxrNvidiaBidirectional), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    if (state.frame_generation_backend == FrameGenerationBackend::NvidiaNew &&
+        !w3vr::IntegrationModeUsesOptiscaler(state.integration_mode)) {
+        error = L"Nvidia (new) requires the OptiScaler integration. "
+            L"Select OptiScaler or use Nvidia for standalone OFXR 0.2.1.";
+        return false;
+    }
     if (state.frame_generation_backend == FrameGenerationBackend::Fsr3 &&
         (!w3vr::ModeUsesDlss(state.mode) ||
             !w3vr::IntegrationModeUsesOptiscaler(state.integration_mode))) {
@@ -1118,7 +1125,8 @@ void PopulateControls() {
     HWND ofxr_bridge = Item(IdOfxrBridge);
     ComboAdd(ofxr_bridge, L"Off");
     ComboAdd(ofxr_bridge, L"FidelityFX");
-    ComboAdd(ofxr_bridge, L"NVIDIA Optical Flow");
+    ComboAdd(ofxr_bridge, L"Nvidia");
+    ComboAdd(ofxr_bridge, L"Nvidia (new)");
     ComboAdd(ofxr_bridge, L"FSR 3.1 + DLSS vectors");
 
     HWND ofxr_nvidia_preset = Item(IdOfxrNvidiaPreset);
@@ -1434,7 +1442,7 @@ void CreateInterface(HWND window) {
         600, 210, 560, 100),
         L"Controls the external OFXR V093 OpenXR layer. FSR 3.1 uses the DLSS motion vectors published by the custom OptiScaler build. F2  Toggle between Symmetric and Asymmetric projection. Toggle between symmetric and asymmetric projection.");
     AddTooltips(
-        L"Select the VR frame-generation engine. FSR 3.1 requires both a DLSS render mode and OptiScaler.",
+        L"Nvidia uses the legacy presenter; Nvidia (new) uses the experimental OFXR 0.3.0 three-slot director and requires OptiScaler. FSR 3.1 requires both a DLSS render mode and OptiScaler.",
         {AddLabel(L"Engine", 618, 238, 50, 22),
          AddCombo(670, 230, 180, IdOfxrBridge)});
     AddTooltips(
@@ -1685,7 +1693,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     }
     bounds = FitWindowToWorkArea(bounds);
     HWND window = CreateWindowExW(0, kWindowClass,
-        L"Witcher 3 VR Launcher - V1570",
+        L"Witcher 3 VR Launcher - V1579",
         kWindowStyle,
         bounds.left, bounds.top, bounds.right - bounds.left,
         bounds.bottom - bounds.top, nullptr, nullptr, instance, nullptr);
