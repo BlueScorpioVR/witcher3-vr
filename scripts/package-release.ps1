@@ -12,6 +12,8 @@ param(
 
     [string] $OptiScalerDll,
 
+    [string] $OptiScalerIni,
+
     [string] $OptiScalerLicense,
 
     [string] $RenderDocDll,
@@ -60,6 +62,9 @@ if ([string]::IsNullOrWhiteSpace($OptiScalerLicense)) {
     $OptiScalerLicense = $optiscalerLicenseDefault
 } else {
     $OptiScalerLicense = [System.IO.Path]::GetFullPath($OptiScalerLicense)
+}
+if ([string]::IsNullOrWhiteSpace($OptiScalerIni)) {
+    $OptiScalerIni = Join-Path $repositoryRoot 'support/OptiScaler.release.ini'
 }
 $renderDocDllDefault = Join-Path $repositoryRoot `
     'external/renderdoc/renderdoc.dll'
@@ -145,6 +150,7 @@ foreach ($requiredFile in @(
         $ofxrManifest,
         $ofxrIni,
         $OptiScalerDll,
+        $OptiScalerIni,
         $OptiScalerLicense,
         $RenderDocDll,
         $RenderDocLicense,
@@ -230,6 +236,7 @@ try {
     Copy-Item -LiteralPath $optiscalerBridgeIni -Destination $binaryStage
     Copy-Item -LiteralPath (Join-Path $reshadeReference 'ReShade64.dll') -Destination $reshadeReferenceStage
     Copy-Item -LiteralPath $OptiScalerDll -Destination (Join-Path $modifiedReferenceStage 'OptiScaler.dll')
+    Copy-Item -LiteralPath $OptiScalerIni -Destination (Join-Path $binaryStage 'OptiScaler.ini')
     foreach ($name in @('nvngx.dll_dlssnr.dll',
             'amd_fidelityfx_framegeneration_dx12.dll',
             'ofxr_amd_fidelityfx_framegeneration_dx12.dll')) {

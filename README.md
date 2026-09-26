@@ -10,14 +10,13 @@ as a runtime dependency.
 > [!WARNING]
 > This project is under active development. Features may be incomplete,
 > unstable, or incompatible with some hardware and game configurations.
-> Intermittent crashes, hangs and black-screen starts may occur when using
-> ReShade; the included fixes do not
-> resolve every case.
+> Intermittent crashes may occur when using DLSS 5 Neural Rendering.
+> This release includes safeguards, but does not resolve every case.
 
 > [!IMPORTANT]
-> Alpha 2 includes the new OptiScaler VR v2 for DLSS. It is more stable, moves neural
-> rendering before DLSS and runs 50% faster than ReShade. We strongly recommend
-> using OptiScaler for DLSS.
+> The included custom OptiScaler is the only launcher-managed DLSS 5 integration.
+> Supply only `nvngx_dlssnr.dll` separately. ReShade is included without add-ons;
+> user-installed DLSS 5 ReShade add-ons are not supported.
 
 > [!IMPORTANT]
 > Gameplay currently requires a mouse and keyboard or a gamepad. VR motion
@@ -158,18 +157,23 @@ Asymmetric projection is enabled by default and provides the intended image and 
 ### OFXR Frame Generation
 
 - **FidelityFX:** frame generation with more visible artifacts than NVIDIA Optical Flow.
-- **NVIDIA med. 50%:** uses OFXR V059 with the medium preset and 50% optical-flow input resolution. The final output remains full resolution.
+- **Nvidia:** legacy NVIDIA Optical Flow presentation. Medium with 50% optical-flow input resolution is a useful starting point; final output remains full resolution.
+- **Nvidia (new):** experimental OFXR 0.3.0 NVIDIA presentation, available only with OptiScaler. Try it if legacy motion is uneven below the headset refresh rate.
+- **FSR 3.1:** requires OptiScaler and a DLSS/DLAA rendering mode; uses the game's depth/motion inputs and separate eye histories.
 - **Off:** native game frames only.
 
 Start the game from the VR Launcher whenever OFXR is enabled.
 
-OFXR uses the DLL and `ofxr_bridge.ini` inside `bin\x64_dx12`; no tray application
-is needed. The launcher changes only `[ofxr] backend`. Medium/50% are the supplied
-NVIDIA defaults; all other OFXR settings are preserved. To collect OFXR logs, set
-`[diagnostics] logging_enabled=1` in that INI before starting the game. Files named
-`ofxr-bridge-flight-*.log` appear beside the DLL. This is independent of the
-launcher's Diagnostic Logging checkbox. Logging is off by default; return the
-value to `0` after collecting the run.
+The separate OFXR DLL is v0.2.1. With OptiScaler enabled it bootstraps OpenXR
+for the embedded implementation; no tray application is needed. The launcher
+saves settings in both `ofxr_bridge.ini` and the persistent root `OptiScaler.ini`.
+OptiScaler's **OFXR VR Framegen** GUI can change them live, even with Neural
+Rendering switched off.
+
+Separate OFXR and OptiScaler logging checkboxes are in the launcher. Logging,
+RAM timing capture, cadence diagnostics and the purple synthetic marker are off
+by default. The optional purple rectangle helps check whether generated frames
+reach the headset; FPS counters alone do not guarantee headset scanout.
 
 ### ReShade and OptiScaler
 
@@ -187,7 +191,8 @@ Choose `5:4`, `4:3`, `16:10` or `16:9` according to the content and the amount o
 
 Enable **Diagnostic Logging** only while collecting detailed information for a bug report. It is heavy and can affect timing or performance measurements.
 
-**Route Log** is lightweight and can remain enabled without affecting performance. It records recent TAAU, DLSS and AFW routing events in memory and writes them only when you press `F3`.
+Quick XR/HUD logs and optional route/pipeline recorders also require Diagnostic
+Logging. With the switches off, these writers and recorders stay inactive.
 
 ## Recommended Game Settings
 

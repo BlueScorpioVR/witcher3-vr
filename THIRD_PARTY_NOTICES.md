@@ -172,18 +172,17 @@ game and compatible NVIDIA driver.
 
 ## Bundled OptiScaler integrations
 
-OptiScaler v0.9.4 is bundled in its own reference folder under GPL-3.0.
-The package includes the upstream OptiScaler license. It relies on the
-FidelityFX runtime files already supplied with The Witcher 3 and does not
-redistribute or replace them.
+One custom OptiScaler V23244 is bundled under GPL-3.0 with its upstream license.
+The old ordinary OptiScaler runtime is not included. The two private AMD
+FidelityFX frame-generation helpers retain AMD's MIT license and do not replace
+the original game's libraries.
 
 - Source repository: https://github.com/optiscaler/OptiScaler
-- Release: https://github.com/optiscaler/OptiScaler/releases/tag/v0.9.4
 
-The alternative DLSS Neural Rendering integration is based on
+The DLSS Neural Rendering integration is based on
 [Dagherbou / OptiScaler_DLSSNR](https://github.com/Dagherbou/OptiScaler_DLSSNR).
 The bundled stereo-compatible sources and NGX forwarder are available from
-[OptiScaler_DLSSNR_VR, v0.1.1-dlssnr-vr2](https://github.com/tig3rmast3r/OptiScaler_DLSSNR_VR/tree/v0.1.1-dlssnr-vr2).
+[OptiScaler_DLSSNR_VR, V23244](https://github.com/tig3rmast3r/OptiScaler_DLSSNR_VR/tree/v23244).
 This revision performs neural rendering before DLSS and preserves separate
 per-eye history and render-subrect authority.
 The pre-DLSS implementation is adapted from
@@ -194,10 +193,12 @@ The custom `nvngx.dll_dlssnr.dll` is a forwarding component, not NVIDIA's
 
 ## OFXR Bridge
 
-OFXR Bridge V059 is included as a separate, replaceable OpenXR layer DLL under
+OFXR Bridge v0.2.1 (V116) is included as a separate, replaceable OpenXR layer DLL under
 LGPL-3.0-or-later. No tray application is included or required.
 
-- Corresponding source: https://github.com/tig3rmast3r/OFXR-Bridge/tree/v0.1.0
+- Corresponding source: https://github.com/tig3rmast3r/OFXR-Bridge/tree/0.2.1
+- The OptiScaler-embedded experimental NVIDIA implementation is provided by
+  the V23244 source above; the stand-alone layer remains v0.2.1.
 - License texts: `licenses/OFXR-LGPL-3.0.txt` and `licenses/GPL-3.0.txt`.
 - AMD FidelityFX optical flow is linked under the notice in
   `licenses/AMD-FidelityFX-MIT.txt`.
