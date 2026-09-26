@@ -5082,6 +5082,7 @@ HudCompositePsoRecipe g_real_smoke_pso_recipe{};
 std::mutex g_real_smoke_pso_creation_mutex{};
 std::mutex g_mode3_scene_only_output_mutex{};
 w3vr::mode3_transport::HudSceneOwnership g_mode3_hud_scene_ownership{};
+std::atomic<uint32_t> g_mode3_fixed_hud_source_generation{};
 // V1531 tracks every actual HUD-family draw in the current recording. Merely
 // binding an unrelated PSO cannot change ownership; a later baked-HUD draw can.
 std::unordered_map<ID3D12GraphicsCommandList*,
@@ -23141,7 +23142,22 @@ void STDMETHODCALLTYPE hook_set_pipeline_state(
             // [FIX:RETAINED-CINEMA-HUD V1121] Normal Cinema joins that same
             // retained path after one complete HUD pair exists; until then the
             // baked eye PSO above remains a visible fail-open bootstrap.
+            const bool strict_fixed_gameplay_hud =
+                !cinema_active && !automatic_full_vr_hud &&
+                fixed_gameplay_hud_requested() &&
+                mode3_strict_stereo_submitted_hud_join_active();
+            const uint32_t source_generation =
+                g_mode3_fixed_hud_source_generation.load(
+                    std::memory_order_acquire);
+            const bool fixed_hud_source_armed =
+                strict_fixed_gameplay_hud && source_generation != 0 &&
+                source_generation == g_streamline_capture_generation.load(
+                    std::memory_order_acquire);
+            // The previous XR source gate established this generation's HUD
+            // input. A later label can arrive between the serial eye draws;
+            // once armed, that timing cannot make them choose different PSOs.
             const bool retained_hud_pair_ready =
+                fixed_hud_source_armed ||
                 mode3_retained_hud_pair_ready_for_active_route(
                     !cinema_active && !automatic_full_vr_hud);
             const bool aer_full_vr_retained_hud_route =
@@ -23207,6 +23223,16 @@ void STDMETHODCALLTYPE hook_set_pipeline_state(
                     g_mode3_scene_only_pso.load(std::memory_order_acquire);
                 if (scene_only != nullptr) {
                     bound_pipeline_state = scene_only;
+                    if (fixed_hud_source_armed) {
+                        static std::atomic<uint32_t> armed_hud_logs{};
+                        if (take_bounded_log_slot(armed_hud_logs, 16)) {
+                            w3vr::minimal_xr_log::hud(
+                                "FIXED_SOURCE_ARMED",
+                                "present=%llu eye=%d generation=%u",
+                                g_present_count.load(std::memory_order_relaxed),
+                                hud_eye, source_generation);
+                        }
+                    }
                 }
             }
             if (bound_pipeline_state == nullptr) {
@@ -24150,6 +24176,8 @@ void reset_mode3_early_hud_generation_locked(uint32_t generation) {
 }
 
 void reset_mode3_hud_publication_state(uint32_t generation) {
+    g_mode3_fixed_hud_source_generation.store(
+        0, std::memory_order_release);
     g_mode3_hud_generation_drain_pending.store(
         0, std::memory_order_release);
     g_mode3_strict_hud_target_pair.store(0, std::memory_order_relaxed);
@@ -48910,6 +48938,22 @@ void render_openxr_test_frame(
         unsigned(hud_composite_ready), hud_gate_passed, hud_gate_failed,
         strict_hud_target_pair, strict_hud_target_generation,
         unsigned(cinema_predecessor_proof_ready));
+    if ((hud_gate_passed & 63u) == 63u &&
+        hud_projection_route == Mode3HudProjectionRoute::Gameplay &&
+        fixed_gameplay_hud_requested() &&
+        mode3_strict_stereo_submitted_hud_join_active()) {
+        const uint32_t previous =
+            g_mode3_fixed_hud_source_generation.exchange(
+                hud_generation, std::memory_order_acq_rel);
+        if (previous != hud_generation) {
+            w3vr::minimal_xr_log::hud(
+                "FIXED_SOURCE_READY",
+                "present=%llu source_pair=%llu generation=%u",
+                current_present,
+                static_cast<unsigned long long>(strict_hud_target_pair),
+                hud_generation);
+        }
+    }
     // A rare gameplay miss in PID14640 could be either an unpublished proof
     // or a native-HUD revocation. These require opposite fixes. Sample only
     // the exact missed output pair and current scene; ordinary frames are
