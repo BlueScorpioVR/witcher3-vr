@@ -158,8 +158,9 @@ endforeach()
 
 foreach(required IN ITEMS
         "[TRIAL:RESHADE-OPAQUE-SUBMIT-CLEANUP V23011]"
-        "if ((GetAsyncKeyState(VK_CONTROL) & 0x8000) == 0 ||"
-        "(GetAsyncKeyState(VK_F6) & 1) == 0)")
+        "(GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0"
+        "(GetAsyncKeyState(VK_F6) & 0x8000) != 0"
+        "g_puredark_afw_f6_latched")
     string(FIND "${dxgi_proxy}" "${required}" found)
     if(found EQUAL -1)
         message(FATAL_ERROR "Missing V1414 always-available AFW debug contract: ${required}")

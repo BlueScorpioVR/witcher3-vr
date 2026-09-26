@@ -24,6 +24,7 @@ int main() {
     using w3vr::mode3_transport::immutable_pair_view_ready;
     using w3vr::mode3_transport::hud_scene_only_source_pair_id;
     using w3vr::mode3_transport::late_hud_composite_source_ready;
+    using w3vr::mode3_transport::retained_hud_snapshot_matches_scene;
     using w3vr::mode3_transport::strict_stereo_scene_only_output_pair_id;
     using w3vr::mode3_transport::aer_full_vr_scene_only_admission_ready;
     using w3vr::mode3_transport::retained_hud_scene_lifecycle_active;
@@ -286,6 +287,11 @@ int main() {
     assert(strict_stereo_scene_only_output_pair_id(0, 41) == 0);
     assert(strict_stereo_scene_only_output_pair_id(42, 0) == 0);
     assert(strict_stereo_scene_only_output_pair_id(41, 42) == 0);
+    assert(retained_hud_snapshot_matches_scene(41, 42, false));
+    assert(!retained_hud_snapshot_matches_scene(42, 42, false));
+    assert(retained_hud_snapshot_matches_scene(42, 42, true));
+    assert(!retained_hud_snapshot_matches_scene(43, 42, true));
+    assert(!retained_hud_snapshot_matches_scene(0, 42, true));
 
     // AER automatic Full VR may never inherit AFW gameplay readiness. It
     // removes the baked HUD only when both its sequential scene and retained

@@ -7,10 +7,11 @@ file(READ "${DXGI_PROXY_SOURCE}" source)
 foreach(required_fragment IN ITEMS
         "build=V1511 base=V1509_witcher_sense_aligned_extent"
         "V1479 stereo_full_vr_hud=V1476_strict_predecessor_freshness"
-        "bool mode3_retained_hud_pair_ready_for_active_route()"
+        "bool mode3_retained_hud_pair_ready_for_active_route("
         "if (!mode3_strict_stereo_submitted_hud_join_active()) {"
         "return mode3_early_hud_pair_ready();"
-        "[FIX:STRICT-STEREO-HUD-EXACT-SOURCE V1556]"
+        "const uint64_t target_pair = preparing_scene_draw"
+        "preparing_scene_draw ? target_pair : 0"
         "get_mode3_early_hud_pair("
         "selected_pair == target_pair"
         "g_mode3_strict_hud_target_generation.load("

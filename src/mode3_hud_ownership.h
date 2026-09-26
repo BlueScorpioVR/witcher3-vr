@@ -53,6 +53,12 @@ constexpr bool restore_native_hud_for_menu_draw(
 // Callers serialize this state with the same mutex as command-list ownership.
 class HudSceneOwnership {
 public:
+    struct PairState {
+        bool found{};
+        uint32_t recorded_eyes{};
+        uint32_t scene_only_eyes{};
+    };
+
     uint32_t generation() const { return generation_; }
 
     void reset(uint32_t generation) {
@@ -106,17 +112,22 @@ public:
     // observed scene-only owner therefore admits the pair unless any observed
     // eye explicitly reports a native/baked HUD. A later native report revokes
     // admission immediately; missing metadata alone never creates the strobe.
-    bool ready_for_composite(uint32_t generation, uint64_t pair_id) const {
+    PairState pair_state(uint32_t generation, uint64_t pair_id) const {
         if (generation != generation_ || !valid_pair(pair_id)) {
-            return false;
+            return {};
         }
         for (const auto& pair : pairs_) {
             if (pair.id == pair_id) {
-                return pair.recorded_eyes != 0 &&
-                    pair.scene_only_eyes == pair.recorded_eyes;
+                return {true, pair.recorded_eyes, pair.scene_only_eyes};
             }
         }
-        return false;
+        return {};
+    }
+
+    bool ready_for_composite(uint32_t generation, uint64_t pair_id) const {
+        const PairState state = pair_state(generation, pair_id);
+        return state.found && state.recorded_eyes != 0 &&
+            state.scene_only_eyes == state.recorded_eyes;
     }
 
 private:

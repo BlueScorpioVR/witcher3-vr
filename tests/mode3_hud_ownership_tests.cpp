@@ -54,6 +54,13 @@ int main() {
     assert(!scenes.ready(7, 42));
     assert(!scenes.ready_for_composite(7, 42));
     scenes.record(7, 42, 0, true);
+    {
+        const auto state = scenes.pair_state(7, 42);
+        assert(state.found && state.recorded_eyes == 0x1u &&
+               state.scene_only_eyes == 0x1u);
+        assert(!scenes.pair_state(7, 43).found);
+        assert(!scenes.pair_state(8, 42).found);
+    }
     assert(!scenes.ready(7, 42));
     assert(scenes.ready_for_composite(7, 42));
     scenes.record(7, 42, 1, true);
@@ -63,6 +70,11 @@ int main() {
     // A later native publication revokes a COMPLETED pair. The old positive
     // pair-ID history kept returning true here and authorized duplicate HUD.
     scenes.record(7, 42, 0, false);
+    {
+        const auto state = scenes.pair_state(7, 42);
+        assert(state.found && state.recorded_eyes == 0x3u &&
+               state.scene_only_eyes == 0x2u);
+    }
     assert(!scenes.ready(7, 42));
     assert(!scenes.ready_for_composite(7, 42));
     scenes.record(7, 42, 1, true);

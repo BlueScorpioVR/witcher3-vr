@@ -341,6 +341,19 @@ constexpr bool late_hud_composite_source_ready(
     return scene_only_pair_ready;
 }
 
+// A scene-only HUD draw prepares the following XR scene. It may use the
+// already-completed HUD snapshot of the current accepted pair; the final
+// compositor still requires that pair to precede the scene it submits.
+constexpr bool retained_hud_snapshot_matches_scene(
+    uint64_t target_pair, uint64_t requested_scene_pair,
+    bool preparing_scene_draw) noexcept {
+    return target_pair != 0 && target_pair != UINT64_MAX &&
+        requested_scene_pair != 0 &&
+        requested_scene_pair != UINT64_MAX &&
+        (target_pair < requested_scene_pair ||
+            (preparing_scene_draw && target_pair == requested_scene_pair));
+}
+
 // Strict Stereo labels the retained HUD texture with the accepted predecessor,
 // but that texture label is not the identity of the backbuffer carrying the HUD
 // draw. The ownership proof belongs to the current accepted scene. Keep the two

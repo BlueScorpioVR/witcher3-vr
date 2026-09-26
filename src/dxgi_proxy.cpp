@@ -1668,6 +1668,7 @@ std::atomic<uint64_t> g_puredark_afw_cross_queue_waits{};
 // visual warp diagnostic in its Evaluate ABI. Keep it opt-in and process-local
 // so ordinary AFW output is byte-for-byte unchanged until the user presses F6.
 std::atomic<bool> g_puredark_afw_visual_debug{};
+std::atomic<bool> g_puredark_afw_f6_latched{};
 std::atomic<uint64_t> g_puredark_afw_recorded_candidates{};
 std::atomic<uint64_t> g_puredark_afw_submitted_candidates{};
 std::atomic<uint64_t> g_puredark_afw_ready_candidates{};
@@ -5268,7 +5269,8 @@ constexpr bool strict_stereo_hud_join_window_matches(
 }
 
 bool mode3_early_hud_pair_ready();
-bool mode3_retained_hud_pair_ready_for_active_route();
+bool mode3_retained_hud_pair_ready_for_active_route(
+    bool preparing_scene_draw = false);
 bool mode3_afw_sequenced_pair_available();
 bool sequential_cinema_pair_available();
 bool label_mode3_early_hud_at_present(
@@ -5318,6 +5320,11 @@ bool mode3_scene_only_output_pair_ready(uint64_t pair_id) {
     return g_mode3_hud_scene_ownership.ready_for_composite(
         g_streamline_capture_generation.load(std::memory_order_acquire),
         pair_id);
+}
+w3vr::mode3_transport::HudSceneOwnership::PairState
+mode3_scene_only_output_pair_state(uint32_t generation, uint64_t pair_id) {
+    std::scoped_lock lock{g_mode3_scene_only_output_mutex};
+    return g_mode3_hud_scene_ownership.pair_state(generation, pair_id);
 }
 struct TaauUavWriter {
     ID3D12GraphicsCommandList* command_list{};
@@ -5611,6 +5618,7 @@ size_t g_rt_specular_last_write_slot{kRtInvalidHistorySlot};
 std::atomic<bool> g_taau_force_matrix_fallback{};
 std::atomic<bool> g_close_camera_f8_latched{};
 std::atomic<bool> g_manual_cinema_f10_latched{};
+std::atomic<bool> g_hmd_f9_latched{};
 std::atomic<bool> g_first_person_f11_latched{};
 std::atomic<int> g_camera_mode{};
 // [FIX:FIRST-PERSON-AIM-GAMEPLAY-AUTHORITY 1/3] The renderer's exact native
@@ -23134,7 +23142,8 @@ void STDMETHODCALLTYPE hook_set_pipeline_state(
             // retained path after one complete HUD pair exists; until then the
             // baked eye PSO above remains a visible fail-open bootstrap.
             const bool retained_hud_pair_ready =
-                mode3_retained_hud_pair_ready_for_active_route();
+                mode3_retained_hud_pair_ready_for_active_route(
+                    !cinema_active && !automatic_full_vr_hud);
             const bool aer_full_vr_retained_hud_route =
                 automatic_full_vr_hud &&
                 mode3_aer_sequential_full_vr_retained_hud_active();
@@ -24702,7 +24711,9 @@ bool get_mode3_early_hud_pair(
     bool require_eye_local_sources = false,
     ID3D12Fence* producer_queue_fences[4] = nullptr,
     uint64_t producer_queue_fence_values[4] = nullptr,
-    uint32_t consumer_slots[2] = nullptr) {
+    uint32_t consumer_slots[2] = nullptr,
+    uint64_t settled_target_override = 0,
+    bool preparing_scene_draw = false) {
     std::scoped_lock lock{g_mode3_early_hud_mutex};
     uint32_t selected_source_slots[2]{UINT32_MAX, UINT32_MAX};
     if (selected_pair != nullptr) {
@@ -24790,7 +24801,9 @@ bool get_mode3_early_hud_pair(
         // immediate old+new pair and only the immutable HUD is repeated.
         const bool aer_steady_hud_only = g_config.steady_icons &&
             mode3_aer_presentation_active();
-        const uint64_t target_pair = aer_steady_hud_only
+        const uint64_t target_pair = settled_target_override != 0
+            ? settled_target_override
+            : aer_steady_hud_only
             ? (g_mode3_aer_steady_hud_target_generation.load(
                     std::memory_order_acquire) == generation
                 ? g_mode3_aer_steady_hud_target_pair.load(
@@ -24805,8 +24818,9 @@ bool get_mode3_early_hud_pair(
                     : 0));
         uint32_t settled_slot = UINT32_MAX;
         uint64_t settled_serial{};
-        if (target_pair != 0 &&
-            (g_config.steady_icons || target_pair < requested_pair)) {
+        if (g_config.steady_icons ||
+            w3vr::mode3_transport::retained_hud_snapshot_matches_scene(
+                target_pair, requested_pair, preparing_scene_draw)) {
             for (uint32_t index = 0;
                  index < kMode3EarlyHudSlotCount; ++index) {
                 const auto& slot = g_mode3_early_hud_slots[index];
@@ -25011,17 +25025,17 @@ bool mode3_early_hud_pair_ready() {
 // pair to have reached the exact predecessor target of the current scene.
 // Missing/stale identity therefore fails open on REDengine's baked HUD. AER
 // keeps its existing exact final-source policy unchanged.
-bool mode3_retained_hud_pair_ready_for_active_route() {
+bool mode3_retained_hud_pair_ready_for_active_route(
+    bool preparing_scene_draw) {
     if (!mode3_strict_stereo_submitted_hud_join_active()) {
         return mode3_early_hud_pair_ready();
     }
-    // [FIX:STRICT-STEREO-HUD-EXACT-SOURCE V1556] The accepted fields describe
-    // the newest pair whose two eye labels have completed. With OptiScaler/
-    // DLSS, the immutable capture can already prove the requested settled
-    // predecessor while that label head is still one pair behind. Ask the
-    // same exact-source selector used by the real composite whether that
-    // predecessor is resident in the ring. No consumer slot is reserved by
-    // this readiness query.
+    // The draw being recorded prepares the next XR output: its completed
+    // current-pair HUD snapshot will be that output's predecessor. Query it
+    // as the draw target. At OpenXR publication the target is already the
+    // accepted predecessor and must remain strictly older than the scene.
+    // Both phases use the same immutable source selector without reserving a
+    // consumer slot during the earlier draw-readiness query.
     ID3D12Resource* sources[2]{};
     DXGI_FORMAT formats[2]{
         DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN};
@@ -25030,14 +25044,19 @@ bool mode3_retained_hud_pair_ready_for_active_route() {
     const uint32_t target_generation =
         g_mode3_strict_hud_target_generation.load(
             std::memory_order_acquire);
-    const uint64_t target_pair =
-        g_mode3_strict_hud_target_pair.load(std::memory_order_acquire);
     const uint64_t requested_scene_pair = g_packed_accepted_pair_id;
+    const uint64_t target_pair = preparing_scene_draw
+        ? requested_scene_pair
+        : g_mode3_strict_hud_target_pair.load(std::memory_order_acquire);
     uint64_t selected_pair{};
-    return target_generation == generation && target_pair != 0 &&
-        requested_scene_pair != 0 &&
+    return target_generation == generation &&
+        target_pair != 0 && target_pair != UINT64_MAX &&
+        requested_scene_pair != 0 && requested_scene_pair != UINT64_MAX &&
         get_mode3_early_hud_pair(
-            sources, formats, requested_scene_pair, &selected_pair) &&
+            sources, formats, requested_scene_pair, &selected_pair,
+            nullptr, nullptr, false, nullptr, nullptr, nullptr,
+            preparing_scene_draw ? target_pair : 0,
+            preparing_scene_draw) &&
         selected_pair == target_pair;
 }
 
@@ -46081,6 +46100,7 @@ void update_runtime_eye_geometry() {
 
 void update_hmd_freelook_pose() {
     if (!g_config.hmd_freelook || g_xr_views.size() < 2) {
+        g_hmd_f9_latched.store(false, std::memory_order_relaxed);
         return;
     }
     std::scoped_lock pose_lock{g_hmd_pose_snapshot_mutex};
@@ -46114,7 +46134,12 @@ void update_hmd_freelook_pose() {
         (g_xr_views[0].pose.position.x + g_xr_views[1].pose.position.x) * 0.5f,
         (g_xr_views[0].pose.position.y + g_xr_views[1].pose.position.y) * 0.5f,
         (g_xr_views[0].pose.position.z + g_xr_views[1].pose.position.z) * 0.5f};
-    const bool manual_recenter = (GetAsyncKeyState(VK_F9) & 1) != 0;
+    const bool f9_down = (GetAsyncKeyState(VK_F9) & 0x8000) != 0;
+    const bool manual_recenter = f9_down &&
+        !g_hmd_f9_latched.exchange(true, std::memory_order_relaxed);
+    if (!f9_down) {
+        g_hmd_f9_latched.store(false, std::memory_order_relaxed);
+    }
     if (manual_recenter && !g_config.hmd_lock_game_pitch) {
         g_hmd_vertical_pitch_recenter_pending.store(
             true, std::memory_order_release);
@@ -48885,6 +48910,23 @@ void render_openxr_test_frame(
         unsigned(hud_composite_ready), hud_gate_passed, hud_gate_failed,
         strict_hud_target_pair, strict_hud_target_generation,
         unsigned(cinema_predecessor_proof_ready));
+    // A rare gameplay miss in PID14640 could be either an unpublished proof
+    // or a native-HUD revocation. These require opposite fixes. Sample only
+    // the exact missed output pair and current scene; ordinary frames are
+    // unchanged and do not emit another diagnostic record.
+    if (hud_gate_failed == 64u) {
+        const auto proof_state = mode3_scene_only_output_pair_state(
+            hud_generation, hud_source_pair_id);
+        const auto scene_state = mode3_scene_only_output_pair_state(
+            hud_generation, hud_scene_pair_id);
+        w3vr::minimal_xr_log::hud("PROOF_MISS",
+            "present=%llu trace=%llu proof=%llu target=%llu generation=%u proof_found=%u proof_recorded=%u proof_scene_only=%u scene_found=%u scene_recorded=%u scene_scene_only=%u",
+            current_present, trace_pair_id, hud_source_pair_id,
+            strict_hud_target_pair, hud_generation,
+            unsigned(proof_state.found), proof_state.recorded_eyes,
+            proof_state.scene_only_eyes, unsigned(scene_state.found),
+            scene_state.recorded_eyes, scene_state.scene_only_eyes);
+    }
 
     if (submitted) {
         if (!g_xr_first_frame_logged) {
@@ -52274,8 +52316,15 @@ void handle_puredark_afw_visual_debug_hotkey() {
     // V23011 changes only its chord so the add-on owns plain F6.
     // [TRIAL:RESHADE-OPAQUE-SUBMIT-CLEANUP V23011] Plain F6 belongs to the
     // DLSS5 add-on while this independent PureDark diagnostic uses Ctrl+F6.
-    if ((GetAsyncKeyState(VK_CONTROL) & 0x8000) == 0 ||
-        (GetAsyncKeyState(VK_F6) & 1) == 0) {
+    const bool f6_down = (GetAsyncKeyState(VK_F6) & 0x8000) != 0;
+    const bool ctrl_down = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+    const bool chord_down = f6_down && ctrl_down;
+    const bool chord_pressed = chord_down &&
+        !g_puredark_afw_f6_latched.exchange(true, std::memory_order_relaxed);
+    if (!chord_down) {
+        g_puredark_afw_f6_latched.store(false, std::memory_order_relaxed);
+    }
+    if (!chord_pressed) {
         return;
     }
     const bool enabled = !g_puredark_afw_visual_debug.load(
