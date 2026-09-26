@@ -2,10 +2,16 @@
 #include <string>
 
 int main(int argc, char**) {
+    w3vr::minimal_xr_log::initialize(false);
+    w3vr::minimal_xr_log::write("OFF");
+    w3vr::minimal_xr_log::hud("OFF", "%d", 1);
+    if (w3vr::minimal_xr_log::file != INVALID_HANDLE_VALUE) return 10;
     if (argc > 1) {
-        w3vr::minimal_xr_log::initialize();
+        w3vr::minimal_xr_log::initialize(true);
         w3vr::minimal_xr_log::write("CRASH_SENTINEL", 42, 7, 99, -3);
         w3vr::minimal_xr_log::hud("TEST", "present=%llu slot=%u serial=%llu reason=%s", 42ull, 2u, 99ull, "pending");
+        w3vr::minimal_xr_log::initialize(false);
+        w3vr::minimal_xr_log::write("OFF_AFTER_ON");
         // No cleanup, CloseHandle, C runtime exit or manual dump.
         TerminateProcess(GetCurrentProcess(), 73);
         return 9;
@@ -42,7 +48,7 @@ int main(int argc, char**) {
     const bool read = ReadFile(input, bytes, sizeof(bytes) - 1, &count, nullptr) != FALSE;
     CloseHandle(input);
     const std::string contents(bytes, count);
-    const bool valid = read && contents.find("V1550_START_") != std::string::npos &&
+    const bool valid = read && contents.find("OFF") == std::string::npos && contents.find("V1550_START_") != std::string::npos &&
         contents.find("CRASH_SENTINEL 42 7 99 -3\r\n") != std::string::npos &&
         contents.find("HUD_TEST present=42 slot=2 serial=99 reason=pending\r\n") != std::string::npos;
     // Remove only the file belonging to this test's child PID.

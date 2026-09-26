@@ -14,7 +14,7 @@ foreach(required
     "g_engine_view_constants("
     "dlss_state, frame_data"
     "publish_sequential_dlss_constants_receipt("
-    "route_flight::set_enabled(true)"
+    "diagnostic_logging_enabled && g_config.route_flight_recorder"
     "dump_last_seconds(\"V1511\", 15)")
     string(FIND "${source}" "${required}" found)
     if(found EQUAL -1)

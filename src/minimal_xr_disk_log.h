@@ -3,13 +3,16 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdarg>
+#include <atomic>
 
-// V1550 trial-only breadcrumbs. Independent of all renderer diagnostic gates.
+// Optional quick breadcrumbs, enabled only by the mod's diagnostic master flags.
 // One WriteFile per event, no CRT file buffering, flush, worker, GPU query or lock.
 // The OS cache survives process termination, not power loss or an OS failure.
 namespace w3vr::minimal_xr_log {
 inline HANDLE file = INVALID_HANDLE_VALUE;
+inline std::atomic<bool> enabled{};
 inline void hud(const char* event, const char* format, ...) noexcept {
+    if (!enabled.load(std::memory_order_relaxed)) return;
     if (file == INVALID_HANDLE_VALUE) return;
     LARGE_INTEGER now{};
     QueryPerformanceCounter(&now);
@@ -29,6 +32,7 @@ inline void hud(const char* event, const char* format, ...) noexcept {
 }
 inline void write(const char* event, uint64_t frame = 0, uint64_t pair = 0,
                   uint64_t fence = 0, int64_t result = 0) noexcept {
+    if (!enabled.load(std::memory_order_relaxed)) return;
     if (file == INVALID_HANDLE_VALUE) return;
     LARGE_INTEGER now{};
     QueryPerformanceCounter(&now);
@@ -41,7 +45,9 @@ inline void write(const char* event, uint64_t frame = 0, uint64_t pair = 0,
     DWORD written{};
     WriteFile(file, line, static_cast<DWORD>(size), &written, nullptr);
 }
-inline void initialize() noexcept {
+inline void initialize(bool diagnostics_enabled) noexcept {
+    enabled.store(diagnostics_enabled, std::memory_order_relaxed);
+    if (!diagnostics_enabled || file != INVALID_HANDLE_VALUE) return;
     wchar_t path[32768]{};
     const DWORD length = GetModuleFileNameW(nullptr, path, 32768);
     if (!length || length >= 32768) return;

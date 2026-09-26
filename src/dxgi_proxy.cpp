@@ -14659,12 +14659,8 @@ void load_config() {
         g_config.runtime_diagnostics = read_ini_bool("debug", "runtime_diagnostics", false);
         g_config.pipeline_flight_recorder = read_ini_bool(
             "debug", "pipeline_flight_recorder", false);
-        w3vr::pipeline_flight::set_enabled(
-            g_config.pipeline_flight_recorder);
         g_config.route_flight_recorder = read_ini_bool(
             "debug", "route_flight_recorder", false);
-        w3vr::route_flight::set_enabled(
-            g_config.route_flight_recorder);
         g_config.focus_projection_shader_registry = read_ini_bool(
             "focus_projection", "shader_registry_enabled", false);
         g_config.cinema_camera_diagnostics = read_ini_bool(
@@ -14679,6 +14675,11 @@ void load_config() {
         // a normal gameplay run.
         const bool diagnostic_logging_enabled =
             g_config.logging_enabled && g_config.runtime_diagnostics;
+        w3vr::minimal_xr_log::initialize(diagnostic_logging_enabled);
+        w3vr::pipeline_flight::set_enabled(
+            diagnostic_logging_enabled && g_config.pipeline_flight_recorder);
+        w3vr::route_flight::set_enabled(
+            diagnostic_logging_enabled && g_config.route_flight_recorder);
         if (!diagnostic_logging_enabled) {
             g_config.logging_enabled = false;
             g_config.runtime_diagnostics = false;
@@ -14711,13 +14712,6 @@ void load_config() {
             temporal_backend,
             g_config.ngx_trace,
             g_config.streamline_taau_bridge);
-
-        // V1364 keeps the coarse RAM-only route recorder active for Mode-3
-        // DLSS even when Diagnostic Logging is disabled. F3 remains the only
-        // file-I/O boundary during a normal runtime test.
-        if (dlss_sequential_mode_active()) {
-            w3vr::route_flight::set_enabled(true);
-        }
 
         if (temporal_backend_is_dlss()) {
             g_config.ngx_trace = true;
@@ -43641,7 +43635,6 @@ void install_xinput_snap_turn_hook() {
 
 void ensure_initialized() {
     std::call_once(g_init_once, []() {
-        w3vr::minimal_xr_log::initialize();
         // [DEBUG:RENDERDOC-DLSS-CAPTURE V12103 3/3] Load the manual INI gate
         // before touching RenderDoc. System32 exports are still frozen first;
         // with the default OFF setting the adjacent DLL is never loaded.

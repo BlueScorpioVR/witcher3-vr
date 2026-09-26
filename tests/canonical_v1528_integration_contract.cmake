@@ -33,7 +33,7 @@ file(READ "${SOURCE_ROOT}/launcher/CMakeLists.txt" launcher_project_config)
 string(REGEX MATCH "VERSION 0[.]([0-9]+)[.]0" version_match
     "${launcher_project_config}")
 set(release_version "${CMAKE_MATCH_1}")
-foreach(required IN ITEMS "NVIDIA Optical Flow" "Witcher 3 VR Launcher - V${release_version}")
+foreach(required IN ITEMS "Nvidia (new)" "Witcher 3 VR Launcher - V${release_version}")
     string(FIND "${launcher}" "${required}" position)
     if(position EQUAL -1)
         message(FATAL_ERROR "Missing release launcher label: ${required}")
