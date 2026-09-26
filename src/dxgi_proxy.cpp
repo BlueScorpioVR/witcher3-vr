@@ -1424,6 +1424,31 @@ constexpr size_t kXrCommandAllocatorCount = 3;
 ID3D12CommandAllocator* g_xr_command_allocators[kXrCommandAllocatorCount]{};
 uint64_t g_xr_command_allocator_fences[kXrCommandAllocatorCount]{};
 size_t g_xr_command_allocator_index{};
+// V1571: the late HUD compositor still writes the ordinary XR image. Keep a
+// same-format scene-only copy immediately beforehand for OptiScaler FSR's
+// HUDLessColor input. A slot follows each existing XR command allocator.
+struct FsrHudlessXrSlot {
+    ID3D12Resource* resource{};
+    int64_t display_time{};
+};
+std::array<FsrHudlessXrSlot, kXrCommandAllocatorCount>
+    g_fsr_hudless_xr_slots{};
+std::mutex g_fsr_hudless_xr_mutex;
+
+extern "C" __declspec(dllexport) int W3VR_GetHudlessXrColorV1(
+    int64_t display_time, ID3D12Resource** output) noexcept {
+    if (output == nullptr || display_time == 0) return 0;
+    *output = nullptr;
+    std::scoped_lock lock{g_fsr_hudless_xr_mutex};
+    for (const auto& slot : g_fsr_hudless_xr_slots) {
+        if (slot.display_time != display_time || slot.resource == nullptr)
+            continue;
+        slot.resource->AddRef();
+        *output = slot.resource;
+        return 1;
+    }
+    return 0;
+}
 ID3D12GraphicsCommandList* g_xr_command_list{};
 ID3D12Fence* g_xr_fence{};
 HANDLE g_xr_fence_event{};
@@ -44195,6 +44220,74 @@ float4 ps_main(PixelInput input) : SV_Target0 {
 using Mode3HudProjectionRoute =
     w3vr::mode3_transport::HudProjectionRoute;
 
+bool record_fsr_hudless_xr_color(
+    XrEyeSwapchain& swapchain, uint32_t image_index,
+    size_t allocator_slot) {
+    if (g_d3d12_device == nullptr || g_xr_command_list == nullptr ||
+        image_index >= swapchain.images.size() ||
+        allocator_slot >= g_fsr_hudless_xr_slots.size()) return false;
+    ID3D12Resource* const source = swapchain.images[image_index].texture;
+    if (source == nullptr) return false;
+    const D3D12_RESOURCE_DESC description = source->GetDesc();
+    if (description.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+        description.DepthOrArraySize != 2) return false;
+
+    std::scoped_lock lock{g_fsr_hudless_xr_mutex};
+    auto& slot = g_fsr_hudless_xr_slots[allocator_slot];
+    slot.display_time = 0;
+    // The XR allocator fence protects the producer's reuse of this slot, but
+    // not OFXR's later read on a different queue. Never overwrite a resource
+    // returned to the consumer. Its AddRef keeps the prior allocation alive
+    // until the synthesis work slot retires; this slot owns only the newest
+    // published image.
+    if (slot.resource != nullptr) {
+        slot.resource->Release();
+        slot.resource = nullptr;
+    }
+    D3D12_HEAP_PROPERTIES heap{};
+    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    heap.CreationNodeMask = 1;
+    heap.VisibleNodeMask = 1;
+    if (FAILED(g_d3d12_device->CreateCommittedResource(
+            &heap, D3D12_HEAP_FLAG_NONE, &description,
+            D3D12_RESOURCE_STATE_COMMON, nullptr,
+            IID_PPV_ARGS(&slot.resource)))) return false;
+    slot.resource->SetName(L"Witcher3VR V1572 unique scene-only XR colour");
+    auto barrier = [](ID3D12Resource* resource,
+                      D3D12_RESOURCE_STATES before,
+                      D3D12_RESOURCE_STATES after) {
+        D3D12_RESOURCE_BARRIER value{};
+        value.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        value.Transition.pResource = resource;
+        value.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        value.Transition.StateBefore = before;
+        value.Transition.StateAfter = after;
+        return value;
+    };
+    const std::array<D3D12_RESOURCE_BARRIER, 2> before{
+        barrier(source, D3D12_RESOURCE_STATE_RENDER_TARGET,
+                D3D12_RESOURCE_STATE_COPY_SOURCE),
+        barrier(slot.resource, D3D12_RESOURCE_STATE_COMMON,
+                D3D12_RESOURCE_STATE_COPY_DEST)};
+    g_xr_command_list->ResourceBarrier(2, before.data());
+    g_xr_command_list->CopyResource(slot.resource, source);
+    const std::array<D3D12_RESOURCE_BARRIER, 2> after{
+        barrier(source, D3D12_RESOURCE_STATE_COPY_SOURCE,
+                D3D12_RESOURCE_STATE_RENDER_TARGET),
+        barrier(slot.resource, D3D12_RESOURCE_STATE_COPY_DEST,
+                D3D12_RESOURCE_STATE_COMMON)};
+    g_xr_command_list->ResourceBarrier(2, after.data());
+    return true;
+}
+
+void publish_fsr_hudless_xr_color(
+    size_t allocator_slot, int64_t display_time) {
+    if (allocator_slot >= g_fsr_hudless_xr_slots.size()) return;
+    std::scoped_lock lock{g_fsr_hudless_xr_mutex};
+    auto& slot = g_fsr_hudless_xr_slots[allocator_slot];
+    if (slot.resource != nullptr) slot.display_time = display_time;
+}
+
 struct CinemaHudProjectionParameters {
     const XrView* eye_views{};
     const XrPosef* panel_pose{};
@@ -51569,6 +51662,11 @@ void render_openxr_test_frame(
             current_present, hud_scene_pair_id, unsigned(command_list_recording),
             unsigned(submitted), unsigned(hud_composite_ready), unsigned(cinema_panel),
             unsigned(cinema_projection_panel_ready));
+        const bool fsr_hudless_recorded =
+            command_list_recording && submitted && hud_composite_ready &&
+            (!cinema_panel || cinema_projection_panel_ready) &&
+            record_fsr_hudless_xr_color(
+                swapchain, image_index, g_xr_command_allocator_index);
         if (command_list_recording && submitted && hud_composite_ready &&
             (!cinema_panel || cinema_projection_panel_ready)) {
             const bool collect_hud_audit =
@@ -51647,6 +51745,11 @@ void render_openxr_test_frame(
                 ID3D12CommandList* lists[] = {g_xr_command_list};
                 w3vr::minimal_xr_log::write("QUEUE_BEGIN", current_present, trace_pair_id, g_xr_fence_value + 1);
                 g_command_queue->ExecuteCommandLists(1, lists);
+                if (fsr_hudless_recorded) {
+                    publish_fsr_hudless_xr_color(
+                        g_xr_command_allocator_index,
+                        frame_state.predictedDisplayTime);
+                }
                 w3vr::minimal_xr_log::write("QUEUE_RETURN", current_present, trace_pair_id, g_xr_fence_value + 1);
                 // [FIX:AER-FULL-VR-COMPLETED-FRAME-AUTHORITY V1209 4/5]
                 // Retire the completed-frame serial only after the command

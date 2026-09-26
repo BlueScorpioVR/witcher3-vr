@@ -20,3 +20,4 @@ foreach(required_fragment IN ITEMS
             "Missing V1543 RenderDoc Release-isolation contract: ${required_fragment}")
     endif()
 endforeach()
+
