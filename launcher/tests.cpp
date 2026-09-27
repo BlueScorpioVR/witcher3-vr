@@ -230,6 +230,9 @@ void TestAllModes(const w3vr::ConfigPaths& paths) {
         state.near_view = 1.25f;
         state.vertical_pitch_enabled = true;
         state.cinema_full_vr = true;
+        state.cinema_fullscreen = true;
+        state.cinema_fullscreen_lock_view = index % 2 == 0;
+        state.cinema_fullscreen_zoom = 1.75f;
         state.steady_icons = true;
         state.first_person_gamepad_head_follow = true;
         state.first_person_snap_turn_degrees = 60;
@@ -366,6 +369,12 @@ void TestAllModes(const w3vr::ConfigPaths& paths) {
         Require(vr.Get("openxr", "hud_controller_locked") ==
                 std::string(state.hud_controller_locked ? "1" : "0"),
             "controller-locked HUD flag missing");
+        Require(vr.Get("openxr", "cinema_fullscreen") == "1",
+            "fullscreen cutscene flag missing");
+        Require(vr.Get("openxr", "cinema_fullscreen_lock_view") ==
+                std::string(state.cinema_fullscreen_lock_view ? "1" : "0") &&
+            vr.Get("openxr", "cinema_fullscreen_zoom") == "1.750",
+            "fullscreen cutscene zoom settings missing");
         Require(vr.Get("openxr", "steady_icons") == "1",
             "steady-icons latency flag missing");
         Require(vr.Get("engine", "first_person_snap_turn") == "1",
@@ -478,6 +487,13 @@ void TestAllModes(const w3vr::ConfigPaths& paths) {
         }
         Require(loaded.state.cinema_full_vr,
             "round-trip automatic full-VR cutscene mismatch");
+        Require(loaded.state.cinema_fullscreen,
+            "round-trip fullscreen cutscene mismatch");
+        Require(loaded.state.cinema_fullscreen_lock_view ==
+                state.cinema_fullscreen_lock_view &&
+            loaded.state.cinema_fullscreen_zoom ==
+                state.cinema_fullscreen_zoom,
+            "round-trip fullscreen cutscene zoom mismatch");
         Require(loaded.state.cinema_aspect == state.cinema_aspect,
             "round-trip Cinema aspect mismatch");
         Require(loaded.state.cinema_height == state.cinema_height,
@@ -623,6 +639,11 @@ void TestReleaseDefaults() {
         "Full VR cutscene HUD must default to size 1.0 at gameplay depth");
     Require(defaults.cinema_full_vr,
         "automatic Full VR cutscenes must default to enabled");
+    Require(!defaults.cinema_fullscreen,
+        "fullscreen no-frame cutscenes must default to disabled");
+    Require(!defaults.cinema_fullscreen_lock_view &&
+        defaults.cinema_fullscreen_zoom == 1.35f,
+        "fullscreen cutscene zoom must default to 1.35 without a locked view");
     Require(defaults.cinema_aspect == w3vr::CinemaAspect::FiveFour,
         "Cinema aspect must default to 5:4");
     Require(!defaults.steady_icons,
@@ -697,6 +718,10 @@ void TestEmbeddedLauncherDefaults() {
         !defaults->Get("openxr", "presentation_black_resize").has_value() &&
         defaults->Get("openxr", "world_detail_range") == "1.000" &&
         defaults->Get("openxr", "native_stereo") == "1" &&
+        defaults->Get("openxr", "cinema_full_vr") == "1" &&
+        defaults->Get("openxr", "cinema_fullscreen") == "0" &&
+        defaults->Get("openxr", "cinema_fullscreen_lock_view") == "0" &&
+        defaults->Get("openxr", "cinema_fullscreen_zoom") == "1.350" &&
         !defaults->Get(
             "openxr", "alternate_presentation_resize").has_value() &&
         defaults->Get("engine", "temporal_backend") == "dlss" &&
@@ -1076,6 +1101,9 @@ void TestDlssLabelsAndLegacyAuto(const w3vr::ConfigPaths& paths) {
         "unsupported snap-turn angles must fall back to 45 degrees");
 
     vr->Remove("openxr", "cinema_full_vr");
+    vr->Remove("openxr", "cinema_fullscreen");
+    vr->Remove("openxr", "cinema_fullscreen_lock_view");
+    vr->Remove("openxr", "cinema_fullscreen_zoom");
     vr->Remove("openxr", "steady_icons");
     vr->Remove("openxr", "hud_controller_locked");
     vr->Remove("openxr", "vertical_pitch_enabled");
@@ -1093,6 +1121,11 @@ void TestDlssLabelsAndLegacyAuto(const w3vr::ConfigPaths& paths) {
     const auto missing_flags = w3vr::LoadConfiguration(paths);
     Require(missing_flags.state.cinema_full_vr,
         "missing automatic-cutscene flag must default to enabled");
+    Require(!missing_flags.state.cinema_fullscreen,
+        "missing fullscreen-cutscene flag must default to disabled");
+    Require(!missing_flags.state.cinema_fullscreen_lock_view &&
+        missing_flags.state.cinema_fullscreen_zoom == 1.35f,
+        "missing fullscreen zoom settings must default to 1.35 unlocked");
     Require(!missing_flags.state.steady_icons,
         "missing steady-icons flag must default to disabled");
     Require(!missing_flags.state.hud_controller_locked,

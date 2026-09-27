@@ -87,6 +87,10 @@ enum ControlId {
     IdHudControllerLocked,
     IdFastMovementTransitions,
     IdCinemaFullVr,
+    IdCinemaFullscreen,
+    IdCinemaFullscreenLockView,
+    IdCinemaFullscreenZoom,
+    IdCinemaFullscreenZoomValue,
     IdSteadyIcons,
     IdDiagnosticLogging,
     IdRouteLogging,
@@ -276,6 +280,9 @@ void UpdateTrackLabels() {
         static_cast<float>(SendMessageW(Item(IdMenuScale), TBM_GETPOS, 0, 0)) / 100.0f).c_str());
     SetWindowTextW(Item(IdCinemaScaleValue), FormatFloat(
         static_cast<float>(SendMessageW(Item(IdCinemaScale), TBM_GETPOS, 0, 0)) / 100.0f).c_str());
+    SetWindowTextW(Item(IdCinemaFullscreenZoomValue), FormatFloat(
+        static_cast<float>(SendMessageW(
+            Item(IdCinemaFullscreenZoom), TBM_GETPOS, 0, 0)) / 100.0f).c_str());
     SetWindowTextW(Item(IdCinemaHeightValue), FormatFloat(
         static_cast<float>(SendMessageW(Item(IdCinemaHeight), TBM_GETPOS, 0, 0)) / 100.0f).c_str());
     const float cinema_hud_scale = static_cast<float>(SendMessageW(
@@ -577,6 +584,12 @@ bool CaptureState(LauncherState& state, std::wstring& error) {
         Item(IdFastMovementTransitions), BM_GETCHECK, 0, 0) == BST_CHECKED;
     state.cinema_full_vr = SendMessageW(
         Item(IdCinemaFullVr), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    state.cinema_fullscreen = SendMessageW(
+        Item(IdCinemaFullscreen), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    state.cinema_fullscreen_lock_view = SendMessageW(
+        Item(IdCinemaFullscreenLockView), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    state.cinema_fullscreen_zoom = static_cast<float>(SendMessageW(
+        Item(IdCinemaFullscreenZoom), TBM_GETPOS, 0, 0)) / 100.0f;
     state.steady_icons = SendMessageW(
         Item(IdSteadyIcons), BM_GETCHECK, 0, 0) == BST_CHECKED;
     state.fullscreen_projection = g_app.fullscreen_projection;
@@ -1002,6 +1015,12 @@ void RestoreLauncherDefaults() {
         defaults.fast_movement_transitions ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(Item(IdCinemaFullVr), BM_SETCHECK,
         defaults.cinema_full_vr ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(Item(IdCinemaFullscreen), BM_SETCHECK,
+        defaults.cinema_fullscreen ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(Item(IdCinemaFullscreenLockView), BM_SETCHECK,
+        defaults.cinema_fullscreen_lock_view ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(Item(IdCinemaFullscreenZoom), TBM_SETPOS, TRUE,
+        static_cast<int>(std::lround(defaults.cinema_fullscreen_zoom * 100.0f)));
     SendMessageW(Item(IdSteadyIcons), BM_SETCHECK,
         defaults.steady_icons ? BST_CHECKED : BST_UNCHECKED, 0);
     g_app.fullscreen_projection = defaults.fullscreen_projection;
@@ -1252,6 +1271,14 @@ void PopulateControls() {
             ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(Item(IdCinemaFullVr), BM_SETCHECK,
         loaded.state.cinema_full_vr ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(Item(IdCinemaFullscreen), BM_SETCHECK,
+        loaded.state.cinema_fullscreen ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(Item(IdCinemaFullscreenLockView), BM_SETCHECK,
+        loaded.state.cinema_fullscreen_lock_view
+            ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(Item(IdCinemaFullscreenZoom), TBM_SETPOS, TRUE,
+        static_cast<int>(std::lround(
+            loaded.state.cinema_fullscreen_zoom * 100.0f)));
     SendMessageW(Item(IdSteadyIcons), BM_SETCHECK,
         loaded.state.steady_icons ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(Item(IdDiagnosticLogging), BM_SETCHECK,
@@ -1320,7 +1347,7 @@ void CreateInterface(HWND window) {
         {AddLabel(L"Integration", 38, 116, 95, 22),
          AddCombo(135, 108, 230, IdIntegrationMode)});
     AddTooltip(AddControl(L"BUTTON", L"Comfort and interface", BS_GROUPBOX,
-        20, 174, 560, 484),
+        20, 174, 560, 516),
         L"Tune headset presentation, HUD, cinema framing, and comfort options. Hover any setting name or control for details.");
     AddTooltips(
         L"Adjusts angular image size in the headset using matching producer and OpenXR FOV. No final image resampling or black-canvas pass.",
@@ -1425,6 +1452,22 @@ void CreateInterface(HWND window) {
         BS_AUTOCHECKBOX | WS_TABSTOP, 304, 582, 256, 26,
         IdHudControllerLocked),
         L"In gameplay, the HUD follows mouse or gamepad camera turns but stays in its F9-calibrated direction as the headset rotates. The reticle, menus and Cinema HUD are unchanged. Press F9 to recenter the HUD direction.");
+
+    AddTooltip(AddControl(L"BUTTON", L"Fullscreen Cutscenes (no frame)",
+        BS_AUTOCHECKBOX | WS_TABSTOP, 38, 650, 510, 26,
+        IdCinemaFullscreen),
+        L"Zooms automatic cutscenes by narrowing the field of view, and slows head turns by the same amount. 1.35 matches the cinema-frame zoom. Numpad 7 and Numpad 4 change it while playing and save it.");
+
+    AddTooltip(AddControl(L"BUTTON", L"Lock cutscene view",
+        BS_AUTOCHECKBOX | WS_TABSTOP, 618, 640, 250, 26,
+        IdCinemaFullscreenLockView),
+        L"No longer changes head tracking. Fullscreen cutscenes always use the zoomed headset view with a closer rotation point. Leave this unchecked.");
+    AddTooltips(
+        L"How much cutscene zoom is applied. 1.35 matches the cinema frame. Higher values zoom more and slow head turns more. Numpad 7 and Numpad 4 adjust it while playing and save it.",
+        {AddLabel(L"Cutscene zoom", 618, 676, 120, 22),
+         AddTrack(740, 670, 250, IdCinemaFullscreenZoom, 50, 400),
+         AddLabel(L"1.35", 996, 676, 54, 22,
+              IdCinemaFullscreenZoomValue, SS_RIGHT)});
 
     AddTooltip(AddControl(L"BUTTON", L"First Person and camera", BS_GROUPBOX,
         600, 18, 560, 178),
@@ -1555,22 +1598,22 @@ void CreateInterface(HWND window) {
         L"Ctrl+F6  AFW visual debug", 925, 600, 217, 20),
         L"Toggle the PureDark AFW visual diagnostic without consuming an unmodified F6 press.");
 
-    AddTooltip(AddLabel(L"", 20, 672, 1140, 22, IdStatus, SS_LEFT),
+    AddTooltip(AddLabel(L"", 20, 700, 1140, 22, IdStatus, SS_LEFT),
         L"Shows validation results, saved changes, and launch status.");
     AddTooltip(AddControl(L"BUTTON", L"Configure Settings for VR",
-        BS_PUSHBUTTON | WS_TABSTOP, 20, 700, 220, 36, IdConfigureVr),
+        BS_PUSHBUTTON | WS_TABSTOP, 20, 728, 220, 36, IdConfigureVr),
         L"Installs the complete recommended VR graphics baseline, then reapplies the selected render mode and resolution.");
     AddTooltip(AddControl(L"BUTTON", L"Restore Original Settings",
-        BS_PUSHBUTTON | WS_TABSTOP, 252, 700, 220, 36, IdRestoreOriginal),
+        BS_PUSHBUTTON | WS_TABSTOP, 252, 728, 220, 36, IdRestoreOriginal),
         L"Restores the original dx12user.settings backup created by Configure Settings for VR.");
     AddTooltip(AddControl(L"BUTTON", L"Restore Defaults",
-        BS_PUSHBUTTON | WS_TABSTOP, 484, 700, 216, 36, IdRestoreDefaults),
+        BS_PUSHBUTTON | WS_TABSTOP, 484, 728, 216, 36, IdRestoreDefaults),
         L"Loads Witcher 3 VR launcher defaults into the controls. Press Save to apply them.");
     AddTooltip(AddControl(L"BUTTON", L"Save Only",
-        BS_PUSHBUTTON | WS_TABSTOP, 862, 700, 130, 36, IdSave),
+        BS_PUSHBUTTON | WS_TABSTOP, 862, 728, 130, 36, IdSave),
         L"Writes the selected launcher, renderer, and game settings without starting the game.");
     AddTooltip(AddControl(L"BUTTON", L"Save && Launch",
-        BS_DEFPUSHBUTTON | WS_TABSTOP, 1002, 700, 158, 36, IdSaveLaunch),
+        BS_DEFPUSHBUTTON | WS_TABSTOP, 1002, 728, 158, 36, IdSaveLaunch),
         L"Writes all settings, enforces render-mode compatibility, and starts The Witcher 3. If selected, OFXR Bridge is enabled only for this child process.");
 
     HWND kofi = AddControl(WC_LINK,
