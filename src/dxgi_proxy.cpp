@@ -555,6 +555,13 @@ struct Config {
     float cinema_height{-0.20f};
     float cinema_aspect_ratio{5.0f / 4.0f};
     bool cinema_full_vr{false};
+    // [FEATURE:FULLSCREEN-CUTSCENES] 1 matches the Cinema3D panel's apparent
+    // size. Higher values zoom further. Numpad 7/4 adjust it at runtime.
+    float cinema_fullscreen_zoom{1.35f};
+    // True keeps the cutscene image world-locked, like the cinema panel, with
+    // no head rotation in the shot. False restores slowed head tracking.
+    bool cinema_fullscreen_lock_view{false};
+    bool cinema_fullscreen{false};
     bool steady_icons{false};
     float menu_distance{1.5f};
     float cinema_render_stereo_strength{1.0f};
@@ -730,6 +737,65 @@ Config g_config{};
 float cinema_panel_local_y() {
     return g_config.cinema_height * g_config.cinema_scale;
 }
+
+// Pitch that puts the shot where the lowered Cinema3D panel sits. Positive
+// looks up, which moves the subject down in the view by the panel drop.
+float fullscreen_cutscene_subject_pitch_degrees() {
+    const float distance = std::max(g_config.menu_distance, 0.05f);
+    return -atan2f(cinema_panel_local_y(), distance) *
+        (180.0f / 3.14159265358979323846f);
+}
+
+// Vertical angle subtended by the anchored Cinema3D panel. This is the
+// apparent size of a cinematic frame that fills the panel.
+float cinema_panel_vertical_fov_degrees() {
+    const float aspect = g_config.cinema_aspect_ratio > 1.0f
+        ? g_config.cinema_aspect_ratio
+        : (5.0f / 4.0f);
+    const float panel_height =
+        1.6f * std::max(g_config.cinema_scale, 0.05f) / aspect;
+    const float distance = std::max(g_config.menu_distance, 0.05f);
+    const float vertical_radians =
+        2.0f * atanf((panel_height * 0.5f) / distance);
+    return vertical_radians * (180.0f / 3.14159265358979323846f);
+}
+
+constexpr float kCinemaFullscreenZoomMin = 0.50f;
+constexpr float kCinemaFullscreenZoomMax = 4.00f;
+constexpr float kCinemaFullscreenZoomStep = 0.05f;
+std::atomic<float> g_cinema_fullscreen_zoom{1.35f};
+
+float cinema_fullscreen_zoom() {
+    return std::clamp(
+        g_cinema_fullscreen_zoom.load(std::memory_order_acquire),
+        kCinemaFullscreenZoomMin, kCinemaFullscreenZoomMax);
+}
+
+// Fraction of headset FOV to render. Smaller values zoom in. The slider is
+// 1.35 at the cinema-frame match; higher values zoom more. The same fraction
+// is the head-turn gain, so a closer zoom turns more slowly. 0.05 only stops
+// the projection from collapsing.
+float fullscreen_cutscene_render_fov_scale(float director_fov_degrees) {
+    if (!std::isfinite(director_fov_degrees) ||
+        director_fov_degrees < 8.0f || director_fov_degrees > 120.0f) {
+        return 1.0f;
+    }
+    const float panel_fov = cinema_panel_vertical_fov_degrees();
+    if (!std::isfinite(panel_fov) || panel_fov < 8.0f) {
+        return 1.0f;
+    }
+    constexpr float kDegreesToRadians = 3.14159265358979323846f / 180.0f;
+    const float director_tan = tanf(
+        director_fov_degrees * kDegreesToRadians * 0.5f);
+    const float panel_tan = tanf(panel_fov * kDegreesToRadians * 0.5f) *
+        (cinema_fullscreen_zoom() / 1.35f);
+    if (!(director_tan > 0.01f) || !(panel_tan > director_tan)) {
+        return 1.0f;
+    }
+    return std::clamp(director_tan / panel_tan, 0.05f, 1.0f);
+}
+
+std::atomic<float> g_fullscreen_cutscene_render_fov_scale{1.0f};
 
 constexpr int kOpenXrModeCleanMono = 1;
 constexpr int kOpenXrModeStereo = 3;
@@ -13794,6 +13860,19 @@ int read_ini_int(const char* section, const char* key, int default_value) {
     return GetPrivateProfileIntA(section, key, default_value, module_path);
 }
 
+void write_ini_float(const char* section, const char* key, float value) {
+    char module_path[MAX_PATH]{};
+    GetModuleFileNameA(nullptr, module_path, sizeof(module_path));
+    char* slash = strrchr(module_path, '\\');
+    if (slash != nullptr) {
+        slash[1] = '\0';
+    }
+    strcat_s(module_path, "witcher3vr.ini");
+    char text[32]{};
+    sprintf_s(text, "%.3f", value);
+    WritePrivateProfileStringA(section, key, text, module_path);
+}
+
 float read_ini_float(const char* section, const char* key, float default_value) {
     char module_path[MAX_PATH]{};
     GetModuleFileNameA(nullptr, module_path, sizeof(module_path));
@@ -14370,6 +14449,21 @@ void load_config() {
             w3vr::ParseCinemaAspect(cinema_aspect));
         g_config.cinema_full_vr = read_ini_bool(
             "openxr", "cinema_full_vr", false);
+        // [FEATURE:FULLSCREEN-CUTSCENES] Always present through the full
+        // headset projection. Lock view only removes head rotation from the
+        // shot; it must not fall back to the finite Cinema3D panel.
+        g_config.cinema_fullscreen = read_ini_bool(
+            "openxr", "cinema_fullscreen", false);
+        g_config.cinema_fullscreen_lock_view = read_ini_bool(
+            "openxr", "cinema_fullscreen_lock_view", false);
+        g_config.cinema_fullscreen_zoom = std::clamp(
+            read_ini_float("openxr", "cinema_fullscreen_zoom", 1.35f),
+            kCinemaFullscreenZoomMin, kCinemaFullscreenZoomMax);
+        g_cinema_fullscreen_zoom.store(
+            g_config.cinema_fullscreen_zoom, std::memory_order_release);
+        if (g_config.cinema_fullscreen) {
+            g_config.cinema_full_vr = true;
+        }
         g_config.steady_icons = read_ini_bool(
             "openxr", "steady_icons", false);
         g_config.menu_distance = std::clamp(
@@ -33713,7 +33807,11 @@ bool prepare_full_vr_frame_camera(
         if (vertical_fov > 0.1f && vertical_span > 0.1f &&
             horizontal_span > 0.1f) {
             corrected[7] = vertical_fov *
-                (180.0f / 3.14159265358979323846f);
+                (180.0f / 3.14159265358979323846f) *
+                (g_config.cinema_fullscreen
+                    ? g_fullscreen_cutscene_render_fov_scale.load(
+                        std::memory_order_acquire)
+                    : 1.0f);
             corrected[10] = horizontal_span / vertical_span;
             if (centered_reused_camera_fallback) {
                 centered_reused_fallback_horizontal_span = horizontal_span;
@@ -33737,9 +33835,19 @@ bool prepare_full_vr_frame_camera(
             XrFovf asymmetric_fov{};
             w3vr::openxr_eye_geometry::AsymmetricProjectionDescriptor
                 asymmetric_projection{};
+            const float fullscreen_cutscene_fov_scale =
+                g_config.cinema_fullscreen
+                ? g_fullscreen_cutscene_render_fov_scale.load(
+                    std::memory_order_acquire)
+                : 1.0f;
             if (native_asymmetric_full_vr_slot == nullptr ||
                 !snapshot_native_asymmetric_pair_fov(
                     pair_id, static_cast<uint32_t>(eye), asymmetric_fov) ||
+                (fullscreen_cutscene_fov_scale < 0.99f &&
+                    !w3vr::openxr_eye_geometry::
+                        scale_asymmetric_projection_fov(
+                            asymmetric_fov, fullscreen_cutscene_fov_scale,
+                            asymmetric_fov)) ||
                 !w3vr::openxr_eye_geometry::
                     derive_asymmetric_projection_descriptor(
                         asymmetric_fov, g_game_render_width,
@@ -33782,7 +33890,12 @@ bool prepare_full_vr_frame_camera(
     XrVector3f applied_hmd_position{};
     if (g_config.hmd_freelook && hmd_pose.valid &&
         !g_config.hmd_compositor_only) {
-        const float position_scale = g_config.hmd_position_scale;
+        const float cutscene_head_gain = g_config.cinema_fullscreen
+            ? g_fullscreen_cutscene_render_fov_scale.load(
+                std::memory_order_acquire)
+            : 1.0f;
+        const float position_scale = g_config.hmd_position_scale *
+            cutscene_head_gain;
         const float local_right = hmd_pose.position_x * position_scale;
         const float local_up = hmd_pose.position_y * position_scale;
         const float local_forward = -hmd_pose.position_z * position_scale;
@@ -33811,9 +33924,12 @@ bool prepare_full_vr_frame_camera(
             ? raw_game_pitch
             : resolve_vertical_pitch_recenter(raw_game_pitch, present);
         const w3vr::hmd_camera_orientation::EulerDegrees hmd_rotation{
-            hmd_pose.roll_degrees * g_config.hmd_roll_scale,
-            hmd_pose.pitch_degrees * g_config.hmd_pitch_scale,
-            hmd_pose.yaw_degrees * g_config.hmd_yaw_scale};
+            hmd_pose.roll_degrees * g_config.hmd_roll_scale *
+                cutscene_head_gain,
+            hmd_pose.pitch_degrees * g_config.hmd_pitch_scale *
+                cutscene_head_gain,
+            hmd_pose.yaw_degrees * g_config.hmd_yaw_scale *
+                cutscene_head_gain};
         w3vr::hmd_camera_orientation::EulerDegrees composed_rotation{};
         const bool vertical_pitch_rotation_composed =
             !g_config.hmd_lock_game_pitch &&
@@ -33831,10 +33947,16 @@ bool prepare_full_vr_frame_camera(
             corrected[4] += hmd_rotation.roll;
         }
         applied_hmd_orientation = quaternion_from_hmd_euler(
-            hmd_pose.pitch_degrees * g_config.hmd_pitch_scale,
-            hmd_pose.yaw_degrees * g_config.hmd_yaw_scale,
-            hmd_pose.roll_degrees * g_config.hmd_roll_scale);
+            hmd_pose.pitch_degrees * g_config.hmd_pitch_scale *
+                cutscene_head_gain,
+            hmd_pose.yaw_degrees * g_config.hmd_yaw_scale *
+                cutscene_head_gain,
+            hmd_pose.roll_degrees * g_config.hmd_roll_scale *
+                cutscene_head_gain);
         applied_hmd_position = {local_right, local_up, local_forward};
+    }
+    if (g_config.cinema_fullscreen) {
+        corrected[5] += fullscreen_cutscene_subject_pitch_degrees();
     }
 
     const bool native_projection_ready =
@@ -36975,6 +37097,47 @@ void __fastcall hook_engine_view_rebuild(float* view) {
         !suppress_hmd_camera &&
         g_engine_menu_state.load(std::memory_order_relaxed) == 0 &&
         factory_perspective_camera;
+    // [FEATURE:FULLSCREEN-CUTSCENES] Zoom the render to the panel's apparent
+    // size, and use that same fraction as the cutscene head-motion gain. An
+    // incoming FOV that matches the headset FOV or the zoomed FOV we wrote
+    // last time is an echo, not a new director shot.
+    static std::atomic<float> fullscreen_cutscene_director_fov{};
+    static std::atomic<float> fullscreen_cutscene_applied_render_fov{};
+    float fullscreen_cutscene_fov_scale = 1.0f;
+    if (g_config.cinema_fullscreen && automatic_full_vr_cutscene &&
+        view != nullptr && std::isfinite(view[7]) &&
+        view[7] > 8.0f && view[7] < 120.0f) {
+        const float incoming_fov = view[7];
+        const float applied_fov = fullscreen_cutscene_applied_render_fov.load(
+            std::memory_order_relaxed);
+        float director_fov = fullscreen_cutscene_director_fov.load(
+            std::memory_order_relaxed);
+        float headset_vertical_fov = 0.0f;
+        if (!g_xr_views.empty()) {
+            const auto& headset_fov = g_xr_views[0].fov;
+            headset_vertical_fov =
+                (headset_fov.angleUp - headset_fov.angleDown) *
+                (180.0f / 3.14159265358979323846f);
+        }
+        const bool echoed_headset_fov = headset_vertical_fov > 8.0f &&
+            std::fabs(incoming_fov - headset_vertical_fov) < 4.0f;
+        const bool echoed_applied_fov = applied_fov > 1.0f &&
+            std::fabs(incoming_fov - applied_fov) < 0.5f;
+        if (!echoed_headset_fov && !echoed_applied_fov) {
+            director_fov = incoming_fov;
+            fullscreen_cutscene_director_fov.store(
+                director_fov, std::memory_order_relaxed);
+        }
+        fullscreen_cutscene_fov_scale =
+            fullscreen_cutscene_render_fov_scale(director_fov);
+    }
+    // Narrower render zoom is stretched to the headset. Slow head motion by
+    // the same fraction so a closer zoom does not whip.
+    const float fullscreen_cutscene_head_gain =
+        g_config.cinema_fullscreen && automatic_full_vr_cutscene
+        ? fullscreen_cutscene_fov_scale : 1.0f;
+    g_fullscreen_cutscene_render_fov_scale.store(
+        fullscreen_cutscene_head_gain, std::memory_order_release);
     if (factory_perspective_camera) {
         const bool previous_full_vr =
             g_automatic_full_vr_camera_active.exchange(
@@ -37095,6 +37258,9 @@ void __fastcall hook_engine_view_rebuild(float* view) {
                 g_engine_producer_pair_id,
                 static_cast<uint32_t>(g_engine_factory_eye),
                 frozen_fov) &&
+            (fullscreen_cutscene_fov_scale >= 0.99f ||
+                w3vr::openxr_eye_geometry::scale_asymmetric_projection_fov(
+                    frozen_fov, fullscreen_cutscene_fov_scale, frozen_fov)) &&
             w3vr::openxr_eye_geometry::
                 derive_asymmetric_projection_descriptor(
                     frozen_fov, native_asymmetric_factory_render_width,
@@ -37198,7 +37364,7 @@ void __fastcall hook_engine_view_rebuild(float* view) {
                 vertical_fov * (180.0f / 3.14159265358979323846f);
             const float symmetric_aspect = horizontal_span / vertical_span;
             if (!native_asymmetric_factory_projection_applied) {
-                view[7] = symmetric_fov;
+                view[7] = symmetric_fov * fullscreen_cutscene_fov_scale;
                 view[10] = symmetric_aspect;
             } else {
                 // World-marker callbacks still write into the shared HUD
@@ -37215,7 +37381,12 @@ void __fastcall hook_engine_view_rebuild(float* view) {
             }
         }
     }
-
+    if (g_config.cinema_fullscreen && automatic_full_vr_cutscene &&
+        view != nullptr && fullscreen_cutscene_fov_scale < 0.99f &&
+        std::isfinite(view[7])) {
+        fullscreen_cutscene_applied_render_fov.store(
+            view[7], std::memory_order_relaxed);
+    }
     const bool render_right_eye = g_engine_factory_eye >= 0
         ? g_engine_factory_eye == 1
         : (present & 1ull) != 0;
@@ -37521,7 +37692,8 @@ void __fastcall hook_engine_view_rebuild(float* view) {
         const float original_yaw = view[6];
         const float original_roll = view[4];
         if (!g_config.hmd_compositor_only) {
-            const float position_scale = g_config.hmd_position_scale;
+            const float position_scale = g_config.hmd_position_scale *
+                fullscreen_cutscene_head_gain;
             const float local_right = camera_hmd_position_x * position_scale;
             const float local_up = camera_hmd_position_y * position_scale;
             const float local_forward = -camera_hmd_position_z * position_scale;
@@ -37672,11 +37844,14 @@ void __fastcall hook_engine_view_rebuild(float* view) {
                 ? resolve_vertical_pitch_recenter(raw_game_pitch, present)
                 : raw_game_pitch;
             const float scaled_hmd_pitch =
-                camera_hmd_pitch * g_config.hmd_pitch_scale;
+                camera_hmd_pitch * g_config.hmd_pitch_scale *
+                fullscreen_cutscene_head_gain;
             const float scaled_hmd_yaw =
-                camera_hmd_yaw * g_config.hmd_yaw_scale;
+                camera_hmd_yaw * g_config.hmd_yaw_scale *
+                fullscreen_cutscene_head_gain;
             const float scaled_hmd_roll =
-                camera_hmd_roll * g_config.hmd_roll_scale;
+                camera_hmd_roll * g_config.hmd_roll_scale *
+                fullscreen_cutscene_head_gain;
             // The scene no longer uses the live mouse pitch when pitch lock is
             // enabled. Runtime bounds show that the marker needs half of the
             // original game-pitch response: the fully live V416 base moved too
@@ -37772,9 +37947,15 @@ void __fastcall hook_engine_view_rebuild(float* view) {
                 view[4] += scaled_hmd_roll;
             }
             applied_hmd_orientation = quaternion_from_hmd_euler(
-                camera_hmd_pitch * g_config.hmd_pitch_scale,
-                camera_hmd_yaw * g_config.hmd_yaw_scale,
-                camera_hmd_roll * g_config.hmd_roll_scale);
+                camera_hmd_pitch * g_config.hmd_pitch_scale *
+                    fullscreen_cutscene_head_gain,
+                camera_hmd_yaw * g_config.hmd_yaw_scale *
+                    fullscreen_cutscene_head_gain,
+                camera_hmd_roll * g_config.hmd_roll_scale *
+                    fullscreen_cutscene_head_gain);
+            if (g_config.cinema_fullscreen && automatic_full_vr_cutscene) {
+                view[5] += fullscreen_cutscene_subject_pitch_degrees();
+            }
             applied_hmd_position = {local_right, local_up, local_forward};
             applied_hmd_pose_valid = g_config.hmd_lock_game_pitch ||
                 vertical_pitch_rotation_composed;
@@ -44501,6 +44682,13 @@ bool composite_mode3_hud_into_projection_image(
         : g_config.hud_stereo_shift_px;
     // Each route keeps its existing independently calibrated size and
     // convergence. Cinema applies these in panel-local source pixels.
+    const float fullscreen_dialog_unzoom =
+        g_config.cinema_fullscreen && automatic_full_vr_cutscene
+        ? std::clamp(
+            g_fullscreen_cutscene_render_fov_scale.load(
+                std::memory_order_acquire),
+            0.05f, 1.0f)
+        : 1.0f;
     const float hud_size = std::max(
         g_config.hud_size *
             (cinema_projection
@@ -44508,7 +44696,7 @@ bool composite_mode3_hud_into_projection_image(
                     ? 1.30f
                     : g_config.manual_cinema_hud_scale)
                 : automatic_full_vr_cutscene
-                ? g_config.full_vr_hud_scale
+                ? g_config.full_vr_hud_scale * fullscreen_dialog_unzoom
                 : 1.0f),
         0.01f);
 
@@ -50975,6 +51163,28 @@ void render_openxr_test_frame(
                         }
                     }
 
+                    // [FEATURE:FULLSCREEN-CUTSCENES] The render is narrower than
+                    // the headset. Submit that full image across the unscaled
+                    // headset FOV. Head motion uses the same fraction, so a
+                    // closer zoom turns more slowly.
+                    if (g_config.cinema_fullscreen &&
+                        automatic_full_vr_cutscene && !cinema_panel &&
+                        g_fullscreen_cutscene_render_fov_scale.load(
+                            std::memory_order_acquire) < 0.99f &&
+                        g_xr_views.size() >= 2) {
+                        mode3_symmetric_subimage = true;
+                        for (uint32_t eye = 0; eye < 2; ++eye) {
+                            projection_eye_image_rects[eye] = {
+                                {0, 0},
+                                {static_cast<int32_t>(swapchain.width),
+                                 static_cast<int32_t>(swapchain.height)}};
+                            projection_eye_image_rect_valid[eye] = true;
+                            projection_eye_exact_fovs[eye] =
+                                g_xr_views[eye].fov;
+                            projection_eye_exact_fov_valid[eye] = true;
+                        }
+                    }
+
                     // A centered source without its exact reciprocal subimage
                     // would be interpreted with the wrong rays. Treat missing
                     // or non-contained geometry as unavailable rather than
@@ -52951,6 +53161,25 @@ HRESULT STDMETHODCALLTYPE hook_present(IDXGISwapChain* swapchain, UINT sync_inte
     // [FIX:F10-KEY-EDGE V1564] The low "pressed since last query" bit can
     // be consumed by another process. Sample the physical down state and
     // latch one edge, matching the neighboring F8/F11 hotkeys.
+    const bool zoom_up_down = (GetAsyncKeyState(VK_NUMPAD7) & 0x8000) != 0;
+    const bool zoom_down_down = (GetAsyncKeyState(VK_NUMPAD4) & 0x8000) != 0;
+    static bool zoom_up_latched{};
+    static bool zoom_down_latched{};
+    const bool zoom_up_pressed = zoom_up_down && !zoom_up_latched;
+    const bool zoom_down_pressed = zoom_down_down && !zoom_down_latched;
+    zoom_up_latched = zoom_up_down;
+    zoom_down_latched = zoom_down_down;
+    if (zoom_up_pressed || zoom_down_pressed) {
+        const float next = std::clamp(
+            cinema_fullscreen_zoom() +
+                (zoom_up_pressed ? kCinemaFullscreenZoomStep
+                                 : -kCinemaFullscreenZoomStep),
+            kCinemaFullscreenZoomMin, kCinemaFullscreenZoomMax);
+        g_cinema_fullscreen_zoom.store(next, std::memory_order_release);
+        g_config.cinema_fullscreen_zoom = next;
+        write_ini_float("openxr", "cinema_fullscreen_zoom", next);
+        log_line("Fullscreen cutscene zoom=%.3f", next);
+    }
     const bool f10_down = (GetAsyncKeyState(VK_F10) & 0x8000) != 0;
     const bool f10_pressed = f10_down &&
         !g_manual_cinema_f10_latched.exchange(true, std::memory_order_relaxed);
