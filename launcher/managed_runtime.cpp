@@ -277,7 +277,7 @@ void AppendCopies(std::vector<CopyOperation>& operations,
             reference / relative,
             root / relative,
             {},
-            SameFilename(relative, L"OptiScaler.ini")});
+            fs::path(relative).filename() == L"OptiScaler.ini"});
     }
 }
 

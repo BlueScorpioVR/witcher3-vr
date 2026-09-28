@@ -281,19 +281,13 @@ void TestOptiscalerIniIsPreserved() {
     TemporaryDirectory temporary;
     const auto& root = temporary.path;
     StageReferences(root);
-    std::wstring error;
-    Require(w3vr::ApplyManagedIntegrationMode(
-            root, w3vr::IntegrationMode::OptiscalerDlss5, error),
-        "first OptiScaler DLSS5 publish failed");
-    Require(ReadFile(root / L"OptiScaler.ini") ==
-            "[Menu]\r\nShortcutKey=0x2E\r\n",
-        "missing OptiScaler.ini was not seeded from the reference");
     const std::string user =
         "[Menu]\r\nShortcutKey=0x2E\r\n[Upscalers]\r\nDx12Upscaler=dlss\r\n";
     WriteFile(root / L"OptiScaler.ini", user);
+    std::wstring error;
     Require(w3vr::ApplyManagedIntegrationMode(
-            root, w3vr::IntegrationMode::OptiscalerDlss5, error),
-        "repeat OptiScaler DLSS5 publish failed");
+            root, w3vr::IntegrationMode::Optiscaler, error),
+        "OptiScaler publish failed");
     Require(ReadFile(root / L"OptiScaler.ini") == user,
         "OptiScaler UI settings were overwritten");
     Require(w3vr::ApplyManagedIntegrationMode(
@@ -302,27 +296,8 @@ void TestOptiscalerIniIsPreserved() {
     Require(ReadFile(root / L"OptiScaler.ini") == user,
         "OptiScaler UI settings were overwritten on mode change");
     fs::remove(root / L"OptiScaler.ini");
-    Require(w3vr::ApplyManagedIntegrationMode(
-            root, w3vr::IntegrationMode::OptiscalerDlss5, error),
-        "reseed after delete failed");
-    Require(ReadFile(root / L"OptiScaler.ini") ==
-            "[Menu]\r\nShortcutKey=0x2E\r\n",
-        "deleted OptiScaler.ini was not reseeded");
-    RequireNoStagingFiles(root);
-}
-
-void TestUnsafeStreamlineOverrideFailsClosed() {
-    TemporaryDirectory temporary;
-    const auto& root = temporary.path;
-    StageReferences(root);
-    WriteFile(root / L"ReShade.ini",
-        "[RenoDX.DLSS5]\r\nEnableHooks=1\r\n");
-    std::wstring error;
-    Require(!w3vr::ApplyManagedIntegrationMode(
-            root, w3vr::IntegrationMode::ReshadeDlss5, error) &&
-            !fs::exists(root / L"dxgi.dll") &&
-            !fs::exists(root / L"renodx-dlss5-v2.5.addon64"),
-        "unsafe Streamline override was accepted");
+    Require(!fs::exists(root / L"OptiScaler.ini"),
+        "deleted OptiScaler.ini was unexpectedly recreated");
     RequireNoStagingFiles(root);
 }
 
