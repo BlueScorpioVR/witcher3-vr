@@ -738,11 +738,12 @@ float cinema_panel_local_y() {
     return g_config.cinema_height * g_config.cinema_scale;
 }
 
-// Pitch that puts the shot where the lowered Cinema3D panel sits. Positive
-// looks up, which moves the subject down in the view by the panel drop.
-float fullscreen_cutscene_subject_pitch_degrees() {
+// FOV zoom magnifies a camera pitch on screen. Attenuate the Cinema3D panel
+// angle by the rendered FOV fraction so the subject drop remains modest.
+float fullscreen_cutscene_subject_pitch_degrees(float render_fov_scale) {
     const float distance = std::max(g_config.menu_distance, 0.05f);
-    return -atan2f(cinema_panel_local_y(), distance) *
+    return -atan2f(cinema_panel_local_y() *
+        0.5f * std::clamp(render_fov_scale, 0.05f, 1.0f), distance) *
         (180.0f / 3.14159265358979323846f);
 }
 
@@ -33956,7 +33957,9 @@ bool prepare_full_vr_frame_camera(
         applied_hmd_position = {local_right, local_up, local_forward};
     }
     if (g_config.cinema_fullscreen) {
-        corrected[5] += fullscreen_cutscene_subject_pitch_degrees();
+        corrected[5] += fullscreen_cutscene_subject_pitch_degrees(
+            g_fullscreen_cutscene_render_fov_scale.load(
+                std::memory_order_acquire));
     }
 
     const bool native_projection_ready =
@@ -37954,7 +37957,8 @@ void __fastcall hook_engine_view_rebuild(float* view) {
                 camera_hmd_roll * g_config.hmd_roll_scale *
                     fullscreen_cutscene_head_gain);
             if (g_config.cinema_fullscreen && automatic_full_vr_cutscene) {
-                view[5] += fullscreen_cutscene_subject_pitch_degrees();
+                view[5] += fullscreen_cutscene_subject_pitch_degrees(
+                    fullscreen_cutscene_fov_scale);
             }
             applied_hmd_position = {local_right, local_up, local_forward};
             applied_hmd_pose_valid = g_config.hmd_lock_game_pitch ||
@@ -44675,11 +44679,17 @@ bool composite_mode3_hud_into_projection_image(
             cinema_parameters->aspect_ratio <= 1.0f)) {
         w3vr::minimal_xr_log::hud("FAIL", "present=%llu function=composite_mode3_hud_into_projection_image site=5", g_present_count.load(std::memory_order_relaxed)); return false;
     }
-    const int reference_left_eye_shift = cinema_projection
+    const int configured_reference_left_eye_shift = cinema_projection
         ? g_config.cinema_hud_stereo_shift_px
         : automatic_full_vr_cutscene
         ? g_config.full_vr_hud_stereo_shift_px
         : g_config.hud_stereo_shift_px;
+    // Small dialogue text makes the retained Full-VR convergence offset
+    // conspicuously divergent. Center it identically in both eyes only for
+    // fullscreen cutscenes; retain configured convergence elsewhere.
+    const int reference_left_eye_shift =
+        g_config.cinema_fullscreen && automatic_full_vr_cutscene
+        ? 0 : configured_reference_left_eye_shift;
     // Each route keeps its existing independently calibrated size and
     // convergence. Cinema applies these in panel-local source pixels.
     const float fullscreen_dialog_unzoom =
@@ -44696,7 +44706,8 @@ bool composite_mode3_hud_into_projection_image(
                     ? 1.30f
                     : g_config.manual_cinema_hud_scale)
                 : automatic_full_vr_cutscene
-                ? g_config.full_vr_hud_scale * fullscreen_dialog_unzoom
+                ? g_config.full_vr_hud_scale * fullscreen_dialog_unzoom *
+                    (g_config.cinema_fullscreen ? 0.45f : 1.0f)
                 : 1.0f),
         0.01f);
 
@@ -44890,6 +44901,21 @@ bool composite_mode3_hud_into_projection_image(
              1.0f,-1.0f, 0.5f, 1.0f}};
         hud_clip_positions[0] = kLegacyFullscreenClip;
         hud_clip_positions[1] = kLegacyFullscreenClip;
+    }
+    if (g_config.cinema_fullscreen && automatic_full_vr_cutscene &&
+        !headset_projection) {
+        // Place the fullscreen-cutscene dialogue HUD noticeably below center.
+        // Clip-space Y is perspective-weighted by W, so subtract a fraction of
+        // W to apply the same screen-space displacement at every corner.
+        constexpr float kFullscreenCutsceneHudDownNdc = 0.30f;
+        for (uint32_t eye = 0; eye < 2; ++eye) {
+            for (uint32_t corner = 0; corner < 4; ++corner) {
+                const size_t base = corner * 4;
+                hud_clip_positions[eye][base + 1] -=
+                    kFullscreenCutsceneHudDownNdc *
+                    hud_clip_positions[eye][base + 3];
+            }
+        }
     }
     std::array<float, 16> reticle_clip_positions[2]{};
     float reticle_inverse_distance_m{};
