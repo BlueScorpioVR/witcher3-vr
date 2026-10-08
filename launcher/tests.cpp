@@ -128,6 +128,7 @@ void WriteBaseFixtures(const w3vr::ConfigPaths& paths) {
         "full_vr_hud_scale=0.750\r\n"
         "cinema_5x4=0\r\n"
         "cinema_full_vr=0\r\n"
+        "cinema_fullscreen_lock_view=1\r\n"
         "steady_icons=0\r\n"
         "vertical_pitch_enabled=0\r\n"
         "hmd_position_scale=0.375\r\n"
@@ -231,8 +232,8 @@ void TestAllModes(const w3vr::ConfigPaths& paths) {
         state.vertical_pitch_enabled = true;
         state.cinema_full_vr = true;
         state.cinema_fullscreen = true;
-        state.cinema_fullscreen_lock_view = index % 2 == 0;
         state.cinema_fullscreen_zoom = 1.75f;
+        state.cinema_pitch_lowering = 0.23f;
         state.steady_icons = true;
         state.first_person_gamepad_head_follow = true;
         state.first_person_snap_turn_degrees = 60;
@@ -371,8 +372,9 @@ void TestAllModes(const w3vr::ConfigPaths& paths) {
             "controller-locked HUD flag missing");
         Require(vr.Get("openxr", "cinema_fullscreen") == "1",
             "fullscreen cutscene flag missing");
-        Require(vr.Get("openxr", "cinema_fullscreen_lock_view") ==
-                std::string(state.cinema_fullscreen_lock_view ? "1" : "0") &&
+        Require(vr.Get("openxr", "cinema_pitch_lowering") == "0.230",
+            "fullscreen vertical must save the overlay pitch adjustment key");
+        Require(!vr.Get("openxr", "cinema_fullscreen_lock_view").has_value() &&
             vr.Get("openxr", "cinema_fullscreen_zoom") == "1.750",
             "fullscreen cutscene zoom settings missing");
         Require(vr.Get("openxr", "steady_icons") == "1",
@@ -489,9 +491,9 @@ void TestAllModes(const w3vr::ConfigPaths& paths) {
             "round-trip automatic full-VR cutscene mismatch");
         Require(loaded.state.cinema_fullscreen,
             "round-trip fullscreen cutscene mismatch");
-        Require(loaded.state.cinema_fullscreen_lock_view ==
-                state.cinema_fullscreen_lock_view &&
-            loaded.state.cinema_fullscreen_zoom ==
+        Require(loaded.state.cinema_pitch_lowering == state.cinema_pitch_lowering,
+            "round-trip fullscreen pitch adjustment mismatch");
+        Require(loaded.state.cinema_fullscreen_zoom ==
                 state.cinema_fullscreen_zoom,
             "round-trip fullscreen cutscene zoom mismatch");
         Require(loaded.state.cinema_aspect == state.cinema_aspect,
@@ -641,9 +643,8 @@ void TestReleaseDefaults() {
         "automatic Full VR cutscenes must default to enabled");
     Require(!defaults.cinema_fullscreen,
         "fullscreen no-frame cutscenes must default to disabled");
-    Require(!defaults.cinema_fullscreen_lock_view &&
-        defaults.cinema_fullscreen_zoom == 1.35f,
-        "fullscreen cutscene zoom must default to 1.35 without a locked view");
+    Require(defaults.cinema_fullscreen_zoom == 1.35f,
+        "fullscreen cutscene zoom must default to 1.35");
     Require(defaults.cinema_aspect == w3vr::CinemaAspect::FiveFour,
         "Cinema aspect must default to 5:4");
     Require(!defaults.steady_icons,
@@ -720,7 +721,7 @@ void TestEmbeddedLauncherDefaults() {
         defaults->Get("openxr", "native_stereo") == "1" &&
         defaults->Get("openxr", "cinema_full_vr") == "1" &&
         defaults->Get("openxr", "cinema_fullscreen") == "0" &&
-        defaults->Get("openxr", "cinema_fullscreen_lock_view") == "0" &&
+        !defaults->Get("openxr", "cinema_fullscreen_lock_view").has_value() &&
         defaults->Get("openxr", "cinema_fullscreen_zoom") == "1.350" &&
         !defaults->Get(
             "openxr", "alternate_presentation_resize").has_value() &&
@@ -1123,9 +1124,8 @@ void TestDlssLabelsAndLegacyAuto(const w3vr::ConfigPaths& paths) {
         "missing automatic-cutscene flag must default to enabled");
     Require(!missing_flags.state.cinema_fullscreen,
         "missing fullscreen-cutscene flag must default to disabled");
-    Require(!missing_flags.state.cinema_fullscreen_lock_view &&
-        missing_flags.state.cinema_fullscreen_zoom == 1.35f,
-        "missing fullscreen zoom settings must default to 1.35 unlocked");
+    Require(missing_flags.state.cinema_fullscreen_zoom == 1.35f,
+        "missing fullscreen zoom settings must default to 1.35");
     Require(!missing_flags.state.steady_icons,
         "missing steady-icons flag must default to disabled");
     Require(!missing_flags.state.hud_controller_locked,

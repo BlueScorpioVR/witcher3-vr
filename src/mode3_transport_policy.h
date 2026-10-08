@@ -311,8 +311,10 @@ constexpr uint64_t hud_scene_only_source_pair_id(
 // the complete ownership record therefore belongs to exact predecessor H,
 // not to N. This also applies to strict-stereo Cinema: its retained HUD
 // readiness can suppress the baked text at H while the scene-N ownership
-// record has not completed yet. AER/sequential Cinema, Full VR and invalid
-// relations retain the final image identity selected above.
+// record has not completed yet. The same delayed proof occurs in strict
+// Full VR: its retained HUD target is H while the scene trace has advanced
+// to N. AER/sequential routes and invalid relations retain the final image
+// identity selected above.
 constexpr uint64_t strict_stereo_late_hud_proof_pair_id(
     bool strict_stereo_join_active,
     HudProjectionRoute route,
@@ -322,7 +324,8 @@ constexpr uint64_t strict_stereo_late_hud_proof_pair_id(
     uint64_t retained_hud_pair_id) noexcept {
     return strict_stereo_join_active &&
         (route == HudProjectionRoute::Gameplay ||
-            route == HudProjectionRoute::Cinema) &&
+            route == HudProjectionRoute::Cinema ||
+            route == HudProjectionRoute::FullVr) &&
         current_generation == target_generation &&
         final_scene_pair_id != 0 && final_scene_pair_id != UINT64_MAX &&
         retained_hud_pair_id != 0 && retained_hud_pair_id != UINT64_MAX &&

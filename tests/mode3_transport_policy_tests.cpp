@@ -240,9 +240,9 @@ int main() {
     assert(hud_scene_only_source_pair_id(true, false, 700, 1400) == 700);
     assert(hud_scene_only_source_pair_id(false, false, 0, 1400) == 1400);
 
-    // Strict gameplay and Cinema consume the completed proof of their exact
-    // retained predecessor. The delayed identity never leaks into AER,
-    // Full VR, another generation, or a malformed relation.
+    // Strict gameplay, Cinema and Full VR consume the completed proof of
+    // their exact retained predecessor. The delayed identity never leaks
+    // into AER, another generation, or a malformed relation.
     assert(strict_stereo_late_hud_proof_pair_id(
         true, HudProjectionRoute::Gameplay, 9, 9, 42, 41) == 41);
     assert(strict_stereo_late_hud_proof_pair_id(
@@ -254,7 +254,13 @@ int main() {
     assert(strict_stereo_late_hud_proof_pair_id(
         true, HudProjectionRoute::Cinema, 9, 8, 42, 41) == 42);
     assert(strict_stereo_late_hud_proof_pair_id(
-        true, HudProjectionRoute::FullVr, 9, 9, 42, 41) == 42);
+        true, HudProjectionRoute::FullVr, 9, 9, 42, 41) == 41);
+    assert(strict_stereo_late_hud_proof_pair_id(
+        false, HudProjectionRoute::FullVr, 9, 9, 42, 41) == 42);
+    assert(strict_stereo_late_hud_proof_pair_id(
+        true, HudProjectionRoute::FullVr, 9, 8, 42, 41) == 42);
+    assert(strict_stereo_late_hud_proof_pair_id(
+        true, HudProjectionRoute::FullVr, 9, 9, 42, 42) == 42);
     assert(strict_stereo_late_hud_proof_pair_id(
         true, HudProjectionRoute::Gameplay, 9, 8, 42, 41) == 42);
     assert(strict_stereo_late_hud_proof_pair_id(
