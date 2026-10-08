@@ -34,7 +34,7 @@ using w3vr::IntegrationMode;
 
 constexpr wchar_t kWindowClass[] = L"Witcher3VRLauncherWindow";
 constexpr int kClientWidth = 1180;
-constexpr int kClientHeight = 782;
+constexpr int kClientHeight = 808;
 constexpr DWORD kWindowStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU |
     WS_MINIMIZEBOX;
 
@@ -86,11 +86,13 @@ enum ControlId {
     IdHideStaticHudOutsideCombat,
     IdHudControllerLocked,
     IdFastMovementTransitions,
+    IdCinemaFramed,
     IdCinemaFullVr,
     IdCinemaFullscreen,
-    IdCinemaFullscreenLockView,
     IdCinemaFullscreenZoom,
     IdCinemaFullscreenZoomValue,
+    IdCinemaPitch,
+    IdCinemaPitchValue,
     IdSteadyIcons,
     IdDiagnosticLogging,
     IdRouteLogging,
@@ -285,6 +287,8 @@ void UpdateTrackLabels() {
             Item(IdCinemaFullscreenZoom), TBM_GETPOS, 0, 0)) / 100.0f).c_str());
     SetWindowTextW(Item(IdCinemaHeightValue), FormatFloat(
         static_cast<float>(SendMessageW(Item(IdCinemaHeight), TBM_GETPOS, 0, 0)) / 100.0f).c_str());
+    SetWindowTextW(Item(IdCinemaPitchValue), FormatFloat(
+        static_cast<float>(SendMessageW(Item(IdCinemaPitch), TBM_GETPOS, 0, 0)) / 100.0f).c_str());
     const float cinema_hud_scale = static_cast<float>(SendMessageW(
         Item(IdCinemaHudScale), TBM_GETPOS, 0, 0)) / 100.0f;
     const int cinema_offset = static_cast<int>(SendMessageW(
@@ -586,8 +590,9 @@ bool CaptureState(LauncherState& state, std::wstring& error) {
         Item(IdCinemaFullVr), BM_GETCHECK, 0, 0) == BST_CHECKED;
     state.cinema_fullscreen = SendMessageW(
         Item(IdCinemaFullscreen), BM_GETCHECK, 0, 0) == BST_CHECKED;
-    state.cinema_fullscreen_lock_view = SendMessageW(
-        Item(IdCinemaFullscreenLockView), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    state.cinema_full_vr = state.cinema_full_vr || state.cinema_fullscreen;
+    state.cinema_pitch_lowering = static_cast<float>(SendMessageW(
+        Item(IdCinemaPitch), TBM_GETPOS, 0, 0)) / 100.0f;
     state.cinema_fullscreen_zoom = static_cast<float>(SendMessageW(
         Item(IdCinemaFullscreenZoom), TBM_GETPOS, 0, 0)) / 100.0f;
     state.steady_icons = SendMessageW(
@@ -1014,11 +1019,13 @@ void RestoreLauncherDefaults() {
     SendMessageW(Item(IdFastMovementTransitions), BM_SETCHECK,
         defaults.fast_movement_transitions ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(Item(IdCinemaFullVr), BM_SETCHECK,
-        defaults.cinema_full_vr ? BST_CHECKED : BST_UNCHECKED, 0);
+        defaults.cinema_full_vr && !defaults.cinema_fullscreen ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(Item(IdCinemaFramed), BM_SETCHECK,
+        !defaults.cinema_full_vr && !defaults.cinema_fullscreen ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(Item(IdCinemaPitch), TBM_SETPOS, TRUE,
+        static_cast<int>(std::lround(defaults.cinema_pitch_lowering * 100.0f)));
     SendMessageW(Item(IdCinemaFullscreen), BM_SETCHECK,
         defaults.cinema_fullscreen ? BST_CHECKED : BST_UNCHECKED, 0);
-    SendMessageW(Item(IdCinemaFullscreenLockView), BM_SETCHECK,
-        defaults.cinema_fullscreen_lock_view ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(Item(IdCinemaFullscreenZoom), TBM_SETPOS, TRUE,
         static_cast<int>(std::lround(defaults.cinema_fullscreen_zoom * 100.0f)));
     SendMessageW(Item(IdSteadyIcons), BM_SETCHECK,
@@ -1270,12 +1277,13 @@ void PopulateControls() {
         loaded.state.fast_movement_transitions
             ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(Item(IdCinemaFullVr), BM_SETCHECK,
-        loaded.state.cinema_full_vr ? BST_CHECKED : BST_UNCHECKED, 0);
+        loaded.state.cinema_full_vr && !loaded.state.cinema_fullscreen ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(Item(IdCinemaFramed), BM_SETCHECK,
+        !loaded.state.cinema_full_vr && !loaded.state.cinema_fullscreen ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(Item(IdCinemaPitch), TBM_SETPOS, TRUE,
+        static_cast<int>(std::lround(loaded.state.cinema_pitch_lowering * 100.0f)));
     SendMessageW(Item(IdCinemaFullscreen), BM_SETCHECK,
         loaded.state.cinema_fullscreen ? BST_CHECKED : BST_UNCHECKED, 0);
-    SendMessageW(Item(IdCinemaFullscreenLockView), BM_SETCHECK,
-        loaded.state.cinema_fullscreen_lock_view
-            ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(Item(IdCinemaFullscreenZoom), TBM_SETPOS, TRUE,
         static_cast<int>(std::lround(
             loaded.state.cinema_fullscreen_zoom * 100.0f)));
@@ -1428,46 +1436,49 @@ void CreateInterface(HWND window) {
          AddLabel(L"+0 / -36", 506, 516, 54, 22,
               IdFullVrHudConvergenceOffsetValue, SS_RIGHT)});
 
-    AddTooltip(AddControl(L"BUTTON", L"Automatic Cutscenes in Full VR",
-        BS_AUTOCHECKBOX | WS_TABSTOP, 38, 550, 260, 26, IdCinemaFullVr),
+    AddLabel(L"Cutscene format:", 38, 550, 130, 26);
+    AddTooltip(AddControl(L"BUTTON", L"framed",
+        BS_RADIOBUTTON | WS_TABSTOP | WS_GROUP, 174, 550, 100, 26, IdCinemaFramed),
+        L"Shows automatic cutscenes on the anchored Cinema3D screen.");
+    AddTooltip(AddControl(L"BUTTON", L"fullscreen",
+        BS_RADIOBUTTON | WS_TABSTOP, 280, 550, 130, 26, IdCinemaFullscreen),
+        L"Fills the headset with zoomed cutscene framing, without a cinema screen.");
+    AddTooltip(AddControl(L"BUTTON", L"VR",
+        BS_RADIOBUTTON | WS_TABSTOP, 426, 550, 90, 26, IdCinemaFullVr),
         L"Keeps supported automatic cutscenes in geometry stereo Full VR instead of placing them on the Cinema3D screen.");
     AddTooltip(AddControl(L"BUTTON", L"Steady Icons",
-        BS_AUTOCHECKBOX | WS_TABSTOP, 304, 550, 256, 26, IdSteadyIcons),
+        BS_AUTOCHECKBOX | WS_TABSTOP, 618, 640, 256, 26, IdSteadyIcons),
         L"Stabilizes world-space icons. It adds one frame only in Stereo; under AER + AFW it may not remain as stable as it does in Stereo.");
+
+    AddTooltips(
+        L"How much cutscene zoom is applied. 1.35 matches the cinema frame. Higher values zoom more and slow head turns more. Numpad 7 and Numpad 4 adjust it while playing and save it.",
+        {AddLabel(L"Cutscene zoom", 38, 582, 100, 22),
+         AddTrack(142, 576, 108, IdCinemaFullscreenZoom, 50, 400),
+         AddLabel(L"1.35", 254, 582, 44, 22,
+               IdCinemaFullscreenZoomValue, SS_RIGHT)});
+    AddTooltips(
+        L"Fullscreen vertical position: the same Pitch height adjustment as the headset overlay. Positive values lower subjects; 0.15 means 15% of visible height.",
+        {AddLabel(L"Fullscreen vertical", 304, 582, 130, 22),
+         AddTrack(434, 576, 80, IdCinemaPitch, -30, 40),
+         AddLabel(L"0.15", 516, 582, 44, 22, IdCinemaPitchValue, SS_RIGHT)});
 
     AddTooltip(AddControl(L"BUTTON",
         L"Enable vertical mouse/pad pitch",
-        BS_AUTOCHECKBOX | WS_TABSTOP, 38, 582, 260, 28, IdVerticalPitch),
+        BS_AUTOCHECKBOX | WS_TABSTOP, 38, 618, 260, 28, IdVerticalPitch),
         L"Allows mouse or gamepad pitch to tilt the camera vertically while the complete headset rotation remains correctly composed with the pitched camera.");
     AddTooltip(AddControl(L"BUTTON", L"Faster Movement Transitions",
-        BS_AUTOCHECKBOX | WS_TABSTOP, 304, 582, 256, 26,
+        BS_AUTOCHECKBOX | WS_TABSTOP, 304, 618, 256, 26,
         IdFastMovementTransitions),
         L"Enables the bundled movement-input fix DLC for faster transitions between movement states.");
 
     AddTooltip(AddControl(L"BUTTON", L"Hide Static HUD Outside Combat",
-        BS_AUTOCHECKBOX | WS_TABSTOP, 38, 618, 510, 26,
+        BS_AUTOCHECKBOX | WS_TABSTOP, 38, 650, 260, 26,
         IdHideStaticHudOutsideCombat),
         L"Hides the minimap, tracked objectives, vitality, buffs, equipped items, damaged-item status, companion panel, and control hints outside combat. Witcher Sense reveals them; combat and horse races preserve navigation information.");
     AddTooltip(AddControl(L"BUTTON", L"Controller-locked HUD (Experimental)",
-        BS_AUTOCHECKBOX | WS_TABSTOP, 304, 582, 256, 26,
+        BS_AUTOCHECKBOX | WS_TABSTOP, 304, 650, 256, 26,
         IdHudControllerLocked),
         L"In gameplay, the HUD follows mouse or gamepad camera turns but stays in its F9-calibrated direction as the headset rotates. The reticle, menus and Cinema HUD are unchanged. Press F9 to recenter the HUD direction.");
-
-    AddTooltip(AddControl(L"BUTTON", L"Fullscreen Cutscenes (no frame)",
-        BS_AUTOCHECKBOX | WS_TABSTOP, 38, 650, 510, 26,
-        IdCinemaFullscreen),
-        L"Zooms automatic cutscenes by narrowing the field of view, and slows head turns by the same amount. 1.35 matches the cinema-frame zoom. Numpad 7 and Numpad 4 change it while playing and save it.");
-
-    AddTooltip(AddControl(L"BUTTON", L"Lock cutscene view",
-        BS_AUTOCHECKBOX | WS_TABSTOP, 618, 640, 250, 26,
-        IdCinemaFullscreenLockView),
-        L"No longer changes head tracking. Fullscreen cutscenes always use the zoomed headset view with a closer rotation point. Leave this unchecked.");
-    AddTooltips(
-        L"How much cutscene zoom is applied. 1.35 matches the cinema frame. Higher values zoom more and slow head turns more. Numpad 7 and Numpad 4 adjust it while playing and save it.",
-        {AddLabel(L"Cutscene zoom", 618, 676, 120, 22),
-         AddTrack(740, 670, 250, IdCinemaFullscreenZoom, 50, 400),
-         AddLabel(L"1.35", 996, 676, 54, 22,
-              IdCinemaFullscreenZoomValue, SS_RIGHT)});
 
     AddTooltip(AddControl(L"BUTTON", L"First Person and camera", BS_GROUPBOX,
         600, 18, 560, 178),
@@ -1618,7 +1629,7 @@ void CreateInterface(HWND window) {
 
     HWND kofi = AddControl(WC_LINK,
         L"If you're enjoying the mod, consider <a href=\"https://ko-fi.com/tig3rmast3r\">supporting it on Ko-fi</a>.",
-        WS_TABSTOP, 20, 748, 1140, 22, IdKofi);
+        WS_TABSTOP, 20, 774, 1140, 22, IdKofi);
     ApplySmallFont(kofi);
 
     PopulateControls();
@@ -1648,6 +1659,10 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam, LPARA
     case WM_COMMAND: {
         const int id = LOWORD(wparam);
         const int notification = HIWORD(wparam);
+        if ((id == IdCinemaFramed || id == IdCinemaFullscreen ||
+                id == IdCinemaFullVr) && notification == BN_CLICKED) {
+            CheckRadioButton(window, IdCinemaFramed, IdCinemaFullscreen, id);
+        }
         if (id == IdMode && notification == CBN_SELCHANGE) UpdateModeControls();
         if ((id == IdIntegrationMode || id == IdOfxrBridge) &&
             notification == CBN_SELCHANGE) {

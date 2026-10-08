@@ -123,8 +123,8 @@ struct LauncherState {
     bool vertical_pitch_enabled{};
     bool cinema_full_vr{true};
     bool cinema_fullscreen{};
-    bool cinema_fullscreen_lock_view{false};
     float cinema_fullscreen_zoom{1.35f};
+    float cinema_pitch_lowering{0.15f};
     bool steady_icons{};
     bool first_person_gamepad_head_follow{};
     int first_person_snap_turn_degrees{45};
