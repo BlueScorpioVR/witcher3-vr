@@ -290,16 +290,71 @@ constexpr bool afw_queued_producer_expired(
         present - ready_present >= kAfwStaleProducerMaxAgePresents;
 }
 
-// [FIX:GAMEPLAY-HUD-CURRENT-SCENE-PROOF V23035 1/3] The scene-only decision is
-// made while REDengine records the HUD draw, whereas retained-pair freshness
-// can advance before the later OpenXR submit. An overlay can expose that race:
-// the backbuffer keeps its baked HUD, then the late path adds the retained HUD
-// again. Every route must therefore prove that the exact published scene pair
-// was rendered scene-only before it may composite the late HUD.
+// The late compositor must query ownership with the identity of the image it
+// will actually publish. AER+AFW presents the completed AFW pair, not the
+// renderer's newer trace pair; Cinema likewise presents its completed
+// sequential pair. Strict Stereo without either final-source route continues
+// to own the trace pair directly.
+constexpr uint64_t hud_scene_only_source_pair_id(
+    bool sequential_source_active,
+    bool afw_final_source_ready,
+    uint64_t final_scene_pair_id,
+    uint64_t trace_pair_id) noexcept {
+    return sequential_source_active || afw_final_source_ready
+        ? final_scene_pair_id
+        : trace_pair_id;
+}
+
+// Strict Stereo publishes the retained HUD for accepted predecessor H while
+// the two submitted HUD command lists that prove scene-only ownership finish
+// during the following stereo cadence. At the OpenXR boundary for scene N,
+// the complete ownership record therefore belongs to exact predecessor H,
+// not to N. This also applies to strict-stereo Cinema: its retained HUD
+// readiness can suppress the baked text at H while the scene-N ownership
+// record has not completed yet. The same delayed proof occurs in strict
+// Full VR: its retained HUD target is H while the scene trace has advanced
+// to N. AER/sequential routes and invalid relations retain the final image
+// identity selected above.
+constexpr uint64_t strict_stereo_late_hud_proof_pair_id(
+    bool strict_stereo_join_active,
+    HudProjectionRoute route,
+    uint32_t current_generation,
+    uint32_t target_generation,
+    uint64_t final_scene_pair_id,
+    uint64_t retained_hud_pair_id) noexcept {
+    return strict_stereo_join_active &&
+        (route == HudProjectionRoute::Gameplay ||
+            route == HudProjectionRoute::Cinema ||
+            route == HudProjectionRoute::FullVr) &&
+        current_generation == target_generation &&
+        final_scene_pair_id != 0 && final_scene_pair_id != UINT64_MAX &&
+        retained_hud_pair_id != 0 && retained_hud_pair_id != UINT64_MAX &&
+        retained_hud_pair_id < final_scene_pair_id
+        ? retained_hud_pair_id
+        : final_scene_pair_id;
+}
+
+// [FIX:HUD-FINAL-SCENE-OWNERSHIP V1536] A missing proof is allowed to block
+// the late composite only after the proof lookup targets that exact published
+// image. This keeps the native-HUD fail-open contract for genuinely baked
+// output without mistaking DLSS5's ahead-of-AFW trace pair for the output.
 constexpr bool late_hud_composite_source_ready(
     HudProjectionRoute /*route*/,
     bool scene_only_pair_ready) noexcept {
     return scene_only_pair_ready;
+}
+
+// A scene-only HUD draw prepares the following XR scene. It may use the
+// already-completed HUD snapshot of the current accepted pair; the final
+// compositor still requires that pair to precede the scene it submits.
+constexpr bool retained_hud_snapshot_matches_scene(
+    uint64_t target_pair, uint64_t requested_scene_pair,
+    bool preparing_scene_draw) noexcept {
+    return target_pair != 0 && target_pair != UINT64_MAX &&
+        requested_scene_pair != 0 &&
+        requested_scene_pair != UINT64_MAX &&
+        (target_pair < requested_scene_pair ||
+            (preparing_scene_draw && target_pair == requested_scene_pair));
 }
 
 // Strict Stereo labels the retained HUD texture with the accepted predecessor,

@@ -1,4 +1,5 @@
 #include "mode3_transport_policy.h"
+#include "mode3_hud_ownership.h"
 
 #ifdef NDEBUG
 #undef NDEBUG
@@ -22,7 +23,9 @@ int main() {
     using w3vr::mode3_transport::final_backbuffer_route_active;
     using w3vr::mode3_transport::final_color_submission_backend;
     using w3vr::mode3_transport::immutable_pair_view_ready;
+    using w3vr::mode3_transport::hud_scene_only_source_pair_id;
     using w3vr::mode3_transport::late_hud_composite_source_ready;
+    using w3vr::mode3_transport::retained_hud_snapshot_matches_scene;
     using w3vr::mode3_transport::strict_stereo_scene_only_output_pair_id;
     using w3vr::mode3_transport::aer_full_vr_scene_only_admission_ready;
     using w3vr::mode3_transport::retained_hud_scene_lifecycle_active;
@@ -231,10 +234,74 @@ int main() {
     assert(afw_queued_producer_expired(108, 100));
     assert(afw_queued_producer_expired(1000, 100));
 
-    // Recording and OpenXR submission can straddle an overlay transition.
-    // Every route must fail open on its native HUD until the exact final pair
-    // proves both eyes were rendered scene-only; otherwise the late layer
-    // would draw the same HUD a second time over a baked backbuffer.
+    // The ownership query follows the final image source. In AER+AFW the
+    // completed output may trail DLSS5's current renderer trace; using 1280
+    // below would suppress a valid retained HUD from final pair 640.
+    assert(hud_scene_only_source_pair_id(false, true, 640, 1280) == 640);
+    assert(hud_scene_only_source_pair_id(true, false, 700, 1400) == 700);
+    assert(hud_scene_only_source_pair_id(false, false, 0, 1400) == 1400);
+
+    // Reproduce PID39228: scene N advances before its HUD draw proof has
+    // completed, while the exact same-generation predecessor is publishable.
+    // All strict projections share this submission cadence, including Full VR.
+    for (const auto route : {HudProjectionRoute::Gameplay,
+                            HudProjectionRoute::Cinema,
+                            HudProjectionRoute::FullVr}) {
+        w3vr::mode3_transport::HudSceneOwnership ownership{};
+        ownership.reset(9);
+        for (uint64_t scene = 42; scene != 50; ++scene) {
+            const uint64_t predecessor = scene - 1;
+            ownership.record(9, predecessor, 0, true);
+            ownership.record(9, predecessor, 1, true);
+            assert(!ownership.ready_for_composite(9, scene));
+            const uint64_t proof = strict_stereo_late_hud_proof_pair_id(
+                true, route, 9, 9, scene, predecessor);
+            assert(ownership.ready_for_composite(9, proof));
+            // A native HUD draw revokes admission; another projection or an
+            // old generation must never turn missing/negative proof positive.
+            ownership.record(9, predecessor, 1, false);
+            assert(!ownership.ready_for_composite(9, proof));
+            assert(!ownership.ready_for_composite(9,
+                strict_stereo_late_hud_proof_pair_id(
+                    false, route, 9, 9, scene, predecessor)));
+            assert(!ownership.ready_for_composite(9,
+                strict_stereo_late_hud_proof_pair_id(
+                    true, route, 9, 8, scene, predecessor)));
+        }
+    }
+
+    // The delayed identity never leaks into AER, another generation, or a
+    // malformed relation.
+    assert(strict_stereo_late_hud_proof_pair_id(
+        true, HudProjectionRoute::Gameplay, 9, 9, 42, 41) == 41);
+    assert(strict_stereo_late_hud_proof_pair_id(
+        false, HudProjectionRoute::Gameplay, 9, 9, 42, 41) == 42);
+    assert(strict_stereo_late_hud_proof_pair_id(
+        true, HudProjectionRoute::Cinema, 9, 9, 42, 41) == 41);
+    assert(strict_stereo_late_hud_proof_pair_id(
+        false, HudProjectionRoute::Cinema, 9, 9, 42, 41) == 42);
+    assert(strict_stereo_late_hud_proof_pair_id(
+        true, HudProjectionRoute::Cinema, 9, 8, 42, 41) == 42);
+    assert(strict_stereo_late_hud_proof_pair_id(
+        true, HudProjectionRoute::FullVr, 9, 9, 42, 41) == 41);
+    assert(strict_stereo_late_hud_proof_pair_id(
+        false, HudProjectionRoute::FullVr, 9, 9, 42, 41) == 42);
+    assert(strict_stereo_late_hud_proof_pair_id(
+        true, HudProjectionRoute::FullVr, 9, 8, 42, 41) == 42);
+    assert(strict_stereo_late_hud_proof_pair_id(
+        true, HudProjectionRoute::FullVr, 9, 9, 42, 42) == 42);
+    assert(strict_stereo_late_hud_proof_pair_id(
+        true, HudProjectionRoute::Gameplay, 9, 8, 42, 41) == 42);
+    assert(strict_stereo_late_hud_proof_pair_id(
+        true, HudProjectionRoute::Gameplay, 9, 9, 42, 42) == 42);
+    assert(strict_stereo_late_hud_proof_pair_id(
+        true, HudProjectionRoute::Gameplay, 9, 9, 42, 43) == 42);
+    assert(strict_stereo_late_hud_proof_pair_id(
+        true, HudProjectionRoute::Gameplay, 9, 9, 0, 41) == 0);
+
+    // Every route still fails open on its native HUD until that selected final
+    // pair proves both eyes were rendered scene-only; the fix changes the
+    // queried identity, not the single-owner safety rule.
     assert(!late_hud_composite_source_ready(
         HudProjectionRoute::Gameplay, false));
     assert(late_hud_composite_source_ready(
@@ -255,6 +322,11 @@ int main() {
     assert(strict_stereo_scene_only_output_pair_id(0, 41) == 0);
     assert(strict_stereo_scene_only_output_pair_id(42, 0) == 0);
     assert(strict_stereo_scene_only_output_pair_id(41, 42) == 0);
+    assert(retained_hud_snapshot_matches_scene(41, 42, false));
+    assert(!retained_hud_snapshot_matches_scene(42, 42, false));
+    assert(retained_hud_snapshot_matches_scene(42, 42, true));
+    assert(!retained_hud_snapshot_matches_scene(43, 42, true));
+    assert(!retained_hud_snapshot_matches_scene(0, 42, true));
 
     // AER automatic Full VR may never inherit AFW gameplay readiness. It
     // removes the baked HUD only when both its sequential scene and retained

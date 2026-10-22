@@ -5,7 +5,7 @@
 
 namespace w3vr::command_list_identity {
 
-enum class Owner { Unknown, Native, Streamline, ReShade };
+enum class Owner { Unknown, Native, Streamline, ReShade, RenderDoc };
 enum class Failure { None, NullInput, UnknownOwner, Query, Cycle, Depth, Interface };
 
 // Streamline's public legacy proxy contract, present in its v1.1.1 source:
@@ -20,8 +20,10 @@ inline constexpr uint32_t kMaxWrappers = 8;
 using ClassifyOwner = Owner (*)(const IUnknown*);
 struct Resolution {
     // Borrowed from the original input's ownership chain, not an added ref.
+    // This is the object received by the active ExecuteCommandLists hook:
+    // native D3D12 normally, or RenderDoc's wrapper during a capture session.
     // The caller must keep the input alive while using this identity.
-    ID3D12GraphicsCommandList* native{};
+    ID3D12GraphicsCommandList* endpoint{};
     uint32_t wrappers{};
     Failure failure{Failure::None};
 };

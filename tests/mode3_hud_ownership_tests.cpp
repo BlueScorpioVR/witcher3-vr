@@ -7,9 +7,19 @@
 
 using w3vr::mode3_transport::HudDrawOwnership;
 using w3vr::mode3_transport::HudSceneOwnership;
+using w3vr::mode3_transport::restore_native_hud_for_menu_draw;
 using w3vr::mode3_transport::strict_hud_capture_publishable;
 
 int main() {
+    // A menu transition can happen after SetPipelineState substituted the HUD
+    // with scene-only or a per-eye Cinema/gameplay/Full-VR variant. The caller
+    // classifies every bridge replacement uniformly; native menu draws remain
+    // outside this predicate.
+    assert(restore_native_hud_for_menu_draw(true, true, true));
+    assert(!restore_native_hud_for_menu_draw(false, true, true));
+    assert(!restore_native_hud_for_menu_draw(true, false, true));
+    assert(!restore_native_hud_for_menu_draw(true, true, false));
+
     // A scene-only draw followed by a native HUD draw in the SAME recording
     // must not keep the positive marker used by the old generation-only map.
     HudDrawOwnership draw{};
@@ -42,21 +52,39 @@ int main() {
     scenes.reset(7);
     assert(scenes.generation() == 7);
     assert(!scenes.ready(7, 42));
+    assert(!scenes.ready_for_composite(7, 42));
     scenes.record(7, 42, 0, true);
+    {
+        const auto state = scenes.pair_state(7, 42);
+        assert(state.found && state.recorded_eyes == 0x1u &&
+               state.scene_only_eyes == 0x1u);
+        assert(!scenes.pair_state(7, 43).found);
+        assert(!scenes.pair_state(8, 42).found);
+    }
     assert(!scenes.ready(7, 42));
+    assert(scenes.ready_for_composite(7, 42));
     scenes.record(7, 42, 1, true);
     assert(scenes.ready(7, 42));
+    assert(scenes.ready_for_composite(7, 42));
 
     // A later native publication revokes a COMPLETED pair. The old positive
     // pair-ID history kept returning true here and authorized duplicate HUD.
     scenes.record(7, 42, 0, false);
+    {
+        const auto state = scenes.pair_state(7, 42);
+        assert(state.found && state.recorded_eyes == 0x3u &&
+               state.scene_only_eyes == 0x2u);
+    }
     assert(!scenes.ready(7, 42));
+    assert(!scenes.ready_for_composite(7, 42));
     scenes.record(7, 42, 1, true);
     assert(!scenes.ready(7, 42)); // Other eye cannot repair this eye's ownership.
     scenes.record(7, 42, 0, true);
     assert(scenes.ready(7, 42)); // A real replacement can restore scene-only.
+    assert(scenes.ready_for_composite(7, 42));
     scenes.record(7, 42, 1, false);
     assert(!scenes.ready(7, 42));
+    assert(!scenes.ready_for_composite(7, 42));
 
     // Recover from a stale retained pair without assuming it is already
     // scene-only. Both native eye captures can be admitted; late composition
@@ -78,19 +106,23 @@ int main() {
     assert(scenes.ready(7, 51));
     assert(!scenes.ready(7, 50));
 
-    // Interleaved pairs retain independent eye identities; a half-pair or a
-    // repeat of one eye cannot certify another output pair.
+    // Interleaved pairs retain independent eye identities. Exact two-eye
+    // readiness remains strict, while final-composite admission accepts a
+    // clean observed owner and rejects any explicitly native owner.
     scenes.reset(7);
     scenes.record(7, 41, 0, true);
     scenes.record(7, 42, 0, true);
     scenes.record(7, 42, 0, true);
     assert(!scenes.ready(7, 41) && !scenes.ready(7, 42));
+    assert(scenes.ready_for_composite(7, 41));
+    assert(scenes.ready_for_composite(7, 42));
     scenes.record(7, 41, 1, true);
     assert(scenes.ready(7, 41) && !scenes.ready(7, 42));
     scenes.record(7, 42, 1, true);
     assert(scenes.ready(7, 41) && scenes.ready(7, 42));
     scenes.record(7, 42, 1, false);
     assert(scenes.ready(7, 41) && !scenes.ready(7, 42));
+    assert(!scenes.ready_for_composite(7, 42));
 
     // Invalid/stale publications cannot revoke a current pair or certify one.
     scenes.record(6, 41, 0, false);
@@ -106,6 +138,7 @@ int main() {
     assert(!scenes.ready(7, 0) && !scenes.ready(7, UINT64_MAX));
     scenes.reset(8);
     assert(!scenes.ready(8, 41) && !scenes.ready(7, 41));
+    assert(!scenes.ready_for_composite(8, 41));
     scenes.record(7, 41, 0, true);
     scenes.record(7, 41, 1, true);
     assert(!scenes.ready(8, 41));
@@ -122,19 +155,44 @@ int main() {
     scenes.record(9, 5, 1, true);
     assert(scenes.ready(9, 5));
 
+    // V1541 runtime reproduction: AFW alternates fully observed real pairs
+    // with accepted pairs whose generated peer has no independent HUD draw
+    // record. Every output is scene-only, so admission must remain continuous
+    // rather than toggling off on every partial pair.
+    scenes.reset(10);
+    for (uint64_t pair = 3428; pair <= 3460; ++pair) {
+        scenes.record(10, pair, 0, true);
+        if ((pair & 1u) == 0) {
+            scenes.record(10, pair, 1, true);
+            assert(scenes.ready(10, pair));
+        } else {
+            assert(!scenes.ready(10, pair));
+        }
+        assert(scenes.ready_for_composite(10, pair));
+    }
+    scenes.record(10, 3460, 1, false);
+    assert(!scenes.ready_for_composite(10, 3460));
+
     // Exhaustive eye/ownership updates of an exact pair agree with the last
     // output of EACH eye (four possibilities per submission, eight updates).
     for (uint32_t sequence = 0; sequence < 65536; ++sequence) {
-        scenes.reset(10);
+        scenes.reset(11);
         bool left = false;
         bool right = false;
+        bool left_recorded = false;
+        bool right_recorded = false;
         for (uint32_t step = 0; step < 8; ++step) {
             const uint32_t update = (sequence >> (2 * step)) & 3u;
             const uint32_t eye = update & 1u;
             const bool clean = (update & 2u) != 0;
             (eye == 0 ? left : right) = clean;
-            scenes.record(10, 100, eye, clean);
-            assert(scenes.ready(10, 100) == (left && right));
+            (eye == 0 ? left_recorded : right_recorded) = true;
+            scenes.record(11, 100, eye, clean);
+            assert(scenes.ready(11, 100) == (left && right));
+            const bool all_observed_clean =
+                (!left_recorded || left) && (!right_recorded || right);
+            assert(scenes.ready_for_composite(11, 100) ==
+                ((left_recorded || right_recorded) && all_observed_clean));
         }
     }
     return 0;

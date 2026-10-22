@@ -100,7 +100,7 @@ struct TempDirectory {
 w3vr::ConfigPaths MakePaths(const fs::path& root) {
     return {root, root / "witcher3vr.ini", root / "optiscaler_bridge.ini",
         root / "ofxr_bridge.ini", root / "dx12user.settings",
-        root / "witcher3.exe"};
+        root / "witcher3.exe", root / "OptiScaler.ini"};
 }
 
 void WriteBaseFixtures(const w3vr::ConfigPaths& paths) {
@@ -128,6 +128,7 @@ void WriteBaseFixtures(const w3vr::ConfigPaths& paths) {
         "full_vr_hud_scale=0.750\r\n"
         "cinema_5x4=0\r\n"
         "cinema_full_vr=0\r\n"
+        "cinema_fullscreen_lock_view=1\r\n"
         "steady_icons=0\r\n"
         "vertical_pitch_enabled=0\r\n"
         "hmd_position_scale=0.375\r\n"
@@ -220,6 +221,7 @@ void TestAllModes(const w3vr::ConfigPaths& paths) {
         state.world_detail_range = 0.65f;
         state.menu_scale = 0.75f;
         state.cinema_scale = 1.1f;
+        state.cinema_height = -0.35f;
         state.cinema_aspect = static_cast<w3vr::CinemaAspect>(index %
             static_cast<int>(w3vr::CinemaAspect::Count));
         state.cinema_hud_scale = 1.5f;
@@ -229,6 +231,9 @@ void TestAllModes(const w3vr::ConfigPaths& paths) {
         state.near_view = 1.25f;
         state.vertical_pitch_enabled = true;
         state.cinema_full_vr = true;
+        state.cinema_fullscreen = true;
+        state.cinema_fullscreen_zoom = 1.75f;
+        state.cinema_pitch_lowering = 0.23f;
         state.steady_icons = true;
         state.first_person_gamepad_head_follow = true;
         state.first_person_snap_turn_degrees = 60;
@@ -238,6 +243,7 @@ void TestAllModes(const w3vr::ConfigPaths& paths) {
         state.camera_follow_policy = static_cast<w3vr::CameraFollowPolicy>(
             index % 3);
         state.hide_static_hud_outside_combat = index % 2 == 0;
+        state.hud_controller_locked = index % 2 == 0;
         state.fast_movement_transitions = index % 2 == 0;
         state.fullscreen_projection = true;
         state.diagnostic_logging = true;
@@ -333,6 +339,8 @@ void TestAllModes(const w3vr::ConfigPaths& paths) {
             "obsolete launcher and Streamline trial keys were not removed");
         Require(vr.Get("openxr", "cinema_scale") == "1.100",
             "cinema scale missing");
+        Require(vr.Get("openxr", "cinema_height") == "-0.350",
+            "cinema height missing");
         Require(vr.Get("openxr", "menu_distance") == "1.200",
             "launcher must not modify menu distance");
         Require(vr.Get("openxr", "cinema_render_stereo_strength") == "0.250",
@@ -359,6 +367,16 @@ void TestAllModes(const w3vr::ConfigPaths& paths) {
             "OpenXR AUTO resolution preference missing");
         Require(vr.Get("openxr", "cinema_full_vr") == "1",
             "automatic full-VR cutscene flag missing");
+        Require(vr.Get("openxr", "hud_controller_locked") ==
+                std::string(state.hud_controller_locked ? "1" : "0"),
+            "controller-locked HUD flag missing");
+        Require(vr.Get("openxr", "cinema_fullscreen") == "1",
+            "fullscreen cutscene flag missing");
+        Require(vr.Get("openxr", "cinema_pitch_lowering") == "0.230",
+            "fullscreen vertical must save the overlay pitch adjustment key");
+        Require(!vr.Get("openxr", "cinema_fullscreen_lock_view").has_value() &&
+            vr.Get("openxr", "cinema_fullscreen_zoom") == "1.750",
+            "fullscreen cutscene zoom settings missing");
         Require(vr.Get("openxr", "steady_icons") == "1",
             "steady-icons latency flag missing");
         Require(vr.Get("engine", "first_person_snap_turn") == "1",
@@ -438,8 +456,8 @@ void TestAllModes(const w3vr::ConfigPaths& paths) {
         Require(w3vr::BuildUpdatedOfxrDocument(
                 paths, state, ofxr, error),
             "OFXR Bridge sidecar document build failed");
-        const std::array<std::string, 3> expected_ofxr{
-            "off", "fidelityfx", "nvidia"};
+        const std::array<std::string, 5> expected_ofxr{
+            "off", "fidelityfx", "nvidia", "nvidia", "fidelityfx"};
         Require(ofxr.Get("ofxr", "backend") ==
                 expected_ofxr[static_cast<size_t>(
                     state.frame_generation_backend)],
@@ -471,8 +489,17 @@ void TestAllModes(const w3vr::ConfigPaths& paths) {
         }
         Require(loaded.state.cinema_full_vr,
             "round-trip automatic full-VR cutscene mismatch");
+        Require(loaded.state.cinema_fullscreen,
+            "round-trip fullscreen cutscene mismatch");
+        Require(loaded.state.cinema_pitch_lowering == state.cinema_pitch_lowering,
+            "round-trip fullscreen pitch adjustment mismatch");
+        Require(loaded.state.cinema_fullscreen_zoom ==
+                state.cinema_fullscreen_zoom,
+            "round-trip fullscreen cutscene zoom mismatch");
         Require(loaded.state.cinema_aspect == state.cinema_aspect,
             "round-trip Cinema aspect mismatch");
+        Require(loaded.state.cinema_height == state.cinema_height,
+            "round-trip cinema height mismatch");
         Require(loaded.state.steady_icons,
             "round-trip steady-icons latency mismatch");
         Require(loaded.state.first_person_gamepad_head_follow,
@@ -492,6 +519,9 @@ void TestAllModes(const w3vr::ConfigPaths& paths) {
         Require(loaded.state.hide_static_hud_outside_combat ==
                 state.hide_static_hud_outside_combat,
             "round-trip dynamic static-HUD policy mismatch");
+        Require(loaded.state.hud_controller_locked ==
+                state.hud_controller_locked,
+            "round-trip controller-locked HUD mismatch");
         Require(loaded.state.cinema_hud_scale == state.cinema_hud_scale &&
             loaded.state.cinema_hud_convergence_offset ==
                 state.cinema_hud_convergence_offset,
@@ -611,6 +641,10 @@ void TestReleaseDefaults() {
         "Full VR cutscene HUD must default to size 1.0 at gameplay depth");
     Require(defaults.cinema_full_vr,
         "automatic Full VR cutscenes must default to enabled");
+    Require(!defaults.cinema_fullscreen,
+        "fullscreen no-frame cutscenes must default to disabled");
+    Require(defaults.cinema_fullscreen_zoom == 1.35f,
+        "fullscreen cutscene zoom must default to 1.35");
     Require(defaults.cinema_aspect == w3vr::CinemaAspect::FiveFour,
         "Cinema aspect must default to 5:4");
     Require(!defaults.steady_icons,
@@ -633,6 +667,8 @@ void TestReleaseDefaults() {
         "camera follow must default to the vehicle-only policy");
     Require(!defaults.hide_static_hud_outside_combat,
         "static-HUD hiding must remain opt-in");
+    Require(!defaults.hud_controller_locked,
+        "controller-locked HUD must remain experimental opt-in");
     Require(defaults.fast_movement_transitions,
         "faster movement transitions must default to enabled");
     Require(!defaults.fullscreen_projection,
@@ -683,6 +719,10 @@ void TestEmbeddedLauncherDefaults() {
         !defaults->Get("openxr", "presentation_black_resize").has_value() &&
         defaults->Get("openxr", "world_detail_range") == "1.000" &&
         defaults->Get("openxr", "native_stereo") == "1" &&
+        defaults->Get("openxr", "cinema_full_vr") == "1" &&
+        defaults->Get("openxr", "cinema_fullscreen") == "0" &&
+        !defaults->Get("openxr", "cinema_fullscreen_lock_view").has_value() &&
+        defaults->Get("openxr", "cinema_fullscreen_zoom") == "1.350" &&
         !defaults->Get(
             "openxr", "alternate_presentation_resize").has_value() &&
         defaults->Get("engine", "temporal_backend") == "dlss" &&
@@ -697,12 +737,10 @@ void TestEmbeddedLauncherDefaults() {
 }
 
 void TestIntegrationModeContract() {
-    constexpr std::array<const wchar_t*, 6> expected_display{{
-        L"Off", L"OptiScaler", L"ReShade", L"OptiScaler + ReShade",
-        L"OptiScaler DLSS5", L"ReShade DLSS5 RenoDX"}};
-    constexpr std::array<const char*, 6> expected_ini{{
-        "off", "optiscaler", "reshade", "optiscaler_reshade",
-        "optiscaler_dlss5", "reshade_dlss5"}};
+    constexpr std::array<const wchar_t*, 4> expected_display{{
+        L"Off", L"OptiScaler", L"ReShade", L"OptiScaler + ReShade"}};
+    constexpr std::array<const char*, 4> expected_ini{{
+        "off", "optiscaler", "reshade", "optiscaler_reshade"}};
     for (size_t index = 0; index < expected_display.size(); ++index) {
         const auto mode = static_cast<w3vr::IntegrationMode>(index);
         Require(std::wstring_view(w3vr::IntegrationModeDisplayName(mode)) ==
@@ -718,26 +756,21 @@ void TestIntegrationModeContract() {
             w3vr::IntegrationModeUsesOptiscaler(
                 w3vr::IntegrationMode::Optiscaler) &&
             w3vr::IntegrationModeUsesOptiscaler(
-                w3vr::IntegrationMode::OptiscalerReshade) &&
-            w3vr::IntegrationModeUsesOptiscaler(
-                w3vr::IntegrationMode::OptiscalerDlss5),
+                w3vr::IntegrationMode::OptiscalerReshade),
         "OptiScaler integration membership changed");
     Require(w3vr::IntegrationModeUsesReshade(
                 w3vr::IntegrationMode::Reshade) &&
             w3vr::IntegrationModeUsesReshade(
                 w3vr::IntegrationMode::OptiscalerReshade) &&
-            w3vr::IntegrationModeUsesReshade(
-                w3vr::IntegrationMode::ReshadeDlss5) &&
             !w3vr::IntegrationModeUsesReshade(
-                w3vr::IntegrationMode::OptiscalerDlss5),
+                w3vr::IntegrationMode::Optiscaler),
         "ReShade integration membership changed");
-    Require(w3vr::IntegrationModeUsesDlss5(
-                w3vr::IntegrationMode::OptiscalerDlss5) &&
-            w3vr::IntegrationModeUsesDlss5(
-                w3vr::IntegrationMode::ReshadeDlss5) &&
-            !w3vr::IntegrationModeUsesDlss5(
-                w3vr::IntegrationMode::OptiscalerReshade),
-        "DLSS5 integration membership changed");
+    Require(w3vr::ParseIntegrationMode("optiscaler_dlss5") ==
+            w3vr::IntegrationMode::Optiscaler,
+        "legacy OptiScaler DLSS5 mode must migrate to OptiScaler");
+    Require(w3vr::ParseIntegrationMode("reshade_dlss5") ==
+            w3vr::IntegrationMode::Reshade,
+        "legacy RenoDX mode must migrate to plain ReShade");
 }
 
 void TestHudEditorSetup(const fs::path& root) {
@@ -751,7 +784,8 @@ void TestHudEditorSetup(const fs::path& root) {
         launcher_directory / "optiscaler_bridge.ini",
         launcher_directory / "ofxr_bridge.ini",
         documents / "dx12user.settings",
-        launcher_directory / "witcher3.exe"};
+        launcher_directory / "witcher3.exe",
+        launcher_directory / "OptiScaler.ini"};
     const fs::path script = game / "mods" / "modWitcher3VRHUDEditor" /
         "content" / "scripts" / "local" / "witcher3vr_hud_editor" /
         "hud_editor.ws";
@@ -1068,7 +1102,11 @@ void TestDlssLabelsAndLegacyAuto(const w3vr::ConfigPaths& paths) {
         "unsupported snap-turn angles must fall back to 45 degrees");
 
     vr->Remove("openxr", "cinema_full_vr");
+    vr->Remove("openxr", "cinema_fullscreen");
+    vr->Remove("openxr", "cinema_fullscreen_lock_view");
+    vr->Remove("openxr", "cinema_fullscreen_zoom");
     vr->Remove("openxr", "steady_icons");
+    vr->Remove("openxr", "hud_controller_locked");
     vr->Remove("openxr", "vertical_pitch_enabled");
     vr->Remove("engine", "first_person_combat_exit");
     vr->Remove("engine", "first_person_strafe");
@@ -1084,8 +1122,14 @@ void TestDlssLabelsAndLegacyAuto(const w3vr::ConfigPaths& paths) {
     const auto missing_flags = w3vr::LoadConfiguration(paths);
     Require(missing_flags.state.cinema_full_vr,
         "missing automatic-cutscene flag must default to enabled");
+    Require(!missing_flags.state.cinema_fullscreen,
+        "missing fullscreen-cutscene flag must default to disabled");
+    Require(missing_flags.state.cinema_fullscreen_zoom == 1.35f,
+        "missing fullscreen zoom settings must default to 1.35");
     Require(!missing_flags.state.steady_icons,
         "missing steady-icons flag must default to disabled");
+    Require(!missing_flags.state.hud_controller_locked,
+        "missing controller-locked HUD flag must default to disabled");
     Require(!missing_flags.state.vertical_pitch_enabled,
         "missing vertical-pitch flag must default to disabled");
     Require(!missing_flags.state.first_person_combat_exit,
@@ -1118,6 +1162,8 @@ void TestFallbackAndAtomicSave(const w3vr::ConfigPaths& paths) {
     const auto cinema_missing = w3vr::LoadConfiguration(paths);
     Require(cinema_missing.state.cinema_scale == cinema_missing.state.menu_scale,
         "cinema fallback must match menu scale");
+    Require(cinema_missing.state.cinema_height == -0.20f,
+        "missing cinema height must keep the current default offset");
 
     w3vr::LauncherState state;
     state.mode = w3vr::RenderMode::AerAfwTaau;
@@ -1754,7 +1800,7 @@ void TestOfxrLaunchEnvironment(const fs::path& root) {
     SetEnvironmentVariableW(L"XRFG_FLOW_BACKEND", nullptr);
 }
 
-void TestOfxrBackendOnlySave() {
+void TestOfxrAndPersistentOptiscalerSave() {
     TempDirectory temporary;
     const auto paths = MakePaths(temporary.path);
     WriteBaseFixtures(paths);
@@ -1764,7 +1810,9 @@ void TestOfxrBackendOnlySave() {
     // a manual recorder change made after the launcher loaded its UI state.
     for (const auto backend : {w3vr::FrameGenerationBackend::Off,
             w3vr::FrameGenerationBackend::FidelityFx,
-            w3vr::FrameGenerationBackend::Nvidia}) {
+              w3vr::FrameGenerationBackend::Nvidia,
+              w3vr::FrameGenerationBackend::NvidiaNew,
+            w3vr::FrameGenerationBackend::Fsr3}) {
         for (const bool mod_logging : {false, true}) {
             for (const bool ofxr_logging : {false, true}) {
                 for (const bool supplied_profile : {false, true}) {
@@ -1773,7 +1821,18 @@ void TestOfxrBackendOnlySave() {
                         std::string(ofxr_logging ? "0" : "1") + "\n");
                     auto state = w3vr::LoadConfiguration(paths).state;
                     state.frame_generation_backend = backend;
+                    state.integration_mode =
+                        w3vr::IntegrationMode::Optiscaler;
+                    state.ofxr_nvidia_preset =
+                        w3vr::OfxrNvidiaPreset::Fast;
+                    state.ofxr_nvidia_input_scale =
+                        w3vr::OfxrNvidiaInputScale::ThreeQuarter;
+                    state.ofxr_nvidia_bidirectional = true;
                     state.diagnostic_logging = mod_logging;
+                    state.ofxr_logging = ofxr_logging;
+                    state.optiscaler_logging = true;
+                    state.ofxr_overlay_position =
+                        w3vr::OfxrOverlayPosition::LowerLeft;
 
                     // Deliberately mixed line endings, comments, unknown keys,
                     // a separate backend key and no trailing newline.
@@ -1789,18 +1848,54 @@ void TestOfxrBackendOnlySave() {
                         "nvidia_bidirectional=1\r\n; keep this comment\n"
                         "future_option=keep\r\n[unrelated]\nbackend=untouched";
                     Write(paths.ofxr_bridge_ini, before);
-                    std::string expected = before;
-                    const char* backend_value =
-                        backend == w3vr::FrameGenerationBackend::Off ? "off" :
-                        backend == w3vr::FrameGenerationBackend::Nvidia
+                    Write(paths.optiscaler_ini,
+                        "; persistent OptiScaler comment\r\n"
+                        "[General]\r\nFutureOption=keep\r\n"
+                        "[Log]\r\nLogToFile=false\r\n");
+                    auto expected_doc = w3vr::IniDocument::FromText(before);
+                    const bool enabled =
+                        backend != w3vr::FrameGenerationBackend::Off;
+                    const bool fsr = backend ==
+                        w3vr::FrameGenerationBackend::Fsr3;
+                    const char* backend_value = backend ==
+                            w3vr::FrameGenerationBackend::Off ? "off" :
+                          (backend == w3vr::FrameGenerationBackend::Nvidia ||
+                           backend == w3vr::FrameGenerationBackend::NvidiaNew)
                             ? "nvidia" : "fidelityfx";
-                    expected.replace(expected.find("backend =fidelityfx"),
-                        std::string("backend =fidelityfx").size(),
-                        "backend =" + std::string(backend_value));
+                    expected_doc.Set("ofxr", "enabled", enabled ? "1" : "0");
+                    expected_doc.Set("ofxr", "frame_generation",
+                        fsr ? "fsr3" : "ofxr");
+                    expected_doc.Set("ofxr", "motion_vectors",
+                        fsr ? "dlss" : "off");
+                      expected_doc.Set("ofxr", "backend", backend_value);
+                      expected_doc.Set("ofxr", "nvidia_route",
+                          backend == w3vr::FrameGenerationBackend::NvidiaNew ? "new" : "legacy");
+                    expected_doc.Set("ofxr", "nvidia_preset", "fast");
+                    expected_doc.Set("ofxr", "nvidia_input_scale", "75");
+                    expected_doc.Set("ofxr", "nvidia_bidirectional", "1");
+                    expected_doc.Set("diagnostics", "logging_enabled",
+                        ofxr_logging ? "1" : "0");
+                    expected_doc.Set("overlay", "position", "lower_left");
+                    const std::string expected = expected_doc.Serialize();
                     Require(w3vr::SaveConfiguration(paths, state, error),
-                        "OFXR backend-only save failed");
-                    Require(Read(paths.ofxr_bridge_ini) == expected,
-                        "OFXR save changed bytes outside the backend value");
+                        "OFXR settings save failed");
+                      Require(Read(paths.ofxr_bridge_ini) == expected,
+                          "OFXR save changed bytes outside launcher-owned keys");
+                      Require(w3vr::LoadConfiguration(paths).state.frame_generation_backend == backend,
+                          "frame-generation engine did not survive reload");
+                    const auto root_opti = Read(paths.optiscaler_ini);
+                    Require(root_opti.find("[ofxr]") != std::string::npos &&
+                            root_opti.find("FutureOption=keep") !=
+                                std::string::npos &&
+                            root_opti.find("; persistent OptiScaler comment") !=
+                                std::string::npos &&
+                            root_opti.find("LogToFile=true") !=
+                                std::string::npos &&
+                            root_opti.find("OverlayMenu=true") !=
+                                std::string::npos &&
+                            root_opti.find("RenderInUpscaler=true") !=
+                                std::string::npos,
+                        "persistent OptiScaler.ini was not written");
                     Require(w3vr::SaveConfiguration(paths, state, error) &&
                             Read(paths.ofxr_bridge_ini) == expected,
                         "repeated save changed the independent OFXR settings");
@@ -1809,17 +1904,22 @@ void TestOfxrBackendOnlySave() {
         }
     }
 
-    // Missing backend is inserted without recreating the user's configuration.
+    // Missing keys are inserted without recreating the user's configuration.
     Write(paths.ofxr_bridge_ini,
         "[ofxr]\r\nnvidia_preset=medium\r\nnvidia_input_scale=50\r\n"
         "[diagnostics]\r\nlogging_enabled=1\r\n");
     w3vr::LauncherState state;
     state.frame_generation_backend = w3vr::FrameGenerationBackend::Nvidia;
+    state.ofxr_nvidia_preset = w3vr::OfxrNvidiaPreset::Slow;
+    state.ofxr_nvidia_input_scale = w3vr::OfxrNvidiaInputScale::Full;
+    state.ofxr_nvidia_bidirectional = true;
+    state.ofxr_logging = true;
     w3vr::IniDocument ofxr;
     Require(w3vr::BuildUpdatedOfxrDocument(paths, state, ofxr, error) &&
             ofxr.Get("ofxr", "backend") == "nvidia" &&
-            ofxr.Get("ofxr", "nvidia_preset") == "medium" &&
-            ofxr.Get("ofxr", "nvidia_input_scale") == "50" &&
+            ofxr.Get("ofxr", "nvidia_preset") == "slow" &&
+            ofxr.Get("ofxr", "nvidia_input_scale") == "100" &&
+            ofxr.Get("ofxr", "nvidia_bidirectional") == "1" &&
             ofxr.Get("diagnostics", "logging_enabled") == "1",
         "inserting the missing OFXR backend lost existing settings");
 
@@ -1881,7 +1981,7 @@ int main() {
         TestVrBaselineAndRestore(paths);
         TestFailurePaths(temporary.path);
         TestOfxrLaunchEnvironment(temporary.path);
-        TestOfxrBackendOnlySave();
+        TestOfxrAndPersistentOptiscalerSave();
         TestNonblockingVersion();
         std::cout << "All launcher configuration tests passed.\n";
         return 0;

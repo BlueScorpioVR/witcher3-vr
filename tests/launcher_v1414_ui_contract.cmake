@@ -20,9 +20,21 @@ file(READ "${DXGI_PROXY_SOURCE}" dxgi_proxy)
 
 foreach(required IN ITEMS
         "IdIntegrationMode"
+        "IdOfxrNvidiaPreset"
+        "IdOfxrNvidiaInputScale"
+        "IdOfxrNvidiaBidirectional"
+        "NVIDIA bidirectional consistency"
+        "L\"OFXR log\""
+        "L\"OptiScaler log\""
         "L\"Integration\""
-        "Select one complete integration state."
-        "DLSS5 reference is read-only"
+        "Select Off, OptiScaler, ReShade or both."
+        "Controller-locked HUD (Experimental)"
+        "L\"Cutscene format:\""
+        "L\"framed\""
+        "L\"fullscreen\""
+        "L\"VR\""
+        "CheckRadioButton(window, IdCinemaFramed, IdCinemaFullscreen, id)"
+        "IdCinemaPitch"
         "F2  Toggle between Symmetric and Asymmetric projection"
         "Toggle between symmetric and asymmetric projection."
         "HUD Editor bindings"
@@ -52,7 +64,7 @@ foreach(required IN ITEMS
         "Witcher 3 VR Launcher - V"
         "ShowStartupWarnings();"
         "constexpr int kClientWidth = 1180;"
-    "constexpr int kClientHeight = 746;"
+    "constexpr int kClientHeight = 808;"
         "600, 18, 560, 178"
         "600, 462, 560, 160"
         "https://ko-fi.com/tig3rmast3r")
@@ -64,6 +76,8 @@ endforeach()
 
 foreach(forbidden IN ITEMS
         "IdOptiscaler"
+        "L\"Automatic Cutscenes in Full VR\""
+        "L\"Fullscreen Cutscenes (no frame)\""
         "IdEnableReshade"
         "IdEnableDlss5"
         "UpdateManagedIntegrationControls"
@@ -107,6 +121,7 @@ endforeach()
 
 foreach(required IN ITEMS
         "vr_ini.Set(\"openxr\", \"native_stereo\", \"1\")"
+        "vr_ini.Set(\"openxr\", \"cinema_pitch_lowering\""
         "paths.optiscaler_bridge_ini"
         "IntegrationModeUsesOptiscaler(state.integration_mode)"
         "vr_ini.Set(\"launcher\", \"integration_mode\""
@@ -152,8 +167,9 @@ endforeach()
 
 foreach(required IN ITEMS
         "[TRIAL:RESHADE-OPAQUE-SUBMIT-CLEANUP V23011]"
-        "if ((GetAsyncKeyState(VK_CONTROL) & 0x8000) == 0 ||"
-        "(GetAsyncKeyState(VK_F6) & 1) == 0)")
+        "(GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0"
+        "(GetAsyncKeyState(VK_F6) & 0x8000) != 0"
+        "g_puredark_afw_f6_latched")
     string(FIND "${dxgi_proxy}" "${required}" found)
     if(found EQUAL -1)
         message(FATAL_ERROR "Missing V1414 always-available AFW debug contract: ${required}")

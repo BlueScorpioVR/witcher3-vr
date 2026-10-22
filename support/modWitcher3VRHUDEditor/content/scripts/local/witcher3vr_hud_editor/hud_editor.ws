@@ -913,6 +913,8 @@ class W3VRHudEditorController
     var now: float;
     var stateLabel: string;
     var toggleDown: bool;
+    var subtitleSlot: W3VRHudEditorSlot;
+    var subtitlesModule: CR4HudModuleSubtitles;
 
     // Ensure the controller/input side exists even before every child module
     // has published its live reference through AddHudModuleReference().
@@ -922,6 +924,15 @@ class W3VRHudEditorController
     }
 
     now = theGame.GetEngineTimeAsSeconds();
+    subtitleSlot = FindSlot("SubtitlesModule");
+    if (subtitleSlot && subtitleSlot.module)
+    {
+      subtitlesModule = (CR4HudModuleSubtitles)subtitleSlot.module;
+      if (subtitlesModule)
+      {
+        subtitlesModule.W3VRHudEditorTickAddedSubtitleLayoutRefresh(now);
+      }
+    }
     if (nextDebugTraceAt <= 0.0f || now >= nextDebugTraceAt)
     {
       if (initialized)
@@ -1521,37 +1532,6 @@ class W3VRHudEditorController
     AnnounceSelectedSlot();
   }
 
-  private function BootstrapSubtitlePreviewLayout(
-    slot: W3VRHudEditorSlot
-  )
-  {
-    var savedY: float;
-    var temporaryY: float;
-
-    if (!slot || !slot.module || slot.moduleName != "SubtitlesModule")
-    {
-      return;
-    }
-
-    savedY = slot.GetY(activeProfile);
-    temporaryY = savedY + 1.0f;
-    if (temporaryY > 2160.0f)
-    {
-      temporaryY = savedY - 1.0f;
-    }
-
-    // [FIX:SUBTITLE-PREVIEW-NUDGE-BOOTSTRAP V1247] OnSubtitleAdded can
-    // recreate the ScaleOnly root after its saved transform was last applied.
-    // Reproduce one real vertical nudge and its exact inverse only on that
-    // creation edge. The saved coordinate is restored before returning, so
-    // closing the editor persists the original value and no per-frame owner
-    // fights Scaleform animation.
-    slot.SetY(activeProfile, temporaryY);
-    RefreshSlot(slot);
-    slot.SetY(activeProfile, savedY);
-    RefreshSlot(slot);
-  }
-
   private function ShowConditionalPreview(slot: W3VRHudEditorSlot)
   {
     var consoleModule: CR4HudModuleConsole;
@@ -1559,7 +1539,6 @@ class W3VRHudEditorController
     var areaModule: CR4HudModuleAreaInfo;
     var subtitlesModule: CR4HudModuleSubtitles;
     var dialogModule: CR4HudModuleDialog;
-    var subtitlePreviewWasActive: bool;
 
     if (!slot)
     {
@@ -1606,16 +1585,7 @@ class W3VRHudEditorController
       subtitlesModule = (CR4HudModuleSubtitles)slot.module;
       if (subtitlesModule)
       {
-        subtitlePreviewWasActive =
-          subtitlesModule.w3vr_hud_editor_preview_active;
         subtitlesModule.W3VRHudEditorShowPreview();
-        if (
-          !subtitlePreviewWasActive &&
-          subtitlesModule.w3vr_hud_editor_preview_active
-        )
-        {
-          BootstrapSubtitlePreviewLayout(slot);
-        }
       }
     }
     else if (slot.moduleName == "DialogModule")
@@ -2366,6 +2336,12 @@ var w3vr_hud_editor_preview_active: bool;
 @addField(CR4HudModuleSubtitles)
 var w3vr_hud_editor_preview_active: bool;
 
+@addField(CR4HudModuleSubtitles)
+var w3vr_hud_editor_active_subtitle_ids: array<int>;
+
+@addField(CR4HudModuleSubtitles)
+var w3vr_hud_editor_layout_drift_log_next: float;
+
 @addField(CR4HudModuleDialog)
 var w3vr_hud_editor_preview_active: bool;
 
@@ -2567,6 +2543,185 @@ function W3VRHudEditorHidePreview()
   }
   this.OnSubtitleRemoved(2000001140);
   this.w3vr_hud_editor_preview_active = false;
+}
+
+@addMethod(CR4HudModuleSubtitles)
+function W3VRHudEditorApplySubtitleRootLayout()
+{
+  var root: CScriptedFlashSprite;
+  var expectedX: float;
+  var expectedY: float;
+  var expectedScaleX: float;
+  var expectedScaleY: float;
+
+  if (!this.w3vr_hud_editor_managed)
+  {
+    return;
+  }
+
+  root = this.GetModuleFlash();
+  if (!root)
+  {
+    return;
+  }
+
+  if (!this.w3vr_hud_editor_direct_base_captured)
+  {
+    this.w3vr_hud_editor_direct_base_x = root.GetX();
+    this.w3vr_hud_editor_direct_base_y = root.GetY();
+    this.w3vr_hud_editor_direct_base_scale_x = root.GetXScale();
+    this.w3vr_hud_editor_direct_base_scale_y = root.GetYScale();
+    this.w3vr_hud_editor_direct_base_captured = true;
+  }
+
+  // [TRIAL:SUBTITLE-DIRECT-ROOT V1560] The old two-Snap recenter called
+  // CR4HudModuleSubtitles.UpdateScale -> Flash updateWidth twice on every HUD
+  // tick. That could keep restarting the very transition we were correcting.
+  // Apply the exact saved root transform directly, without an ActionScript
+  // call or a temporary one-pixel nudge during the subtitle's lifetime.
+  expectedScaleX = this.w3vr_hud_editor_direct_base_scale_x *
+    this.w3vr_hud_editor_target_scale;
+  expectedScaleY = this.w3vr_hud_editor_direct_base_scale_y *
+    this.w3vr_hud_editor_target_scale;
+  expectedX = this.w3vr_hud_editor_direct_base_x +
+    this.w3vr_hud_editor_target_x +
+    (this.curResolutionWidth * 0.5f - this.w3vr_hud_editor_direct_base_x) *
+    (1.0f - this.w3vr_hud_editor_target_scale);
+  expectedY = this.w3vr_hud_editor_direct_base_y +
+    this.w3vr_hud_editor_target_y +
+    (this.curResolutionHeight - this.w3vr_hud_editor_direct_base_y) *
+    (1.0f - this.w3vr_hud_editor_target_scale);
+
+  if (AbsF(root.GetXScale() - expectedScaleX) > 0.001f)
+  {
+    root.SetXScale(expectedScaleX);
+  }
+  if (AbsF(root.GetYScale() - expectedScaleY) > 0.001f)
+  {
+    root.SetYScale(expectedScaleY);
+  }
+  if (AbsF(root.GetX() - expectedX) > 0.25f)
+  {
+    root.SetX(expectedX);
+  }
+  if (AbsF(root.GetY() - expectedY) > 0.25f)
+  {
+    root.SetY(expectedY);
+  }
+}
+
+@addMethod(CR4HudModuleSubtitles)
+function W3VRHudEditorScheduleAddedSubtitleLayoutRefresh(id: int)
+{
+  var i: int;
+
+  if (!this.w3vr_hud_editor_managed)
+  {
+    return;
+  }
+
+  // Own the ScaleOnly root only while at least one subtitle is present;
+  // OnSubtitleRemoved ends ownership instead of a guessed timeout.
+  for (i = 0; i < this.w3vr_hud_editor_active_subtitle_ids.Size(); i += 1)
+  {
+    if (this.w3vr_hud_editor_active_subtitle_ids[i] == id)
+    {
+      this.W3VRHudEditorApplySubtitleRootLayout();
+      return;
+    }
+  }
+  this.w3vr_hud_editor_active_subtitle_ids.PushBack(id);
+  this.W3VRHudEditorApplySubtitleRootLayout();
+}
+
+@addMethod(CR4HudModuleSubtitles)
+function W3VRHudEditorTickAddedSubtitleLayoutRefresh(now: float)
+{
+  var root: CScriptedFlashSprite;
+  var expectedX: float;
+  var expectedY: float;
+
+  if (this.w3vr_hud_editor_active_subtitle_ids.Size() == 0)
+  {
+    return;
+  }
+
+  root = this.GetModuleFlash();
+  if (root && this.w3vr_hud_editor_direct_base_captured)
+  {
+    expectedX = this.w3vr_hud_editor_direct_base_x +
+      this.w3vr_hud_editor_target_x +
+      (this.curResolutionWidth * 0.5f - this.w3vr_hud_editor_direct_base_x) *
+      (1.0f - this.w3vr_hud_editor_target_scale);
+    expectedY = this.w3vr_hud_editor_direct_base_y +
+      this.w3vr_hud_editor_target_y +
+      (this.curResolutionHeight - this.w3vr_hud_editor_direct_base_y) *
+      (1.0f - this.w3vr_hud_editor_target_scale);
+    if (
+      now >= this.w3vr_hud_editor_layout_drift_log_next &&
+      (AbsF(root.GetX() - expectedX) > 2.0f ||
+       AbsF(root.GetY() - expectedY) > 2.0f)
+    )
+    {
+      W3VRHudEditor_Trace(
+        "SUBTITLE_ROOT_DRIFT actual=" + FloatToString(root.GetX()) +
+        "," + FloatToString(root.GetY()) +
+        " expected=" + FloatToString(expectedX) +
+        "," + FloatToString(expectedY) +
+        " active=" + IntToString(this.w3vr_hud_editor_active_subtitle_ids.Size()),
+        false
+      );
+      this.w3vr_hud_editor_layout_drift_log_next = now + 1.0f;
+    }
+  }
+  this.W3VRHudEditorApplySubtitleRootLayout();
+}
+
+@wrapMethod(CR4HudModuleSubtitles)
+function OnSubtitleAdded(
+  id: int,
+  speakerNameDisplayText: string,
+  htmlString: string,
+  alternativeUI: bool
+)
+{
+  var root: CScriptedFlashSprite;
+
+  if (this.w3vr_hud_editor_managed)
+  {
+    // [FIX:SUBTITLE-FLASH-SCALE-TARGET V1563] In the actual startup.bundle
+    // HudModuleBase.fadeIn() tweens scaleX/Y to its public desiredScale over
+    // 0.6 s when ShowElement(true) runs inside addSubtitle(). The editor has
+    // already scaled this root, but Flash still targets 1. Match the target
+    // to the current Flash scale before addSubtitle starts the tween. Read
+    // scaleX through Flash so both operands use the same AS3 scale units.
+    this.W3VRHudEditorApplySubtitleRootLayout();
+    root = this.GetModuleFlash();
+    if (root)
+    {
+      root.SetMemberFlashNumber(
+        "desiredScale", root.GetMemberFlashNumber("scaleX")
+      );
+    }
+  }
+  wrappedMethod(id, speakerNameDisplayText, htmlString, alternativeUI);
+  this.W3VRHudEditorScheduleAddedSubtitleLayoutRefresh(id);
+}
+
+@wrapMethod(CR4HudModuleSubtitles)
+function OnSubtitleRemoved(id: int)
+{
+  var i: int;
+
+  wrappedMethod(id);
+  for (i = 0; i < this.w3vr_hud_editor_active_subtitle_ids.Size(); i += 1)
+  {
+    if (this.w3vr_hud_editor_active_subtitle_ids[i] == id)
+    {
+      this.w3vr_hud_editor_active_subtitle_ids.Erase(i);
+      break;
+    }
+  }
 }
 
 @addMethod(CR4HudModuleDialog)

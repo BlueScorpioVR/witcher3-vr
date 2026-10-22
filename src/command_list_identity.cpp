@@ -37,13 +37,13 @@ Resolution resolve(IUnknown* input, ClassifyOwner classify) noexcept {
     IUnknown* current = input;
     for (;;) {
         const Owner owner = classify(current);
-        if (owner == Owner::Native) {
+        if (owner == Owner::Native || owner == Owner::RenderDoc) {
             ID3D12GraphicsCommandList* graphics{};
             const HRESULT hr = query(current, __uuidof(ID3D12GraphicsCommandList),
                 reinterpret_cast<void**>(&graphics));
             if (SUCCEEDED(hr) && graphics != nullptr &&
-                classify(graphics) == Owner::Native) {
-                result.native = graphics;
+                classify(graphics) == owner) {
+                result.endpoint = graphics;
             } else {
                 result.failure = Failure::Interface;
             }

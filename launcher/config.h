@@ -31,6 +31,31 @@ enum class FrameGenerationBackend {
     Off,
     FidelityFx,
     Nvidia,
+    NvidiaNew,
+    Fsr3,
+    Count,
+};
+
+enum class OfxrNvidiaPreset {
+    Fast,
+    Medium,
+    Slow,
+    Count,
+};
+
+enum class OfxrNvidiaInputScale {
+    Half,
+    ThreeQuarter,
+    Full,
+    Count,
+};
+
+enum class OfxrOverlayPosition {
+    Off,
+    UpperLeft,
+    UpperRight,
+    LowerLeft,
+    LowerRight,
     Count,
 };
 
@@ -39,8 +64,6 @@ enum class IntegrationMode {
     Optiscaler,
     Reshade,
     OptiscalerReshade,
-    OptiscalerDlss5,
-    ReshadeDlss5,
     Count,
 };
 
@@ -76,11 +99,21 @@ struct LauncherState {
     IntegrationMode integration_mode{IntegrationMode::Off};
     FrameGenerationBackend frame_generation_backend{
         FrameGenerationBackend::Off};
+    OfxrNvidiaPreset ofxr_nvidia_preset{OfxrNvidiaPreset::Medium};
+    OfxrNvidiaInputScale ofxr_nvidia_input_scale{
+        OfxrNvidiaInputScale::Half};
+    bool ofxr_nvidia_bidirectional{};
+    OfxrOverlayPosition ofxr_overlay_position{
+        OfxrOverlayPosition::UpperRight};
+    bool ofxr_logging{};
+    bool optiscaler_logging{};
     int hud_convergence_delta{-20};
+    bool hud_controller_locked{};
     float presentation_scale{1.0f};
     float world_detail_range{1.0f};
     float menu_scale{0.85f};
     float cinema_scale{0.9f};
+    float cinema_height{-0.20f};
     CinemaAspect cinema_aspect{CinemaAspect::FiveFour};
     float cinema_hud_scale{1.30f};
     int cinema_hud_convergence_offset{};
@@ -89,6 +122,9 @@ struct LauncherState {
     float near_view{0.75f};
     bool vertical_pitch_enabled{};
     bool cinema_full_vr{true};
+    bool cinema_fullscreen{};
+    float cinema_fullscreen_zoom{1.35f};
+    float cinema_pitch_lowering{0.15f};
     bool steady_icons{};
     bool first_person_gamepad_head_follow{};
     int first_person_snap_turn_degrees{45};
@@ -116,6 +152,7 @@ struct ConfigPaths {
     std::filesystem::path ofxr_bridge_ini;
     std::filesystem::path game_settings;
     std::filesystem::path game_executable;
+    std::filesystem::path optiscaler_ini;
 };
 
 struct LoadResult {
@@ -157,7 +194,6 @@ const char* IntegrationModeIniValue(IntegrationMode mode) noexcept;
 IntegrationMode ParseIntegrationMode(const std::string& value) noexcept;
 bool IntegrationModeUsesOptiscaler(IntegrationMode mode) noexcept;
 bool IntegrationModeUsesReshade(IntegrationMode mode) noexcept;
-bool IntegrationModeUsesDlss5(IntegrationMode mode) noexcept;
 std::optional<int> DlssNearSquareCompatibleWidth(const LauncherState& state);
 int CinemaHudConvergenceShift(float hud_scale, int offset);
 int FullVrHudConvergenceShift(float hud_scale, int offset);
@@ -172,6 +208,9 @@ CompatibilityWarnings InspectCompatibilitySettings(const ConfigPaths& paths);
 bool BuildUpdatedDocuments(const ConfigPaths& paths, const LauncherState& state,
     IniDocument& vr_ini, IniDocument& game_settings, std::wstring& error);
 bool BuildUpdatedOptiscalerDocument(const ConfigPaths& paths,
+    const LauncherState& state, IniDocument& optiscaler,
+    std::wstring& error);
+bool BuildUpdatedOptiscalerIniDocument(const ConfigPaths& paths,
     const LauncherState& state, IniDocument& optiscaler,
     std::wstring& error);
 bool BuildUpdatedOfxrDocument(const ConfigPaths& paths,

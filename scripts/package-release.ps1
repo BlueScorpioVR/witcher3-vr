@@ -50,18 +50,11 @@ if ([string]::IsNullOrWhiteSpace($OfxrLayer)) {
     $OfxrLayer = [System.IO.Path]::GetFullPath($OfxrLayer)
 }
 $optiscalerDllDefault = Join-Path $repositoryRoot `
-    'runtime/witcher3vr-optiscaler-reference/OptiScaler.dll'
+    'runtime/witcher3vr-optiscaler-dlss5-reference/OptiScaler.dll'
 if ([string]::IsNullOrWhiteSpace($OptiScalerDll)) {
     $OptiScalerDll = $optiscalerDllDefault
 } else {
     $OptiScalerDll = [System.IO.Path]::GetFullPath($OptiScalerDll)
-}
-$optiscalerIniDefault = Join-Path $repositoryRoot `
-    'runtime/witcher3vr-optiscaler-reference/OptiScaler.ini'
-if ([string]::IsNullOrWhiteSpace($OptiScalerIni)) {
-    $OptiScalerIni = $optiscalerIniDefault
-} else {
-    $OptiScalerIni = [System.IO.Path]::GetFullPath($OptiScalerIni)
 }
 $optiscalerLicenseDefault = Join-Path $repositoryRoot `
     'external/optiscaler/LICENSE'
@@ -69,6 +62,9 @@ if ([string]::IsNullOrWhiteSpace($OptiScalerLicense)) {
     $OptiScalerLicense = $optiscalerLicenseDefault
 } else {
     $OptiScalerLicense = [System.IO.Path]::GetFullPath($OptiScalerLicense)
+}
+if ([string]::IsNullOrWhiteSpace($OptiScalerIni)) {
+    $OptiScalerIni = Join-Path $repositoryRoot 'support/OptiScaler.release.ini'
 }
 $renderDocDllDefault = Join-Path $repositoryRoot `
     'external/renderdoc/renderdoc.dll'
@@ -106,7 +102,6 @@ $thirdPartyNotices = Join-Path $repositoryRoot 'THIRD_PARTY_NOTICES.md'
 $releaseNotes = Join-Path $repositoryRoot 'RELEASE_NOTES.md'
 $componentLicenses = Join-Path $repositoryRoot 'licenses'
 $reshadeReference = Join-Path $repositoryRoot 'runtime/witcher3vr-reshade-reference'
-$reshadeDlss5Reference = Join-Path $repositoryRoot 'runtime/witcher3vr-reshade-dlss5-reference'
 $modifiedOptiscalerReference = Join-Path $repositoryRoot 'runtime/witcher3vr-optiscaler-dlss5-reference'
 $stateBridgeRoot = Join-Path $repositoryRoot 'support/modWitcher3VRStateBridge'
 $stateBridgeScript = Join-Path $stateBridgeRoot `
@@ -170,13 +165,11 @@ foreach ($requiredFile in @(
         (Join-Path $componentLicenses 'OFXR-LGPL-3.0.txt'),
         (Join-Path $componentLicenses 'AMD-FidelityFX-MIT.txt'),
         (Join-Path $componentLicenses 'NVIDIA-Optical-Flow-Headers.txt'),
-        (Join-Path $componentLicenses 'RenoDX-MIT.txt'),
         (Join-Path $componentLicenses 'Dear-ImGui-MIT.txt'),
         (Join-Path $reshadeReference 'ReShade64.dll'),
-        (Join-Path $reshadeDlss5Reference 'renodx-dlss5-v2.5.addon64'),
-        (Join-Path $modifiedOptiscalerReference 'OptiScaler.dll'),
-        (Join-Path $modifiedOptiscalerReference 'OptiScaler.ini'),
         (Join-Path $modifiedOptiscalerReference 'nvngx.dll_dlssnr.dll'),
+        (Join-Path $modifiedOptiscalerReference 'amd_fidelityfx_framegeneration_dx12.dll'),
+        (Join-Path $modifiedOptiscalerReference 'ofxr_amd_fidelityfx_framegeneration_dx12.dll'),
         $stateBridgeScript,
         $firstPersonAimScript,
         $firstPersonHeadScript,
@@ -231,25 +224,22 @@ try {
 
     # Reference sources only: the launcher creates active root aliases.
     $modReferenceStage = Join-Path $binaryStage 'witcher3vr-mod-reference'
-    $canonicalReferenceStage = Join-Path $binaryStage 'witcher3vr-optiscaler-reference'
     $modifiedReferenceStage = Join-Path $binaryStage 'witcher3vr-optiscaler-dlss5-reference'
     $reshadeReferenceStage = Join-Path $binaryStage 'witcher3vr-reshade-reference'
-    $addonReferenceStage = Join-Path $binaryStage 'witcher3vr-reshade-dlss5-reference'
     $dlss5ReferenceStage = Join-Path $binaryStage 'witcher3vr-dlss5-reference'
-    foreach ($directory in @($modReferenceStage, $canonicalReferenceStage,
+    foreach ($directory in @($modReferenceStage,
             $modifiedReferenceStage, $reshadeReferenceStage,
-            $addonReferenceStage, $dlss5ReferenceStage)) {
+            $dlss5ReferenceStage)) {
         New-Item -ItemType Directory -Path $directory | Out-Null
     }
     Copy-Item -LiteralPath $releaseDll -Destination (Join-Path $modReferenceStage 'dxgi.dll')
-    Copy-Item -LiteralPath $OptiScalerDll -Destination (Join-Path $canonicalReferenceStage 'OptiScaler.dll')
-    Copy-Item -LiteralPath $OptiScalerIni -Destination (Join-Path $canonicalReferenceStage 'OptiScaler.ini')
     Copy-Item -LiteralPath $optiscalerBridgeIni -Destination $binaryStage
     Copy-Item -LiteralPath (Join-Path $reshadeReference 'ReShade64.dll') -Destination $reshadeReferenceStage
-    foreach ($name in @('renodx-dlss5-v2.5.addon64')) {
-        Copy-Item -LiteralPath (Join-Path $reshadeDlss5Reference $name) -Destination $addonReferenceStage
-    }
-    foreach ($name in @('OptiScaler.dll', 'OptiScaler.ini', 'nvngx.dll_dlssnr.dll')) {
+    Copy-Item -LiteralPath $OptiScalerDll -Destination (Join-Path $modifiedReferenceStage 'OptiScaler.dll')
+    Copy-Item -LiteralPath $OptiScalerIni -Destination (Join-Path $binaryStage 'OptiScaler.ini')
+    foreach ($name in @('nvngx.dll_dlssnr.dll',
+            'amd_fidelityfx_framegeneration_dx12.dll',
+            'ofxr_amd_fidelityfx_framegeneration_dx12.dll')) {
         Copy-Item -LiteralPath (Join-Path $modifiedOptiscalerReference $name) -Destination $modifiedReferenceStage
     }
     # Never read or copy a private NVIDIA source: the DLSS5 folder stays empty.
@@ -289,7 +279,7 @@ try {
             'One optimized DLL for gaming and diagnostics.',
             'Use Diagnostic Logging in the launcher when support logs are needed.',
             'Start Witcher3VRLauncher.exe and Save before launching the game.',
-            'DLSS5 files are not bundled. Put only nvngx_dlss.dll, nvngx_dlssg.dll and nvngx_dlssnr.dll from your separately obtained package in bin/x64_dx12/witcher3vr-dlss5-reference.'
+            'DLSS5 files are not bundled. Put nvngx_dlssnr.dll from your separately obtained package in bin/x64_dx12/witcher3vr-dlss5-reference.'
         ) -Encoding utf8
 
     Copy-Item -LiteralPath $optiscalerPayload -Destination $documentationStage
@@ -355,8 +345,6 @@ try {
         (Get-FileHash -LiteralPath $ofxrIni -Algorithm SHA256).Hash
     $optiscalerDllHash =
         (Get-FileHash -LiteralPath $OptiScalerDll -Algorithm SHA256).Hash
-    $optiscalerIniHash =
-        (Get-FileHash -LiteralPath $OptiScalerIni -Algorithm SHA256).Hash
     $optiscalerBridgeIniHash =
         (Get-FileHash -LiteralPath $optiscalerBridgeIni -Algorithm SHA256).Hash
     $renderDocDllHash =
@@ -389,7 +377,6 @@ try {
     $manifestLines += "ofxr_manifest.sha256=$ofxrManifestHash"
     $manifestLines += "ofxr_ini.sha256=$ofxrIniHash"
     $manifestLines += "optiscaler.sha256=$optiscalerDllHash"
-    $manifestLines += "optiscaler_ini.sha256=$optiscalerIniHash"
     $manifestLines += "optiscaler_bridge_ini.sha256=$optiscalerBridgeIniHash"
     $manifestLines += "renderdoc_custom_v1273.sha256=$renderDocDllHash"
     $manifestLines += "movement_dlc_bundle.sha256=$movementDlcBundleHash"

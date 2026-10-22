@@ -13,6 +13,19 @@ struct EulerDegrees {
     float yaw{};
 };
 
+inline EulerDegrees marker_hmd_rotation(
+    bool fixed_hud,
+    const EulerDegrees& scaled_hmd,
+    float vertical_gain) {
+    if (fixed_hud) {
+        return {};
+    }
+    return {
+        scaled_hmd.roll,
+        scaled_hmd.pitch * vertical_gain,
+        scaled_hmd.yaw};
+}
+
 inline bool recentered_pitch_degrees(
     float pitch,
     float reference_pitch,

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(witcher3vr VERSION 0.1535.0 LANGUAGES C CXX)
+project(witcher3vr VERSION 0.1581.0 LANGUAGES C CXX)
 
 include(CTest)
 
@@ -66,6 +66,8 @@ target_link_libraries(witcher3vr_dxgi PRIVATE
     minhook
     d3d12
     dxguid
+    user32
+    gdi32
     # WaitOnAddress/WakeByAddressAll for the engine pair producer barrier.
     Synchronization
 )
@@ -73,6 +75,18 @@ set_target_properties(witcher3vr_dxgi PROPERTIES OUTPUT_NAME dxgi)
 target_link_options(witcher3vr_dxgi PRIVATE /MAP)
 
 if(BUILD_TESTING)
+    add_executable(w3vr_swapchain_identity_tests tests/swapchain_identity_tests.cpp)
+    target_include_directories(w3vr_swapchain_identity_tests PRIVATE src)
+    target_compile_definitions(w3vr_swapchain_identity_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_link_libraries(w3vr_swapchain_identity_tests PRIVATE d3d12 dxgi dxguid user32)
+    add_test(NAME renderer_present_swapchain_identity COMMAND w3vr_swapchain_identity_tests)
+    add_executable(w3vr_hud_producer_publication_tests tests/hud_producer_publication_tests.cpp)
+    target_include_directories(w3vr_hud_producer_publication_tests PRIVATE src)
+    add_test(NAME hud_producer_publication_order COMMAND w3vr_hud_producer_publication_tests)
+    add_executable(w3vr_minimal_xr_disk_log_tests tests/minimal_xr_disk_log_tests.cpp)
+    target_include_directories(w3vr_minimal_xr_disk_log_tests PRIVATE src)
+    target_compile_definitions(w3vr_minimal_xr_disk_log_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    add_test(NAME minimal_xr_log_survives_termination COMMAND w3vr_minimal_xr_disk_log_tests)
     add_executable(w3vr_command_list_identity_tests
         tests/command_list_identity_tests.cpp
         src/command_list_identity.cpp)
@@ -385,6 +399,13 @@ if(BUILD_TESTING)
     )
 
     add_test(
+        NAME hud_editor_subtitle_live_refresh_contract
+        COMMAND "${CMAKE_COMMAND}"
+            "-DHUD_EDITOR_SCRIPT=${CMAKE_CURRENT_SOURCE_DIR}/support/modWitcher3VRHUDEditor/content/scripts/local/witcher3vr_hud_editor/hud_editor.ws"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/hud_editor_subtitle_live_refresh_contract.cmake"
+    )
+
+    add_test(
         NAME renderer_mode3_projection_transition_contract
         COMMAND "${CMAKE_COMMAND}"
             "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
@@ -396,6 +417,13 @@ if(BUILD_TESTING)
         COMMAND "${CMAKE_COMMAND}"
             "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/mode3_hud_projection_lifecycle_contract.cmake"
+    )
+
+    add_test(
+        NAME renderer_cinema_hud_freshness_contract
+        COMMAND "${CMAKE_COMMAND}"
+            "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/cinema_hud_freshness_contract.cmake"
     )
 
     add_test(
@@ -599,6 +627,27 @@ if(BUILD_TESTING)
     )
 
     add_test(
+        NAME renderer_f10_key_edge_contract
+        COMMAND "${CMAKE_COMMAND}"
+            "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/f10_key_edge_contract.cmake"
+    )
+
+    add_test(
+        NAME renderer_f9_key_edge_contract
+        COMMAND "${CMAKE_COMMAND}"
+            "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/f9_key_edge_contract.cmake"
+    )
+
+    add_test(
+        NAME renderer_all_keybind_edges_contract
+        COMMAND "${CMAKE_COMMAND}"
+            "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/all_keybind_edges_contract.cmake"
+    )
+
+    add_test(
         NAME renderer_strict_stereo_hud_accepted_predecessor_join_contract
         COMMAND "${CMAKE_COMMAND}"
             "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
@@ -737,17 +786,24 @@ if(BUILD_TESTING)
     )
 
     add_test(
-        NAME launcher_v23032_exact_composition_contract
+        NAME renderer_v1538_hud_consumer_retirement_contract
         COMMAND "${CMAKE_COMMAND}"
-            "-DSOURCE_ROOT=${CMAKE_CURRENT_SOURCE_DIR}"
-            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/launcher_v23032_exact_composition_contract.cmake"
+            "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/hud_consumer_retirement_contract.cmake"
     )
 
     add_test(
-        NAME launcher_v23032_dlss5_payload_whitelist_contract
+        NAME renderer_v1543_renderdoc_resource_release_isolation_contract
+        COMMAND "${CMAKE_COMMAND}"
+            "-DDXGI_PROXY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/dxgi_proxy.cpp"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/renderdoc_resource_release_isolation_contract.cmake"
+    )
+
+    add_test(
+        NAME launcher_v1566_four_integration_modes_contract
         COMMAND "${CMAKE_COMMAND}"
             "-DSOURCE_ROOT=${CMAKE_CURRENT_SOURCE_DIR}"
-            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/launcher_v23032_dlss5_payload_whitelist_contract.cmake"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/launcher_v1566_four_integration_modes_contract.cmake"
     )
 
 endif()

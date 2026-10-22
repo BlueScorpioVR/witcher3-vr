@@ -93,10 +93,10 @@ int wmain(int argc, wchar_t** argv) try {
     const std::array<IUnknown*, 3> inputs{native.Get(), proxy.Get(), &outer};
     for (uint32_t index = 0; index < inputs.size(); ++index) {
         const auto result = resolve(inputs[index], classify);
-        require(result.native == native.Get() && result.wrappers == index &&
+        require(result.endpoint == native.Get() && result.wrappers == index &&
             result.failure == Failure::None, "native identity/depth mismatch");
         std::printf("PASS identity case=%u depth=%u native=%p\n",
-            index, result.wrappers, result.native);
+            index, result.wrappers, result.endpoint);
     }
     require(outer.refs == 1, "outer COM ownership changed");
 
@@ -120,15 +120,15 @@ int wmain(int argc, wchar_t** argv) try {
     memcpy(memory, pattern.data(), sizeof(pattern));
     upload->Unmap(0, nullptr);
     const auto resolved = resolve(&outer, classify);
-    require(resolved.native != nullptr, "nested recording identity");
-    resolved.native->CopyBufferRegion(readback.Get(), 0, upload.Get(), 0, sizeof(pattern));
-    check(resolved.native->Close(), "close");
+    require(resolved.endpoint != nullptr, "nested recording identity");
+    resolved.endpoint->CopyBufferRegion(readback.Get(), 0, upload.Get(), 0, sizeof(pattern));
+    check(resolved.endpoint->Close(), "close");
     D3D12_COMMAND_QUEUE_DESC queue_desc{};
     ComPtr<ID3D12CommandQueue> queue_proxy, queue;
     check(device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&queue_proxy)), "queue");
     check(queue_proxy->QueryInterface(kReShadeBase,
         reinterpret_cast<void**>(queue.GetAddressOf())), "native queue");
-    ID3D12CommandList* lists[]{resolved.native};
+    ID3D12CommandList* lists[]{resolved.endpoint};
     queue->ExecuteCommandLists(1, lists);
     ComPtr<ID3D12Fence> fence;
     check(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)), "fence");

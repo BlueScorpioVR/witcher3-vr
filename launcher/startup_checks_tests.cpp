@@ -31,6 +31,8 @@ int wmain() {
         Touch(root / L"DXGI.DLL");
         Touch(root / L"OptiScaler.dll");
         Touch(root / L"nvngx.dll_dlssnr.dll");
+        Touch(root / L"amd_fidelityfx_framegeneration_dx12.dll");
+        Touch(root / L"ofxr_amd_fidelityfx_framegeneration_dx12.dll");
         Touch(root / L"renderdoc.dll");
         // [FIX:OFXR-STARTUP-WHITELIST V1512 2/2]
         Touch(root / L"XR_APILAYER_XRFrameBridge_diagnostic.dll");
@@ -50,6 +52,11 @@ int wmain() {
             "OFXR layer DLL matching is not case-insensitive");
         Require(w3vr::IsKnownDx12Dll(L"NVNGX.DLL_DLSSNR.DLL"),
             "managed DLSSNR DLL matching is not case-insensitive");
+        Require(w3vr::IsKnownDx12Dll(
+                L"AMD_FIDELITYFX_FRAMEGENERATION_DX12.DLL") &&
+                w3vr::IsKnownDx12Dll(
+                    L"OFXR_AMD_FIDELITYFX_FRAMEGENERATION_DX12.DLL"),
+            "managed FSR frame-generation DLLs were not allowlisted");
         Require(!w3vr::IsKnownDx12Dll(L"version.dll"),
             "foreign proxy DLL was incorrectly allowlisted");
 
@@ -62,7 +69,7 @@ int wmain() {
         const w3vr::ConfigPaths paths{
             root, root / L"witcher3vr.ini", root / L"optiscaler_bridge.ini",
             root / L"ofxr_bridge.ini", root / L"dx12user.settings",
-            root / L"witcher3.exe"};
+            root / L"witcher3.exe", root / L"OptiScaler.ini"};
         {
             std::ofstream ini(paths.vr_ini, std::ios::binary | std::ios::trunc);
             ini << "[meta]\r\nconfig_version=16\r\n";

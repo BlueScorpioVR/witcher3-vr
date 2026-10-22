@@ -70,7 +70,7 @@ bool BuildEnabledOfxrLaunchEnvironment(
         return false;
     }
 
-    // [FIX:OFXR-ROOT-LAYOUT V1510 1/3] XRFG-V040 resolves its configuration
+    // [FIX:OFXR-ROOT-LAYOUT V1510 1/3] OFXR V093 resolves its configuration
     // beside the loaded API-layer DLL. Keep the manifest, DLL and INI beside
     // the launcher so one root of the game owns both configuration and launch.
     const auto layer_directory = launcher_directory;
@@ -86,8 +86,19 @@ bool BuildEnabledOfxrLaunchEnvironment(
             (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
             error = L"OFXR Bridge is selected, but this file is missing:\n" +
                 path.wstring() +
-                L"\n\nInstall the XRFG-V040 bridge files beside the launcher, "
+                L"\n\nInstall the OFXR V093 bridge files beside the launcher, "
                 L"or select Off.";
+            return false;
+        }
+    }
+    if (backend == FrameGenerationBackend::Fsr3) {
+        const auto fsr_runtime = layer_directory /
+            L"ofxr_amd_fidelityfx_framegeneration_dx12.dll";
+        const DWORD attributes = GetFileAttributesW(fsr_runtime.c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES ||
+            (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+            error = L"FSR 3.1 VR Framegen is selected, but its OFXR runtime "
+                L"is missing:\n" + fsr_runtime.wstring();
             return false;
         }
     }
@@ -111,7 +122,8 @@ bool BuildEnabledOfxrLaunchEnvironment(
     entries.push_back(L"XR_API_LAYER_PATH=" + layer_directory.wstring());
     entries.emplace_back(
         L"XR_ENABLE_API_LAYERS=XR_APILAYER_XRFrameBridge_diagnostic");
-    // XRFG-V040 reads [ofxr] backend from the root ofxr_bridge.ini. The
+    // XRFG-V040 reads [ofxr] backend from the root ofxr_bridge.ini. OFXR V093
+    // extends the same root-sidecar contract to its complete settings. The
     // obsolete XRFG_FLOW_BACKEND variable is deliberately scrubbed from the
     // inherited environment by ManagedEntry and is never recreated here.
     std::sort(entries.begin(), entries.end(),

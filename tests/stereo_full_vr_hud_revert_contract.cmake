@@ -7,10 +7,13 @@ file(READ "${DXGI_PROXY_SOURCE}" source)
 foreach(required_fragment IN ITEMS
         "build=V1511 base=V1509_witcher_sense_aligned_extent"
         "V1479 stereo_full_vr_hud=V1476_strict_predecessor_freshness"
-        "bool mode3_retained_hud_pair_ready_for_active_route()"
+        "bool mode3_retained_hud_pair_ready_for_active_route("
         "if (!mode3_strict_stereo_submitted_hud_join_active()) {"
         "return mode3_early_hud_pair_ready();"
-        "strict_stereo_retained_hud_pair_fresh("
+        "const uint64_t target_pair = preparing_scene_draw"
+        "preparing_scene_draw ? target_pair : 0"
+        "get_mode3_early_hud_pair("
+        "selected_pair == target_pair"
         "g_mode3_strict_hud_target_generation.load("
         "g_mode3_strict_hud_target_pair.load(")
     string(FIND "${source}" "${required_fragment}" fragment_index)
@@ -31,4 +34,12 @@ foreach(retired_fragment IN ITEMS
     endif()
 endforeach()
 
-message(STATUS "V1479 V1476 HUD freshness restoration verified")
+string(FIND "${source}"
+    "strict_stereo_retained_hud_pair_fresh(\n            generation"
+    retired_moving_head_gate)
+if(NOT retired_moving_head_gate EQUAL -1)
+    message(FATAL_ERROR
+        "The moving accepted-head freshness gate survived V1556")
+endif()
+
+message(STATUS "V1556 exact retained-HUD source readiness verified")
